@@ -1,136 +1,168 @@
 # dolbytool
 
-杜比全景声视频素材工具，Python + PySide6，五类产物分开输出
+专为杜比全景声（Dolby Atmos）与多声道音频制作设计的视频素材生成工具。基于 Python (PySide6) 与 Node/Chromium 无头渲染器构建，支持一键将音频与歌词素材批量转化为多种可视化视频与音频分轨文件。
 
-- 分轨 WAV: 5.1 母带输出 surround / center / lfe / front / front_no_center / downmix / low / high，杜比全景声（E-AC-3 JOC）先渲染为 5.1.4，再多出 height / height_front / height_rear 三条顶部分轨；全景声还可输出带对象元数据的 ADM BWF，详见下文
-- 渐变图 PNG: 封面 k-means 取主色作上色，同色相压暗作下色，ffmpeg maskedmerge + smoothstep 生成
-- 波形滚动视频 MP4: 沿用原脚本（compand 压缩放大，左右声道上下两条），深色底 + 冷银色波形，红色播放头居中，播放头左侧已播放部分保持原色，右侧未播放部分向背景色淡出（亮度可调，默认 35%）；波形长图预先补好两侧留白，只解码一次，每帧按帧号裁切，3 分钟的歌约 8 秒
-- 单行字幕视频 WebM: TTML 逐字歌词交给 AMLL（applemusic-like-lyrics）渲染，无头 Chromium 逐帧截透明画面，编码为 VP9 + alpha，详见下文
-- 声场视频 WebM: 全景声动态对象画成房间里的小球，头模居中，按 OAMD 位置移动、按对象电平显隐，可按音轨分别输出，three.js 逐帧渲染，同样是 VP9 + alpha，详见下文
+---
 
-## 运行
+## 产物概览
 
-界面使用系统 Qt（原生 Breeze 风格与 KDE 文件对话框），PySide6 来自官方源而不是 pip
+工具支持独立勾选并导出以下五类素材文件：
 
+| 产物类别 | 输出文件命名 | 格式 / 规格 | 说明与用途 |
+| :--- | :--- | :--- | :--- |
+| **音频分轨 (Stems)** | `<音频名>_<stem>.wav` | 24-bit WAV | 按声道布局提取或分离出的独立音轨（中置、环绕、顶部、分频等） |
+| **ADM BWF 元数据** | `<音频名>_adm.wav` | 24-bit BWF / BW64 | 符合 ITU-R BS.2076-2 标准，包含完整对象轨迹与坐标信息，可导入 DAW 或查看器 |
+| **封面渐变背景** | `<音频名>_gradient.png` | PNG | 提取封面主色调并向下压暗过渡，作为视频背景底图 |
+| **滚动波形视频** | `<音轨名>.mp4` | H.264 / HEVC MP4 | 左右声道上下双轨水平滚动，红播放头居中，已播高亮 / 未播暗化 |
+| **逐字动态字幕** | `<音频/歌词名>_lyrics.webm` | VP9 + Alpha (透明) | 单行居中动态歌词，Apple Music 风格逐字高亮与平滑淡入淡出 |
+| **3D 声场可视化** | `<音轨名>_soundfield.webm` | VP9 + Alpha (透明) | 3D 空间内实时展示全景声动态对象位置、电平与运动轨迹 |
+
+---
+
+## 核心功能
+
+### 1. 杜比全景声解码与分轨提取
+- **自主软解**：直接识别 E-AC-3 JOC（Dolby Digital Plus + Dolby Atmos）音频流，严格遵循 ETSI TS 103 420 规范完成对象重构与 5.1.4 声道渲染，不依赖杜比官方闭源组件。
+- **精确对齐与相位校正**：
+  - 在 64 带 QMF 域重构动态对象，自动补偿编码端对 Ls/Rs 施加的 90° 相移，保持原始混音相位一致性。
+  - LFE 低频声道直通，与主声道天然对齐；严格基于容器编辑列表（Edit List）裁齐时间轴，消除编码预热帧延迟。
+- **多声道与立体声分轨**：
+  - **Atmos / 5.1 输入**：可提取 `surround`（环绕）、`center`（中置/人声）、`lfe`（低频）、`front`（前置左右）、`front_no_center`（频谱抵消中置的前置）、`height`（顶部缩混）、`height_front` / `height_rear`（顶部前后对）、`downmix`（立体声缩混）、`low` / `high`（分频高低音）。
+  - **立体声输入**：支持 Mid/Side 分离、中置提取与频谱伴奏分离。
+- **ADM BWF 母带导出**：
+  - 单次解码同时生成带 `axml`（BS.2076-2）与 `chna` 块的标准 ADM 文件，床声道记录为 DirectSpeakers，ISF 与动态对象记录为 Objects。
+  - 超过 4 GiB 时自动无缝转为 64 位 RF64/BW64 格式。
+- **高效并发与内存映射**：
+  - 单遍流式解析元数据，多工作进程切段并行重建 QMF 滤波器状态；
+  - 5.1.4 音频数据直接通过内存映射（mmap）缓冲供给下游分轨，无需多次落地中间临时 WAV。
+
+### 2. 封面渐变图生成
+- 基于 k-means 聚类算法自动从封面图片中提取最具代表性的主色作为上部基色。
+- 在保持相同色相的前提下平滑压暗作为底部基色，通过 FFmpeg `maskedmerge` + `smoothstep` 渲染出平滑过渡的高清渐变背景。
+
+### 3. 滚动波形视频
+- 左右声道分置上下两轨，经过动态范围压缩放大（compand）以突出波形细节。
+- 深色背景搭配冷银色波形，中央固定红色播放头。播放头左侧（已播放部分）保持原始高亮，右侧（未播放部分）向背景色平滑暗化（默认保留 35% 亮度，支持自定义）。
+- **两阶段渲染加速**：单次解码生成完整波形长图并预补两侧留白，随后按帧号窗口滑动裁剪，编码耗时极低。
+- 支持 H.264 NVENC / HEVC NVENC / libx264 编码器，硬件编码不可用时自动回退至 CPU 编码。
+
+### 4. 逐字动态歌词视频
+- **单行居中呈现**：基于 AMLL（applemusic-like-lyrics）渲染引擎，歌词单行固定在画面正中央；换行时平滑淡入淡出，新行在首字起唱时刚好完全显现。
+- **多字体回退机制**：支持配置字体优先级列表，每个文字按序选用首个包含对应字形的字体（可轻松实现中西文分流排版），列表为空时回退至系统无衬线字体。
+- **翻译与样式微调**：翻译行亮度支持单独调节（默认 70% 避免过淡）；自动过滤音译与背景人声，保持视觉聚焦。
+- **确定性并行渲染**：
+  - 无头 Chromium 通过 CDP `BeginFrame` 确定性时钟驱动，多次输出像素级完全一致；
+  - 时间轴切段分配给多个无头浏览器实例并行渲染并无损拼接；
+  - 前奏、间奏等无歌词区间自动复用透明关键帧，跳过无效渲染。
+- 输出带 Alpha 通道的 VP9 WebM 视频，可直接拖入剪辑轨道透明叠加。
+
+### 5. 3D 声场轨迹可视化视频
+- **空间声场还原**：在 5.8 × 3.1 × 5.8 的 3D 半透明房间与网格地表内，将 OAMD 动态对象映射为发光小球，中央呈现听者头部模型。
+- **电平与位置联动**：小球实时随三维坐标平滑运动，亮度随 JOC 重建后的真实电平增益变化，低于静音门限（默认 -90 dBFS）自动平滑淡出。
+- **音轨联动暗化**：支持按指定分轨（如环绕、中置、顶部等）独立生成声场视频。在分轨模式下，未分配给该分轨扬声器的对象会按能量占比自动降低亮度（默认降至 25% 或完全隐藏），直观呈现各声道的声音分布。
+- **多视角与自定义模型**：
+  - 支持等轴测（Isometric，默认）、俯视（Top）、低角仰视（Angle）三种预设摄像机机位。
+  - 支持导入自定义 `.glb` 听者头模（自动对齐朝向与着色），未指定时使用内置头部剪影。
+- **GPU 硬件加速**：基于 Three.js + ANGLE Vulkan 驱动独显渲染，无独立显卡时自动切换至 SwiftShader。
+
+---
+
+## 环境准备与依赖
+
+### 1. 系统依赖
+- **Python**：>= 3.11
+- **FFmpeg**：需包含 `libvpx-vp9` 编码器支持（若需硬件加速建议启用 `h264_nvenc` / `hevc_nvenc`）
+- **Node.js**（>= 18）或 **Bun**
+
+### 2. Python 环境配置
+PySide6 及其他 Python 依赖已配置在 `pyproject.toml` 中，推荐直接使用 `uv` 管理：
 ```bash
-sudo pacman -S --needed pyside6 ffmpeg
+# 同步并安装项目依赖（含 PyPI PySide6）
+uv sync
+
+# 或在已有虚拟环境中安装
+uv pip install -e .
 ```
 
+### 3. 构建前端渲染器
+字幕与声场渲染器依赖前端模块，首次使用前需编译打包：
 ```bash
-uv venv --system-site-packages --python /usr/bin/python3
+cd renderer
+bun install && bun run build
+cd ..
 ```
+> **说明**：首次渲染时，程序会自动下载适用的 `chrome-headless-shell` 至 `~/.cache/dolbytool/chrome`（体积约 100 MB）。
 
+---
+
+## 使用指南
+
+### 启动程序
 ```bash
+# 直接启动桌面应用
 uv run dolbytool
+
+# 启动并直接载入音频与封面文件
+uv run dolbytool /path/to/audio.m4a [/path/to/cover.jpg]
 ```
 
-可带参数直接载入: `uv run dolbytool <音频> [封面]`
+### 操作流程
+1. **载入文件**：将音频（`.m4a` / `.eac3` / `.wav` 等）或封面拖入窗口，程序会在后台自动解析音频元数据，并尝试自动读取内嵌封面及同名 `.ttml` 歌词。
+2. **选择输出项**：在左侧“输出”列表中勾选需要生成的素材类型，点击对应条目即可在右侧配置具体参数（如分辨率、帧率、字体、分轨选择等）。如果配置有误，底部会显示红色提示。
+3. **开始执行**：点击右上角 **“开始”**（快捷键 `Ctrl + Enter`）启动任务队列，按 `Esc` 可随时中止当前任务。
+4. **查看进度与结果**：底部“任务”面板会实时显示各子任务的运行阶段、用时与执行状态。任务完成后，**双击任务项即可直接在系统文件管理器中打开输出文件**。
 
-字幕视频与声场视频另需 Node（或 bun）与 ffmpeg 的 libvpx-vp9，首次使用先构建渲染器
+### 运行机制与容错
+- **非阻塞式容错**：某项任务失败不会影响其他独立任务的正常执行，所有任务结束后会统一汇总报错信息。
+- **并发调度**：波形视频编码限制最多 3 个并行，避免耗尽系统资源。
+- **按需分轨渲染**：分轨提取与全景声解码仅计算被勾选的声道组；若波形视频勾选了未导出的分轨，任务队列会自动按需补齐前置分轨步骤。
+- **原子写入保护**：所有输出文件在生成过程中均先写入同目录下的临时文件（`.<文件名>.partial.<扩展名>`），渲染完成后原子重命名替换，保证任务取消或异常时不会破坏已有成果。
+- **缓存与状态保持**：全景声对象轨迹会自动缓存至临时目录（`~/tmp/dolbytool/cache`），避免声场视频重复解码音频；窗口尺寸、参数配置与勾选状态会自动持久化保存于 `~/.config/dolbytool/dolbytool.conf`。
 
-```bash
-cd renderer && bun install && bun run build
+---
+
+## 环境变量与调试
+
+- `DOLBYTOOL_DEBUG=1`：开启调试输出。渲染器将在终端 stderr 实时打印无头浏览器各分段的渲染耗时、Webgl 渲染后端等详细诊断日志。
+
+---
+
+## 项目结构
+
+```text
+.
+├── src/dolbytool/
+│   ├── __main__.py              # 程序主入口与 Qt 本地化初始化
+│   ├── core/                    # 核心基础设施
+│   │   ├── atmos/               # 杜比全景声解码与重构 (E-AC-3 JOC, QMF, OAMD, ADM BWF)
+│   │   ├── ffmpeg.py            # FFmpeg / FFprobe 进程调用封装
+│   │   ├── pcm.py               # 磁盘映射 PCM 音频流缓冲与 WAV 读写
+│   │   ├── project.py           # 工程上下文与音轨数据模型
+│   │   ├── paths.py             # 缓存路径管理与原子写入
+│   │   └── task.py              # 任务进度与步骤模型
+│   ├── features/                # 功能模块（面板与纯逻辑解耦）
+│   │   ├── source/              # 源文件探测与内嵌素材提取
+│   │   ├── stems/               # 多声道 / 全景声分轨管线与 DSP 处理
+│   │   ├── gradient/            # 封面色彩提取与渐变底图渲染
+│   │   ├── waveform/            # 滚动波形视频生成与编码器调度
+│   │   ├── lyrics/              # 动态字幕视频调度
+│   │   └── soundfield/          # 3D 声场可视化视频调度
+│   └── ui/                      # Qt 原生图形界面
+│       ├── main_window.py       # 主窗口与任务控制流
+│       ├── outputs.py           # 输出产物勾选列表
+│       ├── tasks.py             # 任务进度监控面板
+│       └── worker.py            # 后台多线程任务队列管理
+├── renderer/                    # 前端无头渲染器
+│   ├── src/
+│   │   ├── page/                # AMLL 歌词渲染页面
+│   │   ├── soundfield/          # Three.js 3D 声场可视化场景
+│   │   └── cli/                 # CDP 浏览器控制、分段切片与 VP9 编码
+│   └── package.json
+└── pyproject.toml
 ```
 
-首次渲染会自动下载 chrome-headless-shell 到 `~/.cache/dolbytool/chrome`（约 100 MB）
+---
 
-默认编码器 H.264 NVENC，可切换 HEVC NVENC / libx264，所选硬件编码器不可用时自动改用 libx264
+## 开源许可
 
-## 用法
-
-1 选择或拖入音频（m4a / eac3 / wav 等）与封面图片，音频在后台读取，内嵌封面与同名 `.ttml` 自动填入
-2 输出目录默认为音频旁的 `<音频名>_stems`
-3 左侧“输出”清单勾选要生成的内容，点选某一项在右侧编辑它的设置；每项下方显示将生成什么，设置有问题时显示红字原因
-4 点“开始”（Ctrl+Enter）运行，Esc 取消；下方“任务”页逐项显示进度、用时与结果，双击已完成的任务打开输出文件
-5 某项失败时其余任务照常运行，结束后汇总失败原因；多个波形视频最多 3 个同时编码
-6 分轨只渲染勾选的分轨（及与它们共用增益的同组分轨）；波形视频勾选了尚未生成的分轨时会自动补做这几条
-7 字幕视频只需 TTML，不勾选其他项时可以不选音频
-8 输出先写到同目录的 `.<名>.partial.<扩展名>`，完成后再替换，取消或失败不会损坏已有文件；输出与输入同名或两项输出同名时拒绝开始
-9 参数、勾选状态与窗口布局会记住，保存在 `~/.config/dolbytool/dolbytool.conf`
-
-## 输出文件
-
-- `<音频名>_<stem>.wav`
-- `<音频名>_adm.wav`
-- `<音频名>_gradient.png`
-- `<音轨文件名>.mp4`
-- `<音频名或歌词名>_lyrics.webm`
-- `<音轨文件名>_soundfield.webm`
-
-## 杜比全景声
-
-- 音频流为 E-AC-3 JOC（ffprobe 显示 `Dolby Digital Plus + Dolby Atmos`）时自动识别，按 ETSI TS 103 420 自行解码，不依赖杜比或第三方解码器
-- ffmpeg 只负责解出 5.1 核心，之后从每帧的 EMDF 容器读取 OAMD（对象位置、增益）与 JOC 参数，在 64 带 QMF 域由 5 个主声道重建对象，再按房间立方体模型等功率平移到 5.1.4
-- 编码端对 Ls / Rs 做过 90 度相移（`joc_dmx_config_idx` 为 3），重建前在 QMF 域补回，前后声道相位与原始混音一致
-- LFE 不经过 JOC，直接取核心解码的 LFE，与主声道天然对齐
-- 输出按容器时间轴裁齐（编辑列表跳过的预热帧会去掉），与原音频、波形视频和字幕逐样本对齐
-- 立体声缩混把顶部声道按 -3 dB 并入同侧，环绕声道分轨只含地面层
-- 元数据按帧顺序解析一遍，音频按时间段分给多个进程并行重建（每段从上一帧恢复滤波器组、JOC 与增益状态），结果与单进程逐样本一致；3 分钟的歌解码约 6 秒，全部 11 条分轨加 ADM BWF 约 13 秒（20 线程）
-- 5.1.4 渲染直接写进磁盘映射缓冲交给分轨，不再写出再读回中间 WAV
-- 对象轨迹随每次解码缓存在 `~/tmp/dolbytool/cache`，同一文件之后的声场视频不再重复解码
-- 暂不支持带从属子流的码流（7.1 及以上声床）与 TrueHD 全景声，稀疏模式的 JOC 参数按规范实现但没有样本验证过
-- 对象的尺寸、区域限制（除关闭高度外）和屏幕参考暂未参与渲染
-
-## 字幕视频
-
-- 当前行固定在画面中央，换行时旧行淡出、新行淡入，新行在第一个字开唱时刚好完全显示；行唱完后最多停留 1 秒
-- 字体可选多个并排序，每个字取列表中第一个含该字形的字体，列表为空时用系统无衬线字体；中文字体一般自带西文字形，要让西文用别的字体就把西文字体排在前面
-- 翻译行亮度可调，默认 70%（AMLL 原样式 30%，叠在画面上太淡）
-- 只显示主歌词与翻译，音译（整行与逐字）、背景人声丢弃，对唱行也居中
-- 时长跟随已载入的音频，便于与波形视频对齐；没有音频时到最后一行结束
-- 渲染在确定性模式下进行（BeginFrame 控制时钟），同样参数两次输出逐帧一致
-- 时间轴切段后由多个浏览器并行渲染再无损拼接，默认每 2.5 个 CPU 核一个（本机 8 个），每段至少 10 秒；每段先从当时在屏的行开始淡入处预跑，结果与单个浏览器逐帧一致
-- 前奏、间奏和结尾没有歌词在屏时直接复用透明帧，不经过浏览器；VP9 用 realtime 预设（cpu-used 6），3 分钟 60fps 的歌约 27 秒渲染完
-- 设置环境变量 `DOLBYTOOL_DEBUG=1` 时渲染器在 stderr 打印各浏览器与分段的耗时
-- 剪辑软件需识别 VP9 alpha 才能透明叠加，ffmpeg 叠加时解码器要指定 `-c:v libvpx-vp9`
-
-## ADM BWF
-
-- 分轨面板勾选“ADM BWF”后输出 `<音频名>_adm.wav`，只对杜比全景声有效，可以不勾任何分轨单独输出
-- 与 5.1.4 渲染同一遍解码完成，几乎不增加耗时
-- 声道 k 即 OAMD 对象 k: 床声道写成 DirectSpeakers（LFE 取核心解码的 LFE），ISF 与动态对象写成 Objects；对象自身增益（含渐变）已乘进音频，元数据不再带增益
-- `axml` 为 ITU-R BS.2076-2，ADM 笛卡尔坐标（X 左 -1 到右 +1，Y 后 -1 到前 +1，Z 听音平面 0 到顶 +1），每次位置更新一个 block，`jumpPosition` 的 `interpolationLength` 即 OAMD 渐变时长；`chna` 为标准 40 字节条目
-- 24 bit PCM（格式标签 1，不用 WAVE_FORMAT_EXTENSIBLE，兼容的读取器更多），超过 4 GiB 时自动转为 BW64（预留的 JUNK 改写为 ds64）
-- 用 ADM 块位置重新渲染与本工具的 5.1.4 输出相比，误差比信号低 36 到 50 dB（差异来自忽略渐变的简化渲染），可直接导入 ADM 对象查看器
-- 对象的尺寸、区域限制与 snap 暂不写入元数据
-
-## 声场视频
-
-- 画面照搬全景声对象查看器: 半透明房间（5.8 × 3.1 × 5.8）、地面网格、指向正面的箭头、站在地板中央的头模，统一灰蓝色，不画背景色
-- 只画动态对象，床声道固定在扬声器上、ISF 没有位置信息，都不画
-- 像波形视频一样勾选音轨，每条输出一个视频（默认原音频），不需要先分轨；分轨视频照样画出全部有声对象，轨迹连贯，只是声音没落在该分轨扬声器上的对象变暗: 对象电平只计入渲染器分给这些扬声器的能量，低于静音门限时按淡入淡出时长过渡到“分轨外亮度”（默认 25%，设为 0% 即隐藏）
-- 各音轨对应的扬声器: 原音频与 downmix 为全部，surround 为 Ls Rs，center 为 C，front 与 front_no_center 为 L R，height 为四个顶部，height_front / height_rear 为前后两对；lfe、low、high 不在房间里有位置，不列出
-- 5.1.4 渲染按位置在前后两排之间等功率平移，只有贴着前墙（y=0）的对象完全不进 Ls / Rs，靠前但不贴墙的（如 y≈0.3）仍有约 -6 dB，在 surround 视频里不会变暗；height 视频里听音平面上的对象都会变暗
-- 对象位置取自 OAMD，按 ramp 线性滑动；房间坐标 x 左到右、y 前到后、z 听音平面为 0，与 ADM 惯例一致，听音平面的对象在房间半高处
-- 显隐按 JOC 重建后的对象电平（乘上对象增益后的峰值），低于静音门限（默认 -90 dBFS）或对象关闭时在 180 ms 内淡出，与查看器一致
-- 视角三选一: 等轴测（默认）、顶部（正面在画面上方）、Angle（对面低角度）
-- 头模可选 `.glb`（three.js GLTFLoader，自动转向正面、落地、统一着色），不选则用内置头部剪影
-- 先取对象轨迹（与分轨共用全景声解码并缓存，未缓存时约 6 秒，多条音轨只解析一次），再逐帧渲染；每帧是时间的纯函数，分段并行无需预跑，结果与单个浏览器一致
-- WebGL 走 ANGLE Vulkan 用独显渲染，同样参数两次输出逐帧一致；没有可用 GPU 时自动退回 SwiftShader，慢 2 到 3 倍（GL-EGL 后端每次结果不同，不要用）
-- 1080p 60fps 的 3 分钟歌本机约 100 秒（RTX 3070 Ti Laptop）
-- `DOLBYTOOL_DEBUG=1` 时渲染器在 stderr 打印实际使用的 WebGL 后端
-
-## 目录
-
-按功能组织，每个功能一个包，纯逻辑放 `service.py`（不依赖 Qt），界面放 `panel.py`；功能之间不互相导入，只通过 `core.project.PlanContext` 交换信息（如波形视频需要尚未生成的分轨）
-
-- `src/dolbytool/core/` 各功能共用的基础: `ffmpeg.py` ffmpeg / ffprobe 调用，`renderer.py` 运行 `renderer/dist` 下的脚本并解析进度，`process.py` 可取消的子进程，`cancel.py` 取消令牌，`pcm.py` 磁盘映射的音频缓冲与 WAV 读写，`paths.py` 临时目录、缓存与原子写出，`audio.py` 音频信息，`project.py` 当前输入与音轨列表，`task.py` 任务步骤，`stems.py` 分轨种类、各声道布局对应的分轨与中文名
-- `src/dolbytool/features/source/` 源文件: `service.py` 音频探测、内嵌封面、同名 TTML，`panel.py` 后台读取与拖放
-- `src/dolbytool/features/stems/` 分轨: `pipeline.py` 按声道布局渲染各分轨，`dsp/` 分频、声道矩阵与频谱中置分离，`service.py` 解码与任务封装
-- `src/dolbytool/core/atmos/` 全景声解码（分轨与声场视频共用）: `eac3.py` 切帧，`emdf.py` 元数据容器，`oamd.py` 对象元数据，`joc.py` 对象重建，`qmf.py` 滤波器组，`render.py` 5.1.4 渲染，`sinks.py` 每帧渲染结果与 5.1.4 声道，`adm.py` ADM BWF，`trace.py` 对象轨迹、电平与各扬声器能量占比，`chunk.py` 工作进程解码一段时间轴，`decoder.py` 元数据遍历、分段调度、时间轴对齐与轨迹缓存，`bitstream.py` 位读取与查表 Huffman，`tables.py` 规范附带的 Huffman 表与 QMF 系数
-- `src/dolbytool/features/gradient/` 渐变图与封面取色（`palette.py`）
-- `src/dolbytool/features/waveform/` 波形视频，编码器列表在 `encoders.py`
-- `src/dolbytool/features/lyrics/` 字幕视频，调用 `renderer/dist/render.mjs`
-- `src/dolbytool/features/soundfield/` 声场视频，先取对象轨迹再调用 `renderer/dist/soundfield.mjs`
-- `src/dolbytool/features/registry.py` 输出面板的顺序，新增功能在这里登记一行
-- `src/dolbytool/ui/` 界面外壳: `main_window.py` 只负责组装与运行，`feature.py` 输出面板的公共接口，`outputs.py` 输出清单，`tasks.py` 任务列表，`worker.py` 后台任务队列（并行组与失败后继续），`background.py` 后台调用，`widgets.py` 通用控件（含音轨勾选列表）
-- `renderer/src/shared/api.ts` 页面与命令行之间的接口定义
-- `renderer/src/page/` 字幕页面: `timeline.ts` 每行的显隐时间（纯函数），`stage.ts` 每行一个 AMLL 播放器
-- `renderer/src/soundfield/` 声场页面: `timeline.ts` 对象位置与显隐（纯函数），`scene.ts` 房间、头模、相机，`main.ts` 入口
-- `renderer/src/cli/` 命令行: `chrome.ts` 下载与启动 chrome-headless-shell，`stage.ts` 逐帧驱动浏览器，`segment.ts` 分段渲染，`parallel.ts` 分段并行与拼接，`ffmpeg.ts` 编码与拼接，`run.ts` 取消与清理，`main.ts` 字幕入口，`soundfield.ts` 声场入口
-
-渲染器类型检查: `cd renderer && bun run check`
-
-## 许可
-
-字幕渲染依赖 AMLL（AGPL-3.0），整体按 AGPL-3.0-or-later 分发
+本项目采用 [AGPL-3.0-or-later](LICENSE) 协议分发。字幕渲染模块集成了 [applemusic-like-lyrics](https://github.com/Steve-xmh/applemusic-like-lyrics)（AGPL-3.0）。
