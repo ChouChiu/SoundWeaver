@@ -5,6 +5,8 @@ from __future__ import annotations
 import subprocess
 from functools import cache
 
+from dolbytool.core.process import NO_WINDOW
+
 ENCODERS: dict[str, list[str]] = {
     "h264_nvenc": [
         "-c:v", "h264_nvenc", "-preset", "p7", "-tune", "hq", "-rc", "vbr", "-cq", "19",
@@ -37,5 +39,6 @@ def encoder_available(name: str) -> bool:
          "color=black:s=256x256:d=0.1", "-frames:v", "1", "-c:v", name, "-f", "null", "-"],
         check=False,
         capture_output=True,
+        creationflags=NO_WINDOW,
     )  # fmt: skip
     return result.returncode == 0

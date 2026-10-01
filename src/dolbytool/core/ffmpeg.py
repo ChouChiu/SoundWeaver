@@ -9,7 +9,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from dolbytool.core.cancel import CancellationToken
-from dolbytool.core.process import run_streaming
+from dolbytool.core.process import NO_WINDOW, run_streaming
 
 
 class FFmpegError(RuntimeError):
@@ -31,6 +31,7 @@ def probe(path: Path) -> dict:
             text=True,
             errors="replace",
             timeout=60,
+            creationflags=NO_WINDOW,
         )  # fmt: skip
     except FileNotFoundError as error:
         raise FFmpegError("找不到 ffprobe，请先安装 ffmpeg") from error

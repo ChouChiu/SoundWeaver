@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import sys
 from collections.abc import Callable, Sequence
 from functools import cache
 from pathlib import Path
@@ -16,7 +17,11 @@ from pathlib import Path
 from dolbytool.core.cancel import CancellationToken
 from dolbytool.core.process import run_streaming
 
-RENDERER_DIR = Path(__file__).resolve().parents[3] / "renderer"
+# A PyInstaller bundle carries renderer/dist under its data root (sys._MEIPASS).
+if getattr(sys, "frozen", False):
+    RENDERER_DIR = Path(sys._MEIPASS) / "renderer"
+else:
+    RENDERER_DIR = Path(__file__).resolve().parents[3] / "renderer"
 
 
 class RendererError(RuntimeError):

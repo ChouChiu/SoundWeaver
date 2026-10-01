@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 import threading
 from collections.abc import Callable, Sequence
 
@@ -10,6 +11,9 @@ from dolbytool.core.cancel import CancellationToken, ProcessingCancelled
 
 # How often a running child is checked against its cancellation token.
 _POLL_SECONDS = 0.2
+
+# Keeps a console child such as ffmpeg from opening a window under the windowed Windows build.
+NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 
 def run_streaming(
@@ -29,7 +33,12 @@ def run_streaming(
     chatty child cannot fill the pipe and stall.
     """
     with subprocess.Popen(
-        list(cmd), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace"
+        list(cmd),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        errors="replace",
+        creationflags=NO_WINDOW,
     ) as proc:
         assert proc.stdout is not None and proc.stderr is not None
         stderr: list[str] = []
