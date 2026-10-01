@@ -34,7 +34,7 @@ AUDIO_FILTER = (
 )
 IMAGE_FILTER = "图片 (*.png *.jpg *.jpeg *.webp *.bmp);;所有文件 (*)"
 TTML_FILTER = "TTML 歌词 (*.ttml *.xml);;所有文件 (*)"
-OUTPUT_PLACEHOLDER = "默认为音频旁的 <音频名>_stems"
+OUTPUT_PLACEHOLDER = "默认保存至：<音频目录>/<音频名>_stems"
 # typing in a path field settles this long before it is acted on
 _SETTLE_MS = 400
 
@@ -65,13 +65,13 @@ class SourcePanel(QGroupBox):
         self.cover_preview = widgets.preview_label(text="无封面", side=112)
         grid.addWidget(self.cover_preview, 0, 0, 5, 1, Qt.AlignmentFlag.AlignTop)
 
-        self.audio_edit = self._row(grid, 0, "音频(&U)", "杜比 m4a / eac3 / wav 等", self.pick_audio)
+        self.audio_edit = self._row(grid, 0, "音频(&U)", "支持 m4a / eac3 / wav / flac 等格式", self.pick_audio)
         self.audio_info = widgets.hint_label()
         grid.addWidget(self.audio_info, 1, 2)
         self.cover_edit = self._row(
-            grid, 2, "封面(&C)", "用于取色，音频内嵌封面会自动读取", self.pick_cover
+            grid, 2, "封面(&C)", "封面图片（内嵌封面将自动提取）", self.pick_cover
         )
-        self.ttml_edit = self._row(grid, 3, "歌词(&L)", "TTML 逐字歌词，用于字幕视频", self.pick_ttml)
+        self.ttml_edit = self._row(grid, 3, "歌词(&L)", "TTML 逐字歌词文件", self.pick_ttml)
         self.out_edit = self._row(grid, 4, "输出(&O)", OUTPUT_PLACEHOLDER, self.pick_output)
         grid.setColumnStretch(2, 1)
 
@@ -217,7 +217,7 @@ class SourcePanel(QGroupBox):
             if result.cover and (cover is None or cover == self._auto_cover):
                 self._auto_cover = result.cover
                 self.cover_edit.setText(str(result.cover))
-                self.log.emit(f"已读取内嵌封面：{result.cover.name}")
+                self.log.emit(f"已提取内嵌封面：{result.cover.name}")
         self.audio_info.setText(self.info.describe() if self.info else f"无法读取：{self._error}")
         self._show_cover()
         self.changed.emit()

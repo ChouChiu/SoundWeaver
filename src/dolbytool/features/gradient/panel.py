@@ -22,7 +22,7 @@ DEFAULT_BOTTOM = "#040509"
 class GradientPanel(FeaturePanel):
     title = "渐变图"
     icon = "color-gradient"
-    description = "封面主色作上色，同色相压暗作下色，smoothstep 过渡的 PNG"
+    description = "提取封面主色调并向下平滑压暗过渡，生成背景渐变图 (PNG)"
     enabled_key = "do_gradient"
 
     def __init__(self, settings: QSettings, parent=None) -> None:
@@ -31,27 +31,27 @@ class GradientPanel(FeaturePanel):
 
         self.swatch_row = QHBoxLayout()
         self.swatch_row.setSpacing(4)
-        self.swatch_hint = widgets.hint_label("选择封面后显示封面主要颜色")
+        self.swatch_hint = widgets.hint_label("载入封面后自动提取主色调")
         self.swatch_row.addWidget(self.swatch_hint)
         self.swatch_row.addStretch(1)
-        self.top_color = widgets.ColorButton(DEFAULT_TOP, "选择上方颜色")
-        self.bottom_color = widgets.ColorButton(DEFAULT_BOTTOM, "选择下方颜色")
+        self.top_color = widgets.ColorButton(DEFAULT_TOP, "选择上部基色")
+        self.bottom_color = widgets.ColorButton(DEFAULT_BOTTOM, "选择下部基色")
         colours = widgets.form([
-            ("封面颜色：", self.swatch_row),
-            ("上方：", self.top_color),
-            ("下方：", self.bottom_color),
+            ("封面色彩：", self.swatch_row),
+            ("上部基色：", self.top_color),
+            ("下部基色：", self.bottom_color),
         ])  # fmt: skip
 
         self.width_spin = self.spin("grad_w", 16, 16384, 4000, " px")
         self.height_spin = self.spin("grad_h", 16, 16384, 4000, " px")
         self.start_spin = self.spin("grad_start", 0, 100, 30, " %")
         self.span_spin = self.spin("grad_span", 1, 100, 40, " %")
-        self.start_spin.setToolTip("过渡从图片高度的这个位置开始")
-        self.span_spin.setToolTip("过渡带占图片高度的比例")
+        self.start_spin.setToolTip("渐变过渡起始纵向位置（占画面高度比例）")
+        self.span_spin.setToolTip("渐变过渡区间的跨度（占画面高度比例）")
         frame = widgets.form([
             ("尺寸：", widgets.size_row(self.width_spin, self.height_spin)),
             ("过渡起点：", self.start_spin),
-            ("过渡长度：", self.span_spin),
+            ("过渡跨度：", self.span_spin),
         ])  # fmt: skip
 
         self.preview = widgets.preview_label("渐变预览", side=150)
@@ -106,7 +106,7 @@ class GradientPanel(FeaturePanel):
             button.setCheckable(True)
             button.setAutoExclusive(True)
             button.setChecked(sw is main)
-            button.setToolTip(f"{sw.hex}，约占 {sw.share:.0%}\n点击设为渐变主色")
+            button.setToolTip(f"{sw.hex}（色彩占比约 {sw.share:.0%}）\n点击应用为渐变主色")
             button.clicked.connect(lambda _=False, rgb=sw.rgb: self._apply_main(rgb))
             self.swatch_row.insertWidget(index, button)
         self._apply_main(main.rgb)
@@ -164,7 +164,7 @@ class GradientPanel(FeaturePanel):
         if cover and cover.is_file():
             return True
         answer = QMessageBox.question(
-            self, "没有封面", "没有可用的封面，渐变图将使用当前设置的颜色，是否继续？"
+            self, "未载入封面", "当前未选择封面图片，渐变图将直接使用预设基色生成，是否继续？"
         )
         return answer == QMessageBox.StandardButton.Yes
 

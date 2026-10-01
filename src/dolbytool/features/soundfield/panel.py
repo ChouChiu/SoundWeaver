@@ -29,8 +29,7 @@ class SoundfieldPanel(FeaturePanel):
     title = "声场视频"
     icon = "audio-speakers-symbolic"
     description = (
-        "全景声动态对象画成房间里的小球，随 OAMD 位置移动、无声时淡出，输出无背景的 WebM；"
-        "每条勾选的音轨一个视频，声音不在该音轨扬声器上的对象变暗，不需要先分轨"
+        "将全景声动态对象在 3D 空间内的运动轨迹与电平可视化，输出带 Alpha 透明通道的 WebM (VP9) 视频"
     )
     enabled_key = "do_soundfield"
     enabled_default = False
@@ -48,29 +47,29 @@ class SoundfieldPanel(FeaturePanel):
         for name, label in VIEWS.items():
             self.view.addItem(label, name)
         self.head_edit, _button, head_row = widgets.browse_row(
-            "留空使用内置头部剪影", self._browse_head, "选择 .glb 头模"
+            "留空使用默认听者剪影", self._browse_head, "选择 3D 头模 (.glb)"
         )
         self.head_edit.textChanged.connect(lambda _t: self.changed.emit())
         self.object_scale = self.spin("sf_object_scale", 10, 1000, d.object_scale, " %")
-        self.object_scale.setToolTip("对象小球的大小，100% 为参考查看器的原始尺寸")
+        self.object_scale.setToolTip("动态对象小球的显示比例（100% 为标准尺寸）")
         self.head_scale = self.spin("sf_head_scale", 10, 1000, d.head_scale, " %")
-        self.head_scale.setToolTip("头模的大小，100% 时高度为房间高度的 15%")
+        self.head_scale.setToolTip("听者模型显示比例（100% 时高度约为声场空间的 15%）")
         self.gate = self.spin("sf_gate", -120, 0, d.gate_db, " dBFS")
         self.gate.setToolTip(
-            "对象电平（重建后乘上对象增益的峰值）低于此值时淡出隐藏；\n"
-            "分轨视频中只算落在该音轨扬声器上的部分低于此值时变暗"
+            "对象电平低于该门限时平滑淡出隐藏；\n"
+            "在分轨模式下，若分配至该音轨扬声器的能量低于此门限则平滑暗化"
         )
         self.fade = self.spin("sf_fade", 0, 2000, d.fade_ms, " ms", step=10)
-        self.fade.setToolTip("对象出现、消失与变暗的过渡时长")
+        self.fade.setToolTip("对象显隐与明暗切换的平滑过渡时长")
         self.dim = self.spin("sf_dim", 0, 100, d.dim, " %")
-        self.dim.setToolTip("分轨视频中，声音不在该音轨扬声器上的对象的不透明度；0% 即隐藏")
+        self.dim.setToolTip("分轨模式下，非本音轨声扬对象的保留不透明度（0% 为完全隐藏）")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(widgets.section("音轨", self.tracks), 1)
         layout.addWidget(
             widgets.section(
-                "画面",
+                "画面与视角",
                 widgets.two_column_grid([
                     ("尺寸：", widgets.size_row(self.width_spin, self.height_spin), "帧率：", self.fps),
                     ("视角：", self.view, None, None),
@@ -80,11 +79,11 @@ class SoundfieldPanel(FeaturePanel):
         )  # fmt: skip
         layout.addWidget(
             widgets.section(
-                "对象",
+                "空间对象参数",
                 widgets.two_column_grid([
                     ("对象大小：", self.object_scale, "头模大小：", self.head_scale),
                     ("静音门限：", self.gate, "淡入淡出：", self.fade),
-                    ("分轨外亮度：", self.dim, None, None),
+                    ("分轨外不透明度：", self.dim, None, None),
                 ]),
             )
         )  # fmt: skip
@@ -129,21 +128,21 @@ class SoundfieldPanel(FeaturePanel):
         for track in project.tracks:
             if track.key not in TRACK_SPEAKERS:
                 continue  # the LFE and the frequency bands have no place in the room
-            text = f"原音频（{track.path.name}）" if track.is_original else f"{track.label}（{track.key}）"
+            text = f"源音频（{track.path.name}）" if track.is_original else f"{track.label}（{track.key}）"
             speakers = " ".join(TRACK_SPEAKERS[track.key])
-            tip = f"{track.hint}\n声音不在这些扬声器上的对象变暗：{speakers}"
+            tip = f"{track.hint}\n非此音轨扬声器（{speakers}）分配范围内的对象将暗化呈现"
             items.append(widgets.TrackItem(track.key, text, tip))
         self.tracks.set_tracks(items, checked)
 
     def problem(self, ctx: PlanContext) -> str | None:
         info = ctx.project.info
         if info is not None and not info.atmos:
-            return "需要杜比全景声音轨"
+            return "当前输入非杜比全景声，无法生成声场视频"
         if info is not None and not self._selected(ctx.project):
-            return "至少勾选一条音轨"
+            return "请至少勾选一条需要生成声场视频的音轨"
         head = self._head()
         if head and not head.is_file():
-            return "头模文件不存在"
+            return "指定的 3D 头模文件不存在"
         return renderer_problem("soundfield.mjs")
 
     def summary(self, ctx: PlanContext) -> str | None:

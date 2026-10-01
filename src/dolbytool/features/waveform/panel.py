@@ -20,7 +20,7 @@ COLOR_KEYS = ("wave2/wave_color", "wave2/background", "wave2/playhead")
 class WaveformPanel(FeaturePanel):
     title = "波形视频"
     icon = "view-media-visualization"
-    description = "每条勾选的音轨输出一个滚动波形 MP4；尚未生成的分轨会先自动分轨"
+    description = "为所选音轨生成水平滚动波形视频 (MP4)，若所选分轨未生成将自动追加前置分轨任务"
     enabled_key = "do_waveform"
 
     def __init__(self, settings: QSettings, parent=None) -> None:
@@ -29,7 +29,7 @@ class WaveformPanel(FeaturePanel):
         self.tracks.changed.connect(self.changed)
 
         d = WaveformSpec()
-        self.pps = self.spin("pps", 10, 1000, d.pps, " px/秒")
+        self.pps = self.spin("pps", 10, 1000, d.pps, " 像素/秒")
         self.fps = self.spin("fps", 10, 120, d.fps, " fps")
         self.screen_w = self.spin("screen_w", 64, 7680, d.screen_width, " px", step=2)
         self.screen_h = self.spin("screen_h", 32, 4320, d.height, " px", step=2)
@@ -37,11 +37,11 @@ class WaveformPanel(FeaturePanel):
         self.background = widgets.ColorButton(d.background, "选择背景颜色")
         self.playhead = widgets.ColorButton(d.playhead, "选择播放头颜色")
         self.unplayed = self.spin("unplayed", 0, 100, round(d.unplayed_level * 100), " %")
-        self.unplayed.setToolTip("播放头右侧尚未播放的波形保留的亮度，100% 即不区分")
+        self.unplayed.setToolTip("播放头右侧未播放波形保留的不透明度（100% 为不暗化）")
         self.encoder = QComboBox()
         for name, label in ENCODER_LABELS.items():
             self.encoder.addItem(label, name)
-        self.encoder.setToolTip("所选硬件编码器不可用时自动改用 libx264")
+        self.encoder.setToolTip("硬件编码器不可用时将自动回退至 libx264 软件编码")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -57,10 +57,10 @@ class WaveformPanel(FeaturePanel):
         )  # fmt: skip
         layout.addWidget(
             widgets.section(
-                "颜色",
+                "色彩与样式",
                 widgets.two_column_grid([
                     ("背景：", self.background, "波形：", self.wave_color),
-                    ("播放头：", self.playhead, "未播放亮度：", self.unplayed),
+                    ("播放头：", self.playhead, "未播不透明度：", self.unplayed),
                 ]),
             )
         )  # fmt: skip
@@ -92,9 +92,9 @@ class WaveformPanel(FeaturePanel):
         items = []
         for track in project.tracks:
             if track.is_original:
-                text = f"原音频（{track.path.name}）"
+                text = f"源音频（{track.path.name}）"
             else:
-                text = f"{track.label}（{track.key}{'' if track.exists else '，待分轨'}）"
+                text = f"{track.label}（{track.key}{'' if track.exists else '，待生成'}）"
             items.append(
                 widgets.TrackItem(
                     track.key, text, f"{track.hint}\n{track.path}",
@@ -111,7 +111,7 @@ class WaveformPanel(FeaturePanel):
 
     def problem(self, ctx: PlanContext) -> str | None:
         if ctx.project.info is not None and not self._selected(ctx.project):
-            return "至少勾选一条音轨"
+            return "请至少勾选一条需要生成波形的音轨"
         return None
 
     def summary(self, ctx: PlanContext) -> str | None:

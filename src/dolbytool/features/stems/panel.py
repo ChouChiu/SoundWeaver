@@ -21,18 +21,18 @@ from dolbytool.ui import widgets
 from dolbytool.ui.feature import FeaturePanel
 
 COLUMNS = 3
-ADM_TEXT = "ADM BWF（每个对象一个声道，内嵌位置轨迹）"
+ADM_TEXT = "导出 ADM BWF（含空间对象三维轨迹）"
 ADM_TIP = (
-    "杜比全景声专用：按 OAMD 对象逐个输出到一个 24 bit 多声道 WAV，\n"
-    "axml 记录每个对象的位置与渐变，chna 对应声道，LFE 作为床声道；\n"
-    "可导入 ADM 查看器、杜比渲染器或剪辑软件"
+    "仅适用于杜比全景声源：将各动态对象与声床分轨导出为 24-bit 多声道 BWF WAV，\n"
+    "内嵌 ITU-R BS.2076-2 axml 与 chna 元数据，记录空间三维轨迹与平移增益，\n"
+    "兼容标准 ADM 查看器、杜比渲染器及专业 DAW"
 )
 
 
 class StemsPanel(FeaturePanel):
     title = "分轨"
     icon = "view-media-equalizer"
-    description = "按声道布局拆成 WAV 分轨；杜比全景声先渲染为 5.1.4，还可输出 ADM BWF"
+    description = "按声道布局分离导出 WAV 分轨；杜比全景声源渲染为 5.1.4 格式，支持导出标准 ADM BWF"
     enabled_key = "do_stems"
 
     def __init__(self, settings: QSettings, parent=None) -> None:
@@ -59,7 +59,7 @@ class StemsPanel(FeaturePanel):
         self.crossover.setSingleStep(10)
         self.crossover.setSuffix(" Hz")
         self.crossover.setValue(DEFAULT_CROSSOVER_HZ)
-        self.crossover.setToolTip("低频段与高频段的分界")
+        self.crossover.setToolTip("低频段与高频段的分频截止频率")
         self.remember("crossover", self.crossover)
         self.adm = QCheckBox(ADM_TEXT)
         self.adm.toggled.connect(self.changed)
@@ -122,7 +122,7 @@ class StemsPanel(FeaturePanel):
             project.audio and project.output_dir and adm_target(project.output_dir, project.audio).is_file()
         )
         self.adm.setText(ADM_TEXT + ("（已有）" if exists else ""))
-        self.adm.setToolTip(ADM_TIP if atmos else "只有杜比全景声音轨可以输出 ADM BWF")
+        self.adm.setToolTip(ADM_TIP if atmos else "当前输入非杜比全景声，无法导出 ADM BWF")
         stems = project.stems
         for index, track in enumerate(stems):
             box = QCheckBox(track.label + ("（已有）" if track.exists else ""))
@@ -132,17 +132,17 @@ class StemsPanel(FeaturePanel):
             self.grid.addWidget(box, index // COLUMNS, index % COLUMNS)
             self.checks[track.key] = box
         if not stems:
-            self.info.setText("选择音频后列出可输出的分轨")
+            self.info.setText("载入音频后显示可用分轨")
             return
         done = sum(t.exists for t in stems)
-        self.info.setText(f"输出目录中已有 {done}/{len(stems)} 条" if done else "输出目录中尚无分轨")
+        self.info.setText(f"输出目录已存在 {done}/{len(stems)} 条分轨" if done else "输出目录尚未生成分轨")
 
     def is_active(self, ctx: PlanContext) -> bool:
         return bool(self._kinds(ctx)) or self._adm(ctx)
 
     def problem(self, ctx: PlanContext) -> str | None:
         if ctx.project.info is not None and not self._chosen() and not self._adm(ctx):
-            return "至少勾选一条分轨"
+            return "请至少勾选一条需要导出的分轨"
         return None
 
     def summary(self, ctx: PlanContext) -> str | None:
@@ -156,7 +156,7 @@ class StemsPanel(FeaturePanel):
         return "、".join(parts) + note
 
     def notes(self, ctx: PlanContext) -> list[str]:
-        return ["所选音轨尚未分轨，将先生成需要的分轨"] if self._implicit(ctx) else []
+        return ["所选音轨尚未分轨，将自动追加前置分轨任务"] if self._implicit(ctx) else []
 
     def plan(self, ctx: PlanContext) -> list[Step]:
         project = ctx.project

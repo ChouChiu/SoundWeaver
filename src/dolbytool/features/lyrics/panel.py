@@ -32,9 +32,9 @@ class FontList(QWidget):
         self.list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
         self.list.setMaximumHeight(96)
         self.list.setToolTip(
-            "按顺序回退：每个字取列表中第一个含该字形的字体\n"
-            "中文字体通常也带西文字形，想让西文用别的字体就把西文字体放在前面\n"
-            "列表为空时使用系统默认无衬线字体"
+            "字体按从上到下顺序回退：每个字符优先使用列表中首个支持该字形的字体。\n"
+            "如需中西文字体分流，建议将西文字体置于中文字体上方。\n"
+            "列表为空时使用系统默认无衬线字体。"
         )
         self.pick = QFontComboBox()
         add = QPushButton(QIcon.fromTheme("list-add"), "添加")
@@ -94,8 +94,7 @@ class LyricsPanel(FeaturePanel):
     title = "字幕视频"
     icon = "view-media-lyrics"
     description = (
-        "用 AMLL 渲染 TTML 逐字歌词，输出无背景的单行字幕 WebM（VP9 带透明通道）；"
-        "只显示翻译，不显示音译与背景人声，时长跟随音频"
+        "基于 AMLL 渲染 TTML 逐字动态歌词，输出带 Alpha 透明通道的单行居中 WebM (VP9) 视频"
     )
     enabled_key = "do_lyrics"
     enabled_default = False
@@ -109,9 +108,9 @@ class LyricsPanel(FeaturePanel):
         self.fps = self.spin("lyr_fps", 10, 120, d.fps, " fps")
         self.font_size = self.spin("lyr_font_size", 8, 512, d.font_size, " px")
         self.fade = self.spin("lyr_fade", 0, 2000, d.fade_ms, " ms", step=50)
-        self.fade.setToolTip("换行时旧行淡出、新行淡入各用的时长")
+        self.fade.setToolTip("歌词换行时新旧行的淡入淡出过渡时长")
         self.translation = self.spin("lyr_sub", 0, 100, d.translation_opacity, " %")
-        self.translation.setToolTip("翻译行的不透明度，AMLL 原样式为 30%")
+        self.translation.setToolTip("翻译行文本的不透明度（0% 为隐藏）")
         self.fonts = FontList()
 
         layout = QVBoxLayout(self)
@@ -126,10 +125,10 @@ class LyricsPanel(FeaturePanel):
         )  # fmt: skip
         layout.addWidget(
             widgets.section(
-                "文字",
+                "排版与文字",
                 widgets.two_column_grid([
                     ("字号：", self.font_size, "淡入淡出：", self.fade),
-                    ("翻译亮度：", self.translation, None, None),
+                    ("翻译不透明度：", self.translation, None, None),
                 ]),
             )
         )  # fmt: skip
@@ -152,9 +151,9 @@ class LyricsPanel(FeaturePanel):
     def problem(self, ctx: PlanContext) -> str | None:
         ttml = ctx.project.ttml
         if not ttml:
-            return "需要选择 TTML 歌词"
+            return "请选择 TTML 逐字歌词文件"
         if not ttml.is_file():
-            return "歌词文件不存在"
+            return "指定的歌词文件不存在"
         return renderer_problem("render.mjs")
 
     def summary(self, ctx: PlanContext) -> str | None:
