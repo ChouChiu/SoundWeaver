@@ -1,0 +1,72 @@
+name: Build
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux-x86_64
+            exe: dolbytool
+          - os: windows-latest
+            target: windows-x86_64
+            exe: dolbytool.exe
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Build renderer
+        working-directory: renderer
+        run: |
+          bun install --frozen-lockfile
+          bun run build:page
+          # Bundle npm packages into the CLI scripts, the packaged app ships no node_modules
+          bun build src/cli/main.ts --outfile dist/render.mjs --target node
+          bun build src/cli/soundfield.ts --outfile dist/soundfield.mjs --target node
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Build with PyInstaller
+        run: |
+          uv run --with pyinstaller pyinstaller \
+            --noconfirm --clean --onedir --windowed \
+            --name dolbytool \
+            --paths src \
+            --exclude-module tkinter \
+            --add-data "renderer/dist:renderer/dist" \
+            src/dolbytool/__main__.py
+
+      - name: Smoke test
+        run: |
+          test -f dist/dolbytool/${{ matrix.exe }}
+          test -f dist/dolbytool/_internal/renderer/dist/render.mjs
+
+      - name: Pack (Linux)
+        if: runner.os == 'Linux'
+        run: tar -C dist -czf dolbytool-${{ matrix.target }}.tar.gz dolbytool
+
+      - name: Pack (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path dist/dolbytool -DestinationPath dolbytool-${{ matrix.target }}.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dolbytool-${{ matrix.target }}
+          path: dolbytool-${{ matrix.target }}.*
+          if-no-files-found: error
