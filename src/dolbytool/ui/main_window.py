@@ -75,7 +75,7 @@ class MainWindow(QMainWindow):
         self._build_actions()
         self._build_menu()
         self.setCentralWidget(self._build_body())
-        self.statusBar().showMessage("选择音频文件开始，也可以把文件拖进窗口")
+        self.statusBar().showMessage("准备就绪。请选择或拖入音频文件")
 
         self._restore_settings()
         self._restoring = False
@@ -96,7 +96,7 @@ class MainWindow(QMainWindow):
         self.act_cover = action("选择封面(&C)…", "insert-image", self.source.pick_cover,
                                 QKeySequence("Ctrl+Shift+O"))  # fmt: skip
         self.act_ttml = action("选择歌词(&L)…", "text-xml", self.source.pick_ttml,
-                               QKeySequence("Ctrl+L"))  # fmt: skip
+                                QKeySequence("Ctrl+L"))  # fmt: skip
         self.act_open_dir = action("打开输出目录(&D)", "folder-open", self._open_output_dir,
                                    QKeySequence("Ctrl+E"))  # fmt: skip
         self.act_quit = action("退出(&Q)", "application-exit", self.close, QKeySequence.StandardKey.Quit)
@@ -167,7 +167,7 @@ class MainWindow(QMainWindow):
         self.banner.setStyleSheet("QLabel { background: #da4453; color: white; padding: 6px; }")
         self.banner.setVisible(bool(self._missing_tools))
         self.banner.setText(
-            f"找不到 {'、'.join(self._missing_tools)}，请先安装 ffmpeg：sudo pacman -S ffmpeg"
+            f"未检测到系统依赖组件 {'、'.join(self._missing_tools)}，请确保已安装 FFmpeg 并将其加入系统 PATH 环境变量"
         )
         outer.addWidget(self.banner)
         outer.addWidget(self.splitter, 1)
@@ -248,11 +248,11 @@ class MainWindow(QMainWindow):
         if not panel.needs_audio:
             return None
         if project.audio is None:
-            return "需要选择音频文件"
+            return "请选择音频文件"
         if project.probing:
-            return "正在读取音频…"
+            return "正在解析音频…"
         if project.info is None:
-            return f"无法读取音频：{project.audio_error}" if project.audio_error else "无法读取音频"
+            return f"无法解析音频：{project.audio_error}" if project.audio_error else "无法解析音频"
         return None
 
     def _problems(self, ctx: PlanContext) -> dict[int, str]:
@@ -266,20 +266,20 @@ class MainWindow(QMainWindow):
     def _blocker(self, ctx: PlanContext, problems: dict[int, str]) -> str | None:
         """Why Start cannot run right now, or None when it can."""
         if self._missing_tools:
-            return f"缺少 {'、'.join(self._missing_tools)}"
+            return f"缺少系统依赖 {'、'.join(self._missing_tools)}"
         if not any(panel.enabled for panel in self.panels):
-            return "至少勾选一项输出"
+            return "请勾选至少一项输出内容"
         if problems:
             index, text = next(iter(problems.items()))
             return f"{self.panels[index].title}：{text}"
         out = ctx.project.output_dir
         if out is None:
-            return "请选择音频文件或输出目录"
+            return "请指定有效的音频文件或输出目录"
         if out.exists() and not out.is_dir():
-            return "输出路径不是目录"
+            return "指定的输出路径不是目录"
         existing = next((p for p in (out, *out.parents) if p.exists()), None)
         if existing is None or not os.access(existing, os.W_OK):
-            return "输出目录不可写"
+            return "输出目录无写入权限"
         return None
 
     def _sources_changed(self) -> None:
@@ -304,7 +304,7 @@ class MainWindow(QMainWindow):
             elif panel.is_active(ctx):
                 self.outputs.set_status(index, panel.summary(ctx) or "")
             else:
-                self.outputs.set_status(index, "未勾选")
+                self.outputs.set_status(index, "未启用")
         if self.worker:
             return
         blocker = self._blocker(ctx, problems)
@@ -314,7 +314,7 @@ class MainWindow(QMainWindow):
             self.summary.setText(blocker)
             return
         parts = [s for panel in self._active(ctx) if (s := panel.summary(ctx))]
-        self.summary.setText("将生成：" + "、".join(parts))
+        self.summary.setText("待生成：" + "、".join(parts))
 
     def _show_page(self, index: int) -> None:
         if index >= 0:
@@ -335,7 +335,7 @@ class MainWindow(QMainWindow):
             return
         steps = [step for panel in active for step in panel.plan(ctx)]
         if not steps:
-            QMessageBox.information(self, "无事可做", "当前设置不会生成任何文件")
+            QMessageBox.information(self, "未选择有效任务", "当前配置未勾选任何需要生成的输出项")
             return
         if clash := self._clash(ctx, steps):
             QMessageBox.warning(self, "无法开始", clash)
@@ -350,7 +350,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "无法开始", f"无法创建输出目录：{error}")
             return
         self._save_settings()
-        self._log(f"—— 开始 {len(steps)} 项任务，输出到 {out}")
+        self._log(f"—— 开始执行 {len(steps)} 项任务，输出目录：{out}")
         for panel in active:
             for note in panel.notes(ctx):
                 self._log(note)
@@ -371,9 +371,9 @@ class MainWindow(QMainWindow):
         targets = [t.resolve() for step in steps for t in step.targets]
         inputs = {p.resolve() for p in ctx.project.inputs()}
         if hit := next((t for t in targets if t in inputs), None):
-            return f"输出会覆盖输入文件 {hit.name}，请换一个输出目录"
+            return f"输出文件与源输入文件重名（{hit.name}），请指定其他输出目录"
         if twice := [t for t, n in Counter(targets).items() if n > 1]:
-            return f"两项输出会写入同一个文件 {twice[0].name}"
+            return f"多个输出任务指向相同的文件（{twice[0].name}），请调整配置"
         return None
 
     def _confirm_overwrite(self, targets: list[Path]) -> bool:
@@ -382,13 +382,13 @@ class MainWindow(QMainWindow):
             return True
         box = QMessageBox(
             QMessageBox.Icon.Question,
-            "覆盖文件",
-            f"有 {len(existing)} 个输出文件已存在，是否覆盖？",
+            "确认覆盖文件",
+            f"检测到 {len(existing)} 个目标文件已存在，是否确认覆盖？",
             QMessageBox.StandardButton.Cancel,
             self,
         )
         box.setDetailedText("\n".join(p.name for p in existing))
-        overwrite = box.addButton("覆盖(&R)", QMessageBox.ButtonRole.AcceptRole)
+        overwrite = box.addButton("覆盖(&O)", QMessageBox.ButtonRole.AcceptRole)
         box.setDefaultButton(QMessageBox.StandardButton.Cancel)
         box.exec()
         return box.clickedButton() is overwrite
@@ -424,16 +424,16 @@ class MainWindow(QMainWindow):
         self._sources_changed()
         failures = self.tasks.failures()
         message = {
-            Outcome.DONE: f"全部完成，输出在 {self.source.output_dir()}",
-            Outcome.CANCELLED: "已取消",
-            Outcome.FAILED: f"完成，但有 {len(failures)} 项失败",
+            Outcome.DONE: f"全部任务完成，保存在 {self.source.output_dir()}",
+            Outcome.CANCELLED: "任务已取消",
+            Outcome.FAILED: f"处理完成（{len(failures)} 项失败）",
         }[Outcome(outcome)]
         self.statusBar().showMessage(message)
         self._log(f"—— {message}")
         QApplication.alert(self)
         if failures:
-            box = QMessageBox(QMessageBox.Icon.Warning, "部分任务失败", message, parent=self)
-            box.setInformativeText("其余任务已照常完成，失败原因见下方详情与运行日志")
+            box = QMessageBox(QMessageBox.Icon.Warning, "部分任务执行失败", message, parent=self)
+            box.setInformativeText("其余任务已完成，详细失败信息请查看下方列表与运行日志")
             box.setDetailedText("\n".join(failures))
             box.exec()
 
@@ -465,9 +465,10 @@ class MainWindow(QMainWindow):
     def _about(self) -> None:
         QMessageBox.about(
             self,
-            f"关于{APP_TITLE}",
-            "杜比全景声分轨与 ADM BWF、封面取色渐变图、波形滚动视频、字幕视频与声场视频\n\n"
-            "按 AGPL-3.0-or-later 分发",
+            f"关于 {APP_TITLE}",
+            "杜比全景声与多声道视频素材制作工具\n\n"
+            "支持分轨导出、ADM BWF、封面渐变图、滚动波形视频、动态字幕与 3D 声场可视化。\n\n"
+            "基于 AGPL-3.0-or-later 协议开源",
         )
 
     # ---- drag and drop ---------------------------------------------------------------
@@ -479,7 +480,7 @@ class MainWindow(QMainWindow):
     def dropEvent(self, event: QDropEvent) -> None:
         paths = [Path(url.toLocalFile()) for url in event.mimeData().urls() if url.isLocalFile()]
         if not self.source.drop(paths):
-            self.statusBar().showMessage("不支持拖入的文件类型", 5000)
+            self.statusBar().showMessage("不支持的文件格式", 5000)
 
     # ---- settings --------------------------------------------------------------------
 
@@ -505,7 +506,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         if self.worker:
-            answer = QMessageBox.question(self, "正在处理", "任务仍在运行，确定取消并退出？")
+            answer = QMessageBox.question(self, "任务运行中", "后台任务尚未完成，确定要取消任务并退出吗？")
             if answer != QMessageBox.StandardButton.Yes:
                 event.ignore()
                 return

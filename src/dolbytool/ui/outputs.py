@@ -26,7 +26,7 @@ class _Row(QWidget):
     def __init__(self, panel: FeaturePanel) -> None:
         super().__init__()
         self.check = QCheckBox()
-        self.check.setToolTip(f"生成{panel.title}")
+        self.check.setToolTip(f"启用/禁用 {panel.title}")
         self.check.toggled.connect(panel.set_enabled)
         icon = QLabel()
         icon.setPixmap(QIcon.fromTheme(panel.icon).pixmap(QSize(22, 22)))

@@ -20,10 +20,10 @@ _ICONS = {
     Outcome.SKIPPED: "media-skip-forward",
 }
 _STATES = {
-    Outcome.DONE: "完成",
+    Outcome.DONE: "已完成",
     Outcome.FAILED: "失败",
     Outcome.CANCELLED: "已取消",
-    Outcome.SKIPPED: "未运行",
+    Outcome.SKIPPED: "已跳过",
 }
 
 
@@ -53,7 +53,7 @@ class TaskView(QTreeWidget):
         self._bars, self._values, self._errors = [], [0] * len(steps), {}
         self._targets = [step.targets for step in steps]
         for step in steps:
-            item = QTreeWidgetItem([step.title, "", "等待"])
+            item = QTreeWidgetItem([step.title, "", "等待中"])
             item.setIcon(0, QIcon.fromTheme(_ICONS["queued"]))
             self.addTopLevelItem(item)
             bar = QProgressBar()
@@ -69,7 +69,7 @@ class TaskView(QTreeWidget):
     def started(self, index: int) -> None:
         item = self.topLevelItem(index)
         item.setIcon(0, QIcon.fromTheme(_ICONS["running"]))
-        item.setText(2, "准备中")
+        item.setText(2, "运行中")
         self.scrollToItem(item)
 
     def progress(self, index: int, value: int, message: str) -> None:
@@ -84,9 +84,9 @@ class TaskView(QTreeWidget):
         if outcome == Outcome.DONE:
             self._values[index] = 100
             self._bars[index].setValue(100)
-            state += f"，{seconds:.1f} 秒"
+            state += f"，耗时 {seconds:.1f} 秒"
             if self._targets[index]:
-                item.setToolTip(0, "双击打开输出文件")
+                item.setToolTip(0, "双击在默认应用中打开输出文件")
         elif outcome != Outcome.SKIPPED:
             self._values[index] = 100
         if outcome == Outcome.FAILED:
