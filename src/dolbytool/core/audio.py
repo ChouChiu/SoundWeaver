@@ -34,9 +34,9 @@ class AudioInfo:
     def describe(self) -> str:
         minutes, seconds = int(self.duration // 60), int(self.duration % 60)
         parts = (
-            ["杜比全景声，按 5.1.4 渲染"]
+            ["杜比全景声 (5.1.4 渲染)"]
             if self.atmos
-            else [f"{self.channels} 声道（{LAYOUT_NAMES[self.layout]}）"]
+            else [f"{self.channels} 声道 ({LAYOUT_NAMES[self.layout]})"]
         )
         parts.append(f"{minutes}:{seconds:02d}")
         if self.sample_rate:

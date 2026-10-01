@@ -28,7 +28,7 @@ def renderer_script(name: str) -> Path:
     script = RENDERER_DIR / "dist" / name
     if not script.is_file():
         raise RendererError(
-            f"渲染器尚未构建，先在 {RENDERER_DIR} 运行 bun install 与 bun run build"
+            f"渲染器组件尚未构建，请先在 {RENDERER_DIR} 目录执行 bun install 与 bun run build"
         )
     return script
 
@@ -58,7 +58,7 @@ def find_runtime() -> str:
     for bun in (shutil.which("bun"), Path.home() / ".bun" / "bin" / "bun"):
         if bun and Path(bun).is_file():
             return str(bun)
-    raise RendererError("找不到 node 或 bun，视频渲染需要 JavaScript 运行时")
+    raise RendererError("未检测到 Node.js 或 Bun，视频渲染需要 JavaScript 运行时环境")
 
 
 def run_renderer(
