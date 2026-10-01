@@ -28,9 +28,7 @@ DEFAULT_TRACKS = ("original",)
 class SoundfieldPanel(FeaturePanel):
     title = "声场视频"
     icon = "audio-speakers-symbolic"
-    description = (
-        "将全景声动态对象在 3D 空间内的运动轨迹与电平可视化，输出带 Alpha 透明通道的 WebM (VP9) 视频"
-    )
+    description = "将全景声动态对象在 3D 空间内的运动轨迹与电平可视化，输出带 Alpha 透明通道的 WebM (VP9) 视频"
     enabled_key = "do_soundfield"
     enabled_default = False
 
@@ -128,7 +126,11 @@ class SoundfieldPanel(FeaturePanel):
         for track in project.tracks:
             if track.key not in TRACK_SPEAKERS:
                 continue  # the LFE and the frequency bands have no place in the room
-            text = f"源音频（{track.path.name}）" if track.is_original else f"{track.label}（{track.key}）"
+            text = (
+                f"源音频（{track.path.name}）"
+                if track.is_original
+                else f"{track.label}（{track.key}）"
+            )
             speakers = " ".join(TRACK_SPEAKERS[track.key])
             tip = f"{track.hint}\n非此音轨扬声器（{speakers}）分配范围内的对象将暗化呈现"
             items.append(widgets.TrackItem(track.key, text, tip))

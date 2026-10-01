@@ -109,7 +109,12 @@ class Tracer:
     """Collects every dynamic object's position keys, fed the metadata in syncframe order."""
 
     def __init__(self, sample_rate: int, first: int, length: int, samples: int) -> None:
-        self.sample_rate, self.first, self.length, self.samples = sample_rate, first, length, samples
+        self.sample_rate, self.first, self.length, self.samples = (
+            sample_rate,
+            first,
+            length,
+            samples,
+        )
         self.keys: dict[int, list[Key]] = {}
         self.program: Program | None = None
 

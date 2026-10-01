@@ -96,7 +96,9 @@ class TaskView(QTreeWidget):
 
     def failures(self) -> list[str]:
         """Title and error of every failed step."""
-        return [f"{self.topLevelItem(i).text(0)}：{error}" for i, error in sorted(self._errors.items())]
+        return [
+            f"{self.topLevelItem(i).text(0)}：{error}" for i, error in sorted(self._errors.items())
+        ]
 
     def _open(self, item: QTreeWidgetItem, _column: int) -> None:
         index = self.indexOfTopLevelItem(item)

@@ -65,7 +65,9 @@ class SourcePanel(QGroupBox):
         self.cover_preview = widgets.preview_label(text="无封面", side=112)
         grid.addWidget(self.cover_preview, 0, 0, 5, 1, Qt.AlignmentFlag.AlignTop)
 
-        self.audio_edit = self._row(grid, 0, "音频(&U)", "支持 m4a / eac3 / wav / flac 等格式", self.pick_audio)
+        self.audio_edit = self._row(
+            grid, 0, "音频(&U)", "支持 m4a / eac3 / wav / flac 等格式", self.pick_audio
+        )
         self.audio_info = widgets.hint_label()
         grid.addWidget(self.audio_info, 1, 2)
         self.cover_edit = self._row(
@@ -125,7 +127,13 @@ class SourcePanel(QGroupBox):
         return str(self.settings.value("last_dir", str(Path.home())))
 
     def set_running(self, running: bool) -> None:
-        for widget in (self.audio_edit, self.cover_edit, self.ttml_edit, self.out_edit, *self._buttons):
+        for widget in (
+            self.audio_edit,
+            self.cover_edit,
+            self.ttml_edit,
+            self.out_edit,
+            *self._buttons,
+        ):
             widget.setEnabled(not running)
 
     # ---- picking ---------------------------------------------------------------------
@@ -231,7 +239,9 @@ class SourcePanel(QGroupBox):
         pixmap = QPixmap(str(cover)) if cover and cover.is_file() else QPixmap()
         if pixmap.isNull():
             self.cover_preview.setPixmap(QPixmap())
-            self.cover_preview.setText(("无法读取" if cover.is_file() else "文件不存在") if cover else "无封面")
+            self.cover_preview.setText(
+                ("无法读取" if cover.is_file() else "文件不存在") if cover else "无封面"
+            )
             return
         self.cover_preview.setPixmap(
             pixmap.scaled(

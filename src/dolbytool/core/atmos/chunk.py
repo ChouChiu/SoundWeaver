@@ -84,8 +84,7 @@ class _Chunk:
         self.measured: list[Measure] = []
         self.clipped = 0
         self.speakers = (
-            np.memmap(job.speakers, dtype=np.float32, mode="r+")
-            .reshape(len(SPEAKERS), -1)
+            np.memmap(job.speakers, dtype=np.float32, mode="r+").reshape(len(SPEAKERS), -1)
             if job.speakers is not None
             else None
         )
@@ -97,7 +96,9 @@ class _Chunk:
         except BitstreamError as error:
             raise AtmosError(f"第 {k} 帧的全景声元数据无法解析：{error}") from error
         if params.dmx_config not in FIVE_CHANNEL_CONFIGS:
-            raise AtmosError(f"暂不支持这种全景声下混配置（joc_dmx_config_idx={params.dmx_config}）")
+            raise AtmosError(
+                f"暂不支持这种全景声下混配置（joc_dmx_config_idx={params.dmx_config}）"
+            )
         return params
 
     def read(self, k: int) -> np.ndarray:

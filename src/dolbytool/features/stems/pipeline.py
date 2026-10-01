@@ -227,7 +227,11 @@ def _mono(source: AudioData, out: _Writer, crossover: float, token: Cancellation
         difference(middle, presence, low, token)
         difference(high, source, presence, token)
         fit_group((low, middle, high), token)
-        for kind, audio in ((StemKind.LOW, low), (StemKind.MID_BAND, middle), (StemKind.HIGH, high)):
+        for kind, audio in (
+            (StemKind.LOW, low),
+            (StemKind.MID_BAND, middle),
+            (StemKind.HIGH, high),
+        ):
             out.write(kind, audio)
 
 

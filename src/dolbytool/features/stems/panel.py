@@ -119,7 +119,9 @@ class StemsPanel(FeaturePanel):
         atmos = project.info is not None and project.info.atmos
         self.adm.setEnabled(atmos)
         exists = bool(
-            project.audio and project.output_dir and adm_target(project.output_dir, project.audio).is_file()
+            project.audio
+            and project.output_dir
+            and adm_target(project.output_dir, project.audio).is_file()
         )
         self.adm.setText(ADM_TEXT + ("（已有）" if exists else ""))
         self.adm.setToolTip(ADM_TIP if atmos else "当前输入非杜比全景声，无法导出 ADM BWF")
@@ -135,7 +137,9 @@ class StemsPanel(FeaturePanel):
             self.info.setText("载入音频后显示可用分轨")
             return
         done = sum(t.exists for t in stems)
-        self.info.setText(f"输出目录已存在 {done}/{len(stems)} 条分轨" if done else "输出目录尚未生成分轨")
+        self.info.setText(
+            f"输出目录已存在 {done}/{len(stems)} 条分轨" if done else "输出目录尚未生成分轨"
+        )
 
     def is_active(self, ctx: PlanContext) -> bool:
         return bool(self._kinds(ctx)) or self._adm(ctx)

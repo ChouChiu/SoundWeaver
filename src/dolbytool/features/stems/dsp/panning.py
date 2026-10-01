@@ -22,8 +22,8 @@ import numpy as np
 from scipy.ndimage import uniform_filter1d
 
 from dolbytool.core.cancel import CancellationToken
-from dolbytool.features.stems.dsp.spectral import istft, stft
 from dolbytool.core.pcm import AudioData
+from dolbytool.features.stems.dsp.spectral import istft, stft
 
 logger = logging.getLogger(__name__)
 

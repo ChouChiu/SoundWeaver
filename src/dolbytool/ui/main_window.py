@@ -99,8 +99,12 @@ class MainWindow(QMainWindow):
                                 QKeySequence("Ctrl+L"))  # fmt: skip
         self.act_open_dir = action("打开输出目录(&D)", "folder-open", self._open_output_dir,
                                    QKeySequence("Ctrl+E"))  # fmt: skip
-        self.act_quit = action("退出(&Q)", "application-exit", self.close, QKeySequence.StandardKey.Quit)
-        self.act_start = action("开始(&S)", "media-playback-start", self._start, QKeySequence("Ctrl+Return"))
+        self.act_quit = action(
+            "退出(&Q)", "application-exit", self.close, QKeySequence.StandardKey.Quit
+        )
+        self.act_start = action(
+            "开始(&S)", "media-playback-start", self._start, QKeySequence("Ctrl+Return")
+        )
         self.act_cancel = action("取消(&X)", "process-stop", self._cancel, QKeySequence("Escape"))
         self.act_cancel.setEnabled(False)
         self.act_about = action("关于(&A)", "help-about", self._about)
@@ -506,7 +510,9 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         if self.worker:
-            answer = QMessageBox.question(self, "任务运行中", "后台任务尚未完成，确定要取消任务并退出吗？")
+            answer = QMessageBox.question(
+                self, "任务运行中", "后台任务尚未完成，确定要取消任务并退出吗？"
+            )
             if answer != QMessageBox.StandardButton.Yes:
                 event.ignore()
                 return

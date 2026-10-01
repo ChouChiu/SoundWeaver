@@ -46,7 +46,9 @@ class FeaturePanel(QWidget):
             self._enabled = on
             self.changed.emit()
 
-    def spin(self, key: str, low: int, high: int, value: int, suffix: str = "", step: int = 1) -> QSpinBox:
+    def spin(
+        self, key: str, low: int, high: int, value: int, suffix: str = "", step: int = 1
+    ) -> QSpinBox:
         box = widgets.spin(low, high, value, suffix, step)
         self.remember(key, box)
         return box

@@ -145,4 +145,3 @@ class WaveformPanel(FeaturePanel):
 
     def _colors(self) -> tuple[widgets.ColorButton, ...]:
         return (self.wave_color, self.background, self.playhead)
-

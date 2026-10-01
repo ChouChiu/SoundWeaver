@@ -22,6 +22,7 @@ import tempfile
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from itertools import pairwise
 from multiprocessing.pool import AsyncResult
 from pathlib import Path
 
@@ -122,7 +123,7 @@ class _Decode:
         workers = min(_MAX_WORKERS, max(1, (os.process_cpu_count() or 2) - 1))
         count = max(1, min(workers * _CHUNKS_PER_WORKER, total // _MIN_CHUNK_FRAMES))
         bounds = [round(total * i / count) for i in range(count + 1)]
-        self.chunks = list(zip(bounds[:-1], bounds[1:], strict=True))
+        self.chunks = list(pairwise(bounds))
         self.workers = min(workers, count)
 
     def run(self, token: CancellationToken, on_fraction: Callable[[float], None]) -> ObjectTrace:
@@ -150,7 +151,9 @@ class _Decode:
                         raise AtmosError(f"第 {k} 帧没有对象元数据，不是完整的全景声码流")
                     oamd_payloads.append(payloads[OAMD_PAYLOAD])
                     joc_payloads.append(payloads[JOC_PAYLOAD])
-                    starts_chunk = len(snapshots) < len(self.chunks) and k == self.chunks[len(snapshots)][0]
+                    starts_chunk = (
+                        len(snapshots) < len(self.chunks) and k == self.chunks[len(snapshots)][0]
+                    )
                     oamd_state = oamd.snapshot() if starts_chunk else None
                     try:
                         meta = oamd.decode(payloads[OAMD_PAYLOAD])
@@ -160,7 +163,11 @@ class _Decode:
                         renderer = Renderer(len(joc_objects(meta)))
                         if self.adm_path is not None:
                             adm = AdmFile(
-                                self.adm_path, self.rate, self.length, meta.program, meta.object_count
+                                self.adm_path,
+                                self.rate,
+                                self.length,
+                                meta.program,
+                                meta.object_count,
                             )
                     if adm is not None and meta.object_count != adm.channels:
                         raise AtmosError("全景声对象数中途改变，ADM 无法容纳")
@@ -254,7 +261,7 @@ def _cached_trace(source: Path) -> ObjectTrace | None:
             trace = pickle.load(file)
     except FileNotFoundError:
         return None
-    except Exception:  # noqa: BLE001 - a stale or torn cache entry is just a miss
+    except Exception:
         logger.warning("atmos: discarding unreadable trace cache %s", path, exc_info=True)
         path.unlink(missing_ok=True)
         return None
@@ -274,9 +281,7 @@ def _store_trace(source: Path, trace: ObjectTrace) -> None:
 
 
 @contextmanager
-def _prepare(
-    source: Path, token: CancellationToken
-) -> Iterator[tuple[list, Path, int, int, int]]:
+def _prepare(source: Path, token: CancellationToken) -> Iterator[tuple[list, Path, int, int, int]]:
     """Syncframes, the decoded core, its rate, and the container's span of its timeline."""
     with tempfile.TemporaryDirectory(dir=work_root()) as scratch:
         work = Path(scratch)

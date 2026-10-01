@@ -65,7 +65,14 @@ def split_step(
 
     def run(token: CancellationToken, report: Report) -> str:
         notes = split_stems(
-            source, output_dir, kinds, crossover_hz, atmos=atmos, adm=adm, token=token, report=report
+            source,
+            output_dir,
+            kinds,
+            crossover_hz,
+            atmos=atmos,
+            adm=adm,
+            token=token,
+            report=report,
         )
         names = [stem_label(k) for k in kinds] + (["ADM BWF"] if adm is not None else [])
         return "、".join(names) + "".join(f"；{note}" for note in notes)
