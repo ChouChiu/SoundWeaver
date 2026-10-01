@@ -11,6 +11,7 @@ license = { text = "AGPL-3.0-or-later" }
 dependencies = [
   "numpy>=2.0,<3",
   "Pillow>=11",
+  "pyside6>=6.11.2",
   "scipy>=1.14,<2",
   "soundfile>=0.13,<1",
 ]
