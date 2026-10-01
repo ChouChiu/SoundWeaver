@@ -1,0 +1,49 @@
+html,
+body {
+	margin: 0;
+	width: 100%;
+	height: 100%;
+	overflow: hidden;
+	background: transparent;
+}
+
+#stage {
+	position: fixed;
+	inset: 0;
+	font-family: var(--lyric-font-family), sans-serif;
+}
+
+.slot {
+	position: absolute;
+	inset: 0;
+}
+
+/* One line, centred on a transparent stage: no blend mode, no side padding */
+#stage .amll-lyric-player.dom {
+	--amll-lp-line-width-aspect: 1;
+	--amll-lp-line-padding-x: 0;
+	--amll-lp-hover-bg-color: transparent;
+	mix-blend-mode: normal;
+	font-family: inherit;
+}
+
+#stage [class*="_lyricLineWrapper"] {
+	align-items: center;
+}
+
+#stage [class*="_lyricLine"],
+#stage [class*="_lyricMainLine"],
+#stage [class*="_lyricSubLine"] {
+	text-align: center;
+	transform-origin: center;
+}
+
+/* AMLL keeps translations at 30 %, too faint over video */
+#stage [class*="_lyricSubLine"] {
+	opacity: var(--sub-opacity, 0.7) !important;
+}
+
+#stage [class*="_interludeDots"],
+#stage [class*="_bottomLine"] {
+	display: none !important;
+}
