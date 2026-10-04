@@ -520,5 +520,7 @@ class MainWindow(QMainWindow):
             # a QThread destroyed while still running would abort the process
             self.worker.cancel()
             self.worker.wait()
+        for panel in self.panels:
+            panel.shutdown()
         self._save_settings()
         super().closeEvent(event)

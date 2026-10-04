@@ -10,6 +10,7 @@ from PySide6.QtCore import QSettings
 
 from dolbytool.features.gradient.panel import GradientPanel
 from dolbytool.features.lyrics.panel import LyricsPanel
+from dolbytool.features.player.panel import PlayerPanel
 from dolbytool.features.soundfield.panel import SoundfieldPanel
 from dolbytool.features.stems.panel import StemsPanel
 from dolbytool.features.waveform.panel import WaveformPanel
@@ -20,6 +21,7 @@ PANELS: tuple[type[FeaturePanel], ...] = (
     GradientPanel,
     WaveformPanel,
     LyricsPanel,
+    PlayerPanel,
     SoundfieldPanel,
 )
 

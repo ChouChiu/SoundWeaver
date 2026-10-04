@@ -33,6 +33,7 @@ jobs:
           # Bundle npm packages into the CLI scripts, the packaged app ships no node_modules
           bun build src/cli/main.ts --outfile dist/render.mjs --target node
           bun build src/cli/soundfield.ts --outfile dist/soundfield.mjs --target node
+          bun build src/cli/player.ts --outfile dist/player.mjs --target node
 
       - uses: astral-sh/setup-uv@v6
         with:

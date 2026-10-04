@@ -17,6 +17,8 @@ export interface StageSettings {
 	width: number;
 	height: number;
 	fps: number;
+	// device pixel ratio: the page lays out at width / scale CSS pixels and is drawn at full size
+	scale?: number;
 	// browser flags on top of the deterministic ones
 	args?: string[];
 	// load the content once the page has navigated
@@ -39,12 +41,21 @@ export class Stage {
 	}
 
 	static async open(run: Run, settings: StageSettings): Promise<Stage> {
-		const { width, height, fps } = settings;
+		const { fps } = settings;
+		const scale = settings.scale ?? 1;
+		// window and target sizes are CSS pixels; the screenshot comes back in device pixels
+		const width = Math.round(settings.width / scale);
+		const height = Math.round(settings.height / scale);
 		const browser = await puppeteer.launch({
 			executablePath: settings.executablePath,
 			headless: "shell",
 			defaultViewport: null,
-			args: [`--window-size=${width},${height}`, ...BROWSER_ARGS, ...(settings.args ?? [])],
+			args: [
+				`--window-size=${width},${height}`,
+				...BROWSER_ARGS.filter((a) => !a.startsWith("--force-device-scale-factor")),
+				`--force-device-scale-factor=${scale}`,
+				...(settings.args ?? []),
+			],
 		});
 		run.browsers.add(browser);
 		debug(`browser ${browser.process()?.pid} launched`);

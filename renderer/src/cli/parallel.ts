@@ -2,7 +2,7 @@
 
 import { mkdtemp } from "node:fs/promises";
 import path from "node:path";
-import { concat } from "./ffmpeg";
+import { concat, type Codec } from "./ffmpeg";
 import { debug, emit, status } from "./log";
 import { isAbort, Run } from "./run";
 import { renderSegment, splitFrames } from "./segment";
@@ -14,6 +14,11 @@ const MIN_SEGMENT_SECONDS = 10;
 export interface Timeline {
 	fps: number;
 	crf: number;
+	// VP9 with alpha unless a page draws an opaque frame
+	codec?: Codec;
+	size?: [number, number];
+	// first frame on the page's timeline, for a render that starts mid-song
+	startFrame?: number;
 	out: string;
 	seconds: number;
 	// upper bound on parallel browsers
@@ -25,7 +30,7 @@ export async function renderTimeline(
 	run: Run,
 	first: Stage,
 	open: () => Promise<Stage>,
-	{ fps, crf, out, seconds, jobs: maxJobs }: Timeline,
+	{ fps, crf, codec = "vp9", size, out, seconds, jobs: maxJobs, startFrame = 0 }: Timeline,
 ): Promise<void> {
 	const total = Math.max(1, Math.round(seconds * fps));
 	const jobs = Math.max(1, Math.min(maxJobs, Math.floor(seconds / MIN_SEGMENT_SECONDS)));
@@ -37,20 +42,21 @@ export async function renderTimeline(
 	};
 
 	if (jobs === 1) {
-		await renderSegment(run, first, fps, crf, { from: 0, to: total, out }, onFrame);
+		await renderSegment(run, first, { fps, crf, codec, size }, { from: startFrame, to: startFrame + total, out }, onFrame);
 		return;
 	}
 
 	status(`分 ${jobs} 段并行渲染`);
 	const tmp = await mkdtemp(path.join(path.dirname(out), ".render-parts-"));
-	run.partsDir = tmp;
-	const segments = splitFrames(total, jobs, (i) => path.join(tmp, `part${i}.webm`));
+	run.tempDirs.add(tmp);
+	const ext = path.extname(out);
+	const segments = splitFrames(total, jobs, (i) => path.join(tmp, `part${i}${ext}`), startFrame);
 	// wait for every segment, so no browser is still launching when we clean up
 	const results = await Promise.allSettled(
 		segments.map(async (segment, i) => {
 			try {
 				const stage = i === 0 ? first : await open();
-				await renderSegment(run, stage, fps, crf, segment, onFrame);
+				await renderSegment(run, stage, { fps, crf, codec, size }, segment, onFrame);
 				await stage.close();
 				debug(`segment ${i}: browser closed`);
 			} catch (error) {
@@ -65,7 +71,7 @@ export async function renderTimeline(
 	);
 	if (failed) throw failed.reason;
 	status("拼接分段");
-	await concat(run, segments.map((s) => s.out), out, tmp);
+	await concat(run, segments.map((s) => s.out), out, tmp, codec);
 	debug("concatenated");
 }
 

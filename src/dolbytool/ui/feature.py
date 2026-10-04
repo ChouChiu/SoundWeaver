@@ -89,6 +89,9 @@ class FeaturePanel(QWidget):
         """Log lines to print when the run starts."""
         return []
 
+    def shutdown(self) -> None:
+        """The window is closing: stop anything the panel still has running."""
+
     # ---- settings --------------------------------------------------------------------
 
     def save(self) -> None:

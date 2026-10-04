@@ -29,6 +29,85 @@ export interface AmllRender {
 	settle(): void;
 }
 
+export type BackgroundKind = "mesh" | "isolation" | "solid" | "none";
+export type ControlsKind = "controls" | "fft" | "none";
+export type LyricSize = "tiny" | "extra-small" | "small" | "medium" | "large" | "extra-large" | "huge";
+
+/**
+ * The full player page: AMLL's PrebuiltLyricPlayer (react-full), the AMLL
+ * Player layout with artwork, song info, progress, controls and lyrics.
+ * Landscape frames get the horizontal layout, portrait ones the vertical.
+ */
+export interface PlayerOptions {
+	background: BackgroundKind;
+	// mesh / isolation flow speed, 1 is AMLL's default
+	flowSpeed: number;
+	// background canvas resolution relative to the frame
+	renderScale: number;
+	// solid background, any CSS colour
+	color: string;
+	// seeds every random choice of the page, so parallel segments draw the same
+	seed: number;
+	// isolation only: brightness waves
+	lightWave: boolean;
+	fontFamily: string;
+	fontWeight: number;
+	// em
+	letterSpacing: number;
+	lyricSize: LyricSize;
+	// width of the soft edge of the word highlight, in multiples of the line height
+	wordFadeWidth: number;
+	blur: boolean;
+	scale: boolean;
+	spring: boolean;
+	translation: boolean;
+	romanization: boolean;
+	swapTransRoman: boolean;
+	backgroundVocals: boolean;
+	showName: boolean;
+	showArtists: boolean;
+	showAlbum: boolean;
+	controls: ControlsKind;
+	showVolume: boolean;
+	// volume slider position, 0..1
+	volume: number;
+	// lyrics / AirPlay / playlist toggles under the controls
+	showBottomControls: boolean;
+	// time left instead of the total under the progress bar
+	showRemaining: boolean;
+	// quality badge under the progress bar, empty for none
+	qualityTag: string;
+	dolbyAtmos: boolean;
+	title: string;
+	artists: string[];
+	album: string;
+	// song length for the progress bar, ms
+	durationMs: number;
+	// even out the lengths of a wrapped line's rows instead of filling the first
+	balance: boolean;
+	// landscape: empty space right of the lyrics, percent of the column; negative keeps AMLL's 15 % / 8 %
+	lyricPadding: number;
+}
+
+/**
+ * Per-frame audio analysis, one entry every `step` ms: the low band 0..1 for
+ * the mesh background's pulse, and spectrum bands for the FFT controls.
+ */
+export interface AudioFrames {
+	step: number;
+	low: number[] | null;
+	fft: number[][] | null;
+}
+
+export interface PlayerRender {
+	/** Build the page; `cover` is a data: URL or null.  Returns how many lyric lines are shown. */
+	load(ttml: string, options: PlayerOptions, cover: string | null, audio: AudioFrames | null): Promise<number>;
+	/** Park the lyric springs and finish the background fade-in once fonts and layout are ready. */
+	settle(): void;
+	/** The WebGL renderer string, or an empty string without a WebGL background. */
+	gpu(): string;
+}
+
 export type ViewPreset = "iso" | "top" | "angle";
 
 export interface SoundfieldOptions {
@@ -66,6 +145,7 @@ declare global {
 	interface Window {
 		renderPage: RenderPage;
 		amllRender: AmllRender;
+		player: PlayerRender;
 		soundfield: SoundfieldRender;
 	}
 }

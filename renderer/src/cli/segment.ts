@@ -1,6 +1,6 @@
 /** Render a frame range of the timeline into one WebM. */
 
-import { encoder } from "./ffmpeg";
+import { type Encoding, encoder } from "./ffmpeg";
 import { debug } from "./log";
 import type { Run } from "./run";
 import type { Stage } from "./stage";
@@ -19,18 +19,18 @@ export interface Segment {
 export async function renderSegment(
 	run: Run,
 	stage: Stage,
-	fps: number,
-	crf: number,
+	encoding: Encoding,
 	{ from, to, out }: Segment,
 	onFrame: () => void,
 ): Promise<void> {
+	const { fps } = encoding;
 	const at = (frame: number) => (frame * 1000) / fps;
 	const preroll = Math.floor(((await stage.prerollStart(at(from))) * fps) / 1000);
 	debug(`segment ${from}-${to}: preroll from ${preroll}`);
 	for (let frame = Math.max(0, preroll); frame < from; frame++) {
 		if ((await stage.seek(at(frame))) > 0) await stage.frame(false);
 	}
-	const { stdin, done } = encoder(run, fps, crf, out);
+	const { stdin, done } = encoder(run, encoding, out);
 	// surface an encoder failure on the next frame instead of as an unhandled rejection
 	let failure: unknown = null;
 	done.catch((error) => {
@@ -63,8 +63,8 @@ export async function renderSegment(
 	debug(`segment ${from}-${to}: done`);
 }
 
-/** Split `total` frames into `jobs` nearly equal consecutive ranges. */
-export function splitFrames(total: number, jobs: number, out: (i: number) => string): Segment[] {
-	const bounds = Array.from({ length: jobs + 1 }, (_, i) => Math.round((total * i) / jobs));
+/** Split `total` frames from `start` into `jobs` nearly equal consecutive ranges. */
+export function splitFrames(total: number, jobs: number, out: (i: number) => string, start = 0): Segment[] {
+	const bounds = Array.from({ length: jobs + 1 }, (_, i) => start + Math.round((total * i) / jobs));
 	return bounds.slice(0, -1).map((from, i) => ({ from, to: bounds[i + 1], out: out(i) }));
 }

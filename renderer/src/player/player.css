@@ -1,0 +1,39 @@
+html,
+body,
+#root {
+	margin: 0;
+	width: 100%;
+	height: 100%;
+	overflow: hidden;
+	background: #000;
+}
+
+/* What the AMLL Player app sets around the prebuilt player: white text, a sans-serif stack */
+#root {
+	color: #fff;
+	font-family: system-ui, -apple-system, "SF Pro", "PingFang SC", "Noto Sans CJK SC", "Noto Sans", sans-serif;
+	user-select: none;
+}
+
+/* background "none": nothing behind the player, the frame keeps its alpha */
+body.transparent,
+body.transparent #root {
+	background: transparent;
+}
+
+/*
+ * Wrapped lines: AMLL fills the first row and leaves a word or two on the
+ * next; balance evens the rows out, the way Apple Music breaks long lines.
+ */
+body.balance [class*="_lyricMainLine"],
+body.balance [class*="_lyricSubLine"] {
+	text-wrap: balance;
+}
+
+/*
+ * Landscape: the lyric column keeps 15 % empty on its right (8 % in small
+ * windows), which wraps lines that would fit; this narrows or removes it.
+ */
+body[style*="--player-lyric-padding"] [class*="_horizontalLayout"] > [class*="_lyric"] {
+	padding-right: var(--player-lyric-padding) !important;
+}

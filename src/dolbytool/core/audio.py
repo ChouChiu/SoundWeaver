@@ -26,6 +26,10 @@ class AudioInfo:
     sample_rate: int = 0
     # stream index of an embedded cover picture
     cover_stream: int | None = None
+    # container tags, empty when missing
+    title: str = ""
+    artist: str = ""
+    album: str = ""
 
     @property
     def layout(self) -> StemLayout:
@@ -51,6 +55,16 @@ def _is_atmos(stream: dict) -> bool:
     return stream.get("codec_name") == "eac3" and "Atmos" in stream.get("profile", "")
 
 
+def _tags(data: dict, stream: dict) -> dict[str, str]:
+    """Container tags, then the audio stream's, with lower-cased keys (Matroska shouts them)."""
+    tags: dict[str, str] = {}
+    for source in (stream.get("tags", {}), data.get("format", {}).get("tags", {})):
+        for key, value in source.items():
+            if str(value).strip():
+                tags[key.lower()] = str(value).strip()
+    return tags
+
+
 def probe_audio(path: Path) -> AudioInfo:
     """Layout, length and embedded cover of the first audio stream; raises FFmpegError if unusable."""
     data = ffmpeg.probe(path)
@@ -69,6 +83,7 @@ def probe_audio(path: Path) -> AudioInfo:
         None,
     )
     atmos = _is_atmos(stream)
+    tags = _tags(data, stream)
     return AudioInfo(
         ATMOS_CHANNELS if atmos else channels,
         seconds,
@@ -76,4 +91,7 @@ def probe_audio(path: Path) -> AudioInfo:
         codec=str(stream.get("codec_long_name") or stream.get("codec_name") or ""),
         sample_rate=int(stream.get("sample_rate") or 0),
         cover_stream=cover,
+        title=tags.get("title", ""),
+        artist=tags.get("artist", "") or tags.get("album_artist", ""),
+        album=tags.get("album", ""),
     )

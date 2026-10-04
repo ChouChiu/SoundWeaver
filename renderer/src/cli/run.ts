@@ -1,6 +1,7 @@
 /**
  * Everything a run has started, so a failure or a cancel can tear it all down:
- * child processes, browsers, and the directory of segment files.
+ * child processes, browsers, and the scratch directories (segment files, the
+ * picture-only video before the audio goes in).
  */
 
 import type { ChildProcess } from "node:child_process";
@@ -17,8 +18,8 @@ export class Run {
 	// set when one segment fails or the run is cancelled; the other segments stop at their next frame
 	aborted = false;
 	cancelling = false;
-	// segment directory of a parallel run, removed on exit and on cancel
-	partsDir: string | null = null;
+	// scratch directories, removed on exit and on cancel
+	readonly tempDirs = new Set<string>();
 
 	throwIfAborted(): void {
 		if (this.aborted) throw new Error(ABORTED);
@@ -31,7 +32,7 @@ export class Run {
 	/** Normal end of a run, successful or not. */
 	async cleanup(): Promise<void> {
 		await this.closeBrowsers();
-		if (this.partsDir) await rm(this.partsDir, { recursive: true, force: true });
+		await Promise.all([...this.tempDirs].map((dir) => rm(dir, { recursive: true, force: true })));
 	}
 
 	/** SIGTERM / SIGINT: kill everything and exit once the browsers are closed. */
@@ -40,7 +41,7 @@ export class Run {
 		this.cancelling = true;
 		for (const child of this.children) child.kill("SIGKILL");
 		this.closeBrowsers().finally(() => {
-			if (this.partsDir) rmSync(this.partsDir, { recursive: true, force: true });
+			for (const dir of this.tempDirs) rmSync(dir, { recursive: true, force: true });
 			process.exit(130);
 		});
 	}
