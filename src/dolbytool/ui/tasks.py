@@ -5,10 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import QSize, QUrl
-from PySide6.QtGui import QDesktopServices, QIcon
-from PySide6.QtWidgets import QHeaderView, QProgressBar, QTreeWidget, QTreeWidgetItem, QWidget
+from PySide6.QtGui import QDesktopServices
+from PySide6.QtWidgets import QHeaderView, QTreeWidgetItem, QVBoxLayout, QWidget
+from qfluentwidgets import ProgressBar, TreeWidget
 
 from dolbytool.core.task import Step
+from dolbytool.ui import fluent
 from dolbytool.ui.worker import Outcome
 
 _ICONS = {
@@ -27,7 +29,16 @@ _STATES = {
 }
 
 
-class TaskView(QTreeWidget):
+def _bar_cell(bar: ProgressBar) -> QWidget:
+    """The thin Fluent bar centred in its cell, which an item widget would fill from the top."""
+    cell = QWidget()
+    layout = QVBoxLayout(cell)
+    layout.setContentsMargins(6, 0, 10, 0)
+    layout.addWidget(bar)
+    return cell
+
+
+class TaskView(TreeWidget):
     """One row per step; a finished row opens its output on double click."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -36,14 +47,13 @@ class TaskView(QTreeWidget):
         self.setHeaderLabels(["任务", "进度", "状态"])
         self.setRootIsDecorated(False)
         self.setUniformRowHeights(True)
-        self.setAlternatingRowColors(True)
         header = self.header()
         header.setStretchLastSection(True)
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
         header.resizeSection(1, 160)
         self.itemDoubleClicked.connect(self._open)
-        self._bars: list[QProgressBar] = []
+        self._bars: list[ProgressBar] = []
         self._values: list[int] = []
         self._targets: list[tuple[Path, ...]] = []
         self._errors: dict[int, str] = {}
@@ -54,13 +64,11 @@ class TaskView(QTreeWidget):
         self._targets = [step.targets for step in steps]
         for step in steps:
             item = QTreeWidgetItem([step.title, "", "等待中"])
-            item.setIcon(0, QIcon.fromTheme(_ICONS["queued"]))
+            item.setIcon(0, fluent.qicon(_ICONS["queued"]))
             self.addTopLevelItem(item)
-            bar = QProgressBar()
+            bar = ProgressBar(useAni=False)
             bar.setRange(0, 100)
-            bar.setTextVisible(True)
-            bar.setMaximumHeight(18)
-            self.setItemWidget(item, 1, bar)
+            self.setItemWidget(item, 1, _bar_cell(bar))
             self._bars.append(bar)
 
     def overall(self) -> int:
@@ -68,7 +76,7 @@ class TaskView(QTreeWidget):
 
     def started(self, index: int) -> None:
         item = self.topLevelItem(index)
-        item.setIcon(0, QIcon.fromTheme(_ICONS["running"]))
+        item.setIcon(0, fluent.qicon(_ICONS["running"]))
         item.setText(2, "运行中")
         self.scrollToItem(item)
 
@@ -79,7 +87,7 @@ class TaskView(QTreeWidget):
 
     def finished(self, index: int, outcome: str, note: str, seconds: float) -> None:
         item = self.topLevelItem(index)
-        item.setIcon(0, QIcon.fromTheme(_ICONS[outcome]))
+        item.setIcon(0, fluent.qicon(_ICONS[outcome]))
         state = _STATES[Outcome(outcome)]
         if outcome == Outcome.DONE:
             self._values[index] = 100
@@ -91,6 +99,10 @@ class TaskView(QTreeWidget):
             self._values[index] = 100
         if outcome == Outcome.FAILED:
             self._errors[index] = note
+            self._bars[index].error()
+            item.setForeground(2, fluent.negative())
+        elif outcome == Outcome.CANCELLED:
+            self._bars[index].pause()
         item.setText(2, f"{state}：{note}" if note else state)
         item.setToolTip(2, note)
 

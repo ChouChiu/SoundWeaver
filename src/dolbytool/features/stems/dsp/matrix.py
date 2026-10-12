@@ -17,12 +17,11 @@ from dolbytool.core.pcm import BLOCK_FRAMES, AudioData
 
 logger = logging.getLogger(__name__)
 
-# WAVE_FORMAT_EXTENSIBLE orders a 5.1 master this way, and so does every
-# container libsndfile hands back with six channels.
-FRONT_LEFT, FRONT_RIGHT, FRONT_CENTER, LOW_FREQUENCY, SIDE_LEFT, SIDE_RIGHT = range(6)
-# A 5.1.4 render continues with its heights, again in WAVE_FORMAT_EXTENSIBLE order.
-TOP_FRONT_LEFT, TOP_FRONT_RIGHT, TOP_BACK_LEFT, TOP_BACK_RIGHT = range(6, 10)
-HEIGHT_CHANNELS = 10
+# Every layout of `core.speakers` starts this way, as WAVE_FORMAT_EXTENSIBLE
+# orders it; the rest of its channels are found by name.
+FRONT_LEFT, FRONT_RIGHT, FRONT_CENTER, LOW_FREQUENCY = range(4)
+# channel indices on each side of the room, (left, right)
+Sides = tuple[Sequence[int], Sequence[int]]
 # ITU-R BS.775 folds the centre and the surrounds in at -3 dB.
 DOWNMIX_COEFFICIENT = 0.70710678
 # A 5.1 room plays the LFE 10 dB above a main channel at the same level.  Split
@@ -158,34 +157,35 @@ def _shifted(row: np.ndarray, start: int, end: int, lag: int) -> np.ndarray:
     return out
 
 
-def height_into(destination: AudioData, source: AudioData, token: CancellationToken) -> None:
-    """Fold the four heights to a stereo pair, each side's front and back at -3 dB.
+def height_into(
+    destination: AudioData, source: AudioData, heights: Sides, token: CancellationToken
+) -> None:
+    """Fold the heights to a stereo pair, each at -3 dB when a side has more than one.
 
-    An object panned halfway between the front and back heights comes out at
-    the level it was mixed at; the sum can pass full scale, which the caller
-    holds under with `fit_group`.
+    An object panned halfway between two heights comes out at the level it was
+    mixed at; the sum can pass full scale, which the caller holds under with
+    `fit_group`.  A single pair is the stereo pair as it stands.
     """
+    gain = DOWNMIX_COEFFICIENT if len(heights[0]) > 1 else 1.0
     for start in range(0, destination.frames, BLOCK_FRAMES):
         token.raise_if_cancelled()
         end = min(start + BLOCK_FRAMES, destination.frames)
         block = source.samples[:, start:end]
-        destination.samples[0, start:end] = DOWNMIX_COEFFICIENT * (
-            block[TOP_FRONT_LEFT] + block[TOP_BACK_LEFT]
-        )
-        destination.samples[1, start:end] = DOWNMIX_COEFFICIENT * (
-            block[TOP_FRONT_RIGHT] + block[TOP_BACK_RIGHT]
-        )
+        for row, side in enumerate(heights):
+            destination.samples[row, start:end] = gain * block[list(side)].sum(axis=0)
 
 
 def downmix_into(
     destination: AudioData,
     source: AudioData,
+    sides: Sides,
     token: CancellationToken,
     lfe_lag: int = 0,
 ) -> None:
     """Fold a surround master to stereo: BS.775 for the mains, plus the LFE.
 
-    A 5.1.4 render's heights join their side at -3 dB, as the surrounds do.
+    Every channel in `sides` - the surrounds, and any backs, wides and heights -
+    joins its side at -3 dB.
 
     BS.775 and a Lo/Ro fold-down leave the LFE out, which in a music master
     takes the kick and the sub with it: the front pair carries only what
@@ -197,17 +197,18 @@ def downmix_into(
     where a bound from the channel peaks would hold the whole group down for a
     coincidence that never happens.
     """
-    _fold_into(destination, source, source.samples[FRONT_CENTER], token, lfe_lag, front=True)
+    _fold_into(destination, source, source.samples[FRONT_CENTER], sides, token, lfe_lag, front=True)
 
 
 def surround_into(
     destination: AudioData,
     source: AudioData,
     shared_centre: AudioData,
+    surrounds: Sides,
     token: CancellationToken,
     lfe_lag: int = 0,
 ) -> None:
-    """The surrounds and the LFE, with what of the centre the surrounds share.
+    """The surrounds (any backs among them) and the LFE, with what of the centre they share.
 
     The surrounds alone are ambience twenty decibels under the kick, and the
     LFE is where that kick is.  The centre carries the lead and the backing
@@ -217,18 +218,22 @@ def surround_into(
     stays out: it is where the lead leaks.  The sum can pass full scale; the
     caller holds it under with `fit_group`.
     """
-    _fold_into(destination, source, shared_centre.samples[0], token, lfe_lag, front=False)
+    _fold_into(
+        destination, source, shared_centre.samples[0], surrounds, token, lfe_lag, front=False
+    )
 
 
 def _fold_into(
     destination: AudioData,
     source: AudioData,
     centre: np.ndarray,
+    sides: Sides,
     token: CancellationToken,
     lfe_lag: int,
     *,
     front: bool,
 ) -> None:
+    left_side, right_side = list(sides[0]), list(sides[1])
     lfe = source.samples[LOW_FREQUENCY]
     for start in range(0, destination.frames, BLOCK_FRAMES):
         token.raise_if_cancelled()
@@ -237,13 +242,10 @@ def _fold_into(
         shared = DOWNMIX_COEFFICIENT * centre[start:end] + LFE_DOWNMIX_COEFFICIENT * _shifted(
             lfe, start, end, lfe_lag
         )
-        left = shared + DOWNMIX_COEFFICIENT * block[SIDE_LEFT]
-        right = shared + DOWNMIX_COEFFICIENT * block[SIDE_RIGHT]
+        left = shared + DOWNMIX_COEFFICIENT * block[left_side].sum(axis=0)
+        right = shared + DOWNMIX_COEFFICIENT * block[right_side].sum(axis=0)
         if front:
             left += block[FRONT_LEFT]
             right += block[FRONT_RIGHT]
-            if source.channels >= HEIGHT_CHANNELS:
-                left += DOWNMIX_COEFFICIENT * (block[TOP_FRONT_LEFT] + block[TOP_BACK_LEFT])
-                right += DOWNMIX_COEFFICIENT * (block[TOP_FRONT_RIGHT] + block[TOP_BACK_RIGHT])
         destination.samples[0, start:end] = left
         destination.samples[1, start:end] = right

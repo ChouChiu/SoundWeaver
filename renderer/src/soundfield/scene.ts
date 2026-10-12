@@ -11,6 +11,7 @@
 
 import * as THREE from "three";
 import type { ViewPreset } from "../shared/api";
+import { edgePoints, lineMaterial, segments } from "./lines";
 import type { Vec3 } from "./timeline";
 
 // full size 5.8 x 3.1 x 5.8
@@ -29,7 +30,7 @@ export function toScene([x, y, z]: Vec3): Vec3 {
 	];
 }
 
-function floorGrid(halfX: number, halfZ: number, divX: number, divZ: number): THREE.LineSegments {
+function floorGrid(halfX: number, halfZ: number, divX: number, divZ: number): THREE.Object3D {
 	const pts: number[] = [];
 	for (let i = 0; i <= divX; i++) {
 		const x = -halfX + (2 * halfX * i) / divX;
@@ -39,9 +40,7 @@ function floorGrid(halfX: number, halfZ: number, divX: number, divZ: number): TH
 		const z = -halfZ + (2 * halfZ * j) / divZ;
 		pts.push(-halfX, 0, z, halfX, 0, z);
 	}
-	const geo = new THREE.BufferGeometry();
-	geo.setAttribute("position", new THREE.Float32BufferAttribute(pts, 3));
-	return new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color: 0x5a88b8, transparent: true, opacity: 0.5 }));
+	return segments(pts, lineMaterial({ color: 0x5a88b8, transparent: true, opacity: 0.5, linewidth: 1 }));
 }
 
 /** Arrow on the floor pointing to the front, the absolute reference whatever the head looks like. */
@@ -91,9 +90,9 @@ function room(): THREE.Group {
 			}),
 		),
 	);
-	const edges = new THREE.LineSegments(
-		new THREE.EdgesGeometry(box),
-		new THREE.LineBasicMaterial({ color: 0x7eb4d8, transparent: true, opacity: 0.9, depthTest: false }),
+	const edges = segments(
+		edgePoints(box),
+		lineMaterial({ color: 0x7eb4d8, transparent: true, opacity: 0.9, depthTest: false, linewidth: 1.2 }),
 	);
 	edges.renderOrder = 3;
 	group.add(edges);
@@ -181,8 +180,6 @@ export function objectMesh(): THREE.Mesh {
 	return mesh;
 }
 
-// camera distance and aim, as in the viewer's default zoom
-const DISTANCE = 3.6 * 2.8;
 const TARGET = new THREE.Vector3(0, -0.15, 0);
 const deg = (d: number) => (d * Math.PI) / 180;
 // theta: azimuth around Y from +Z, phi: angle down from straight above
@@ -194,17 +191,70 @@ const VIEWS: Record<ViewPreset, { theta: number; phi: number; fov: number; up: V
 	// low from the far side
 	angle: { theta: deg(301), phi: deg(90 - 17.5), fov: 42, up: [0, 1, 0] },
 };
+// share of the frame left around the room on its tightest side
+const MARGIN = 0.07;
 
-export function camera(view: ViewPreset, aspect: number): THREE.PerspectiveCamera {
+/** The room's corners, as drawn. */
+function corners(): THREE.Vector3[] {
+	const h = ROOM_HALF;
+	const s = ROOM_VISUAL_SCALE;
+	const out: THREE.Vector3[] = [];
+	for (const x of [-1, 1]) for (const y of [-1, 1]) for (const z of [-1, 1]) out.push(new THREE.Vector3(x * h.x * s, y * h.y * s, z * h.z * s));
+	return out;
+}
+
+/** Where the room lands on screen, in normalised device coordinates. */
+function screenBox(cam: THREE.PerspectiveCamera): THREE.Box2 {
+	cam.updateMatrixWorld(true);
+	const box = new THREE.Box2();
+	for (const c of corners()) {
+		const p = c.clone().project(cam);
+		box.expandByPoint(new THREE.Vector2(p.x, p.y));
+	}
+	return box;
+}
+
+/**
+ * The preset's direction, pulled back until the whole room fits the frame
+ * with a margin, and re-aimed so it sits in the middle: the presets keep their
+ * angle on any aspect ratio, portrait included.  `zoom` above 1 moves closer.
+ */
+export function camera(view: ViewPreset, aspect: number, zoom = 1): THREE.PerspectiveCamera {
 	const { theta, phi, fov, up } = VIEWS[view];
-	const cam = new THREE.PerspectiveCamera(fov, aspect, 0.1, 200);
-	cam.position.set(
-		TARGET.x + DISTANCE * Math.sin(phi) * Math.sin(theta),
-		TARGET.y + DISTANCE * Math.cos(phi),
-		TARGET.z + DISTANCE * Math.sin(phi) * Math.cos(theta),
-	);
+	const dir = new THREE.Vector3(Math.sin(phi) * Math.sin(theta), Math.cos(phi), Math.sin(phi) * Math.cos(theta));
+	const cam = new THREE.PerspectiveCamera(fov, aspect, 0.1, 400);
 	cam.up.set(...up);
-	cam.lookAt(TARGET);
+	const target = TARGET.clone();
+	const place = (distance: number) => {
+		cam.position.copy(target).addScaledVector(dir, distance);
+		cam.lookAt(target);
+	};
+	const fits = (distance: number) => {
+		place(distance);
+		const box = screenBox(cam);
+		const limit = 1 - 2 * MARGIN;
+		return box.max.x - box.min.x <= 2 * limit && box.max.y - box.min.y <= 2 * limit;
+	};
+	let distance = 30;
+	for (let pass = 0; pass < 3; pass++) {
+		// the nearest distance at which the room still fits
+		let near = 2;
+		let far = 120;
+		for (let i = 0; i < 40; i++) {
+			const mid = (near + far) / 2;
+			if (fits(mid)) far = mid;
+			else near = mid;
+		}
+		distance = far;
+		// slide the aim so the room is centred on screen, then fit again
+		place(distance);
+		const centre = screenBox(cam).getCenter(new THREE.Vector2());
+		const right = new THREE.Vector3().setFromMatrixColumn(cam.matrixWorld, 0);
+		const upward = new THREE.Vector3().setFromMatrixColumn(cam.matrixWorld, 1);
+		const halfHeight = Math.tan(THREE.MathUtils.degToRad(fov / 2)) * distance;
+		target.addScaledVector(right, centre.x * halfHeight * aspect).addScaledVector(upward, centre.y * halfHeight);
+	}
+	place(distance / Math.max(0.1, zoom));
 	cam.updateProjectionMatrix();
 	return cam;
 }

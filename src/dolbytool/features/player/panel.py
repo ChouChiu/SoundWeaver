@@ -2,26 +2,28 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, QThread, Signal
-from PySide6.QtGui import QIcon
-from PySide6.QtWidgets import (
-    QCheckBox,
-    QComboBox,
-    QDoubleSpinBox,
-    QLabel,
-    QLineEdit,
-    QProgressBar,
-    QPushButton,
-    QVBoxLayout,
+from PySide6.QtCore import QSettings, Qt, QThread, Signal
+from PySide6.QtWidgets import QVBoxLayout
+from qfluentwidgets import (
+    CaptionLabel,
+    CheckBox,
+    CompactDoubleSpinBox,
+    LineEdit,
+    PrimaryPushButton,
+    ProgressBar,
 )
 
 from dolbytool.core.cancel import CancellationToken, ProcessingCancelled
+from dolbytool.core.ffmpeg import MAX_FRAME_SIDE, frame_problem
 from dolbytool.core.paths import work_root
-from dolbytool.core.project import PlanContext, Project
+from dolbytool.core.project import ORIGINAL, PlanContext, Project
 from dolbytool.core.renderer import renderer_problem
+from dolbytool.core.stems import stem_label
 from dolbytool.core.task import Step
+from dolbytool.features.batch.lyrics import without_number
 from dolbytool.features.lyrics.panel import FontList
 from dolbytool.features.player.service import (
     AUDIO_MODES,
@@ -31,12 +33,14 @@ from dolbytool.features.player.service import (
     DEFAULT_QUALITY,
     LYRIC_SIZES,
     PlayerSpec,
+    QueueTrack,
     player_step,
     player_target,
     preview_spec,
+    queue_step,
     render_player_video,
 )
-from dolbytool.ui import widgets
+from dolbytool.ui import fluent, widgets
 from dolbytool.ui.feature import FeaturePanel
 from dolbytool.ui.video_preview import VideoPreview
 
@@ -45,6 +49,14 @@ ATMOS_TAG = "Dolby Atmos"
 
 def _split_artists(text: str) -> tuple[str, ...]:
     return tuple(a.strip() for a in text.replace("、", "/").split("/") if a.strip())
+
+
+QUALITY_RANGE = {"libx264": (0, 51), "h264_nvenc": (1, 51), "hevc_nvenc": (1, 51), "vp9": (0, 63)}
+ALBUM_MODES = {
+    "tracks": "每首单独的视频",
+    "queue": "整张专辑连续播放",
+    "both": "两者都生成",
+}
 
 
 class PreviewJob(QThread):
@@ -96,26 +108,57 @@ class PlayerPanel(FeaturePanel):
     def __init__(self, settings: QSettings, parent=None) -> None:
         super().__init__(settings, parent)
         d = PlayerSpec()
-        self._checks: dict[str, QCheckBox] = {}
-        self._combos: dict[str, QComboBox] = {}
-        self._edits: dict[str, QLineEdit] = {}
-        self._tag_title = self._tag_artist = self._tag_album = ""
+        self._checks: dict[str, CheckBox] = {}
+        self._combos: dict[str, fluent.ComboBox] = {}
+        self._edits: dict[str, LineEdit] = {}
 
         # ---- frame and encoding
-        self.width_spin = self.spin("pl_w", 64, 7680, d.width, " px", step=2)
-        self.height_spin = self.spin("pl_h", 64, 7680, d.height, " px", step=2)
+        self.width_spin = self.spin("pl_w", 64, MAX_FRAME_SIDE, d.width, " px", step=2)
+        self.height_spin = self.spin("pl_h", 64, MAX_FRAME_SIDE, d.height, " px", step=2)
         self.height_spin.setToolTip("高度大于宽度时自动使用竖屏（移动端）布局")
-        self.fps = self.spin("pl_fps", 10, 120, d.fps, " fps")
+        self.fps = self.spin("pl_fps", 10, 240, d.fps, " fps")
+        self.fps.setToolTip(
+            "高帧率下逐字扫光与滚动更顺滑，适合高刷新率屏幕观看；渲染耗时随帧率成正比增加\n"
+            "上传平台多数只支持到 60 fps，部分支持 120 fps"
+        )
         self.codec = self._combo("pl_codec", CODECS, d.codec)
         self.codec.setToolTip(
             "硬件编码器不可用时将自动回退至 libx264 软件编码；透明背景必须使用 VP9"
         )
         self.quality = self.spin("pl_quality", 0, 63, d.quality)
-        self.quality.setToolTip("软件编码为 CRF，NVENC 为 CQ；数值越小画质越高、文件越大")
+        self.quality.setToolTip(
+            "数值越小画质越高、文件越大；软件编码为 CRF（0 为无损），NVENC 为 CQ（最小 1）\n"
+            "NVENC 19 与无损相比约 54 dB，肉眼已难分辨；更清晰优先关闭“快速截图”"
+        )
         self.codec.currentIndexChanged.connect(self._codec_changed)
         self.audio_mode = self._combo("pl_audio", AUDIO_MODES, d.audio_mode)
         self.audio_mode.setToolTip(
-            "将源音频混入视频；WebM 只能容纳 Opus，选择复制时也会转码为 Opus"
+            "将所选音轨混入视频；MKV 原样复制任何音频（含全景声与 PCM 分轨），\n"
+            "WebM 只能容纳 Opus，选择复制时也会转码为 Opus"
+        )
+        self.audio_mode.currentIndexChanged.connect(self._sync_enabled)
+        # the stem to mix in, by kind, so every track of a batch takes the same one
+        self._audio_key = ORIGINAL
+        self.audio_track = fluent.ComboBox()
+
+        self.audio_track.setToolTip(
+            "混入视频的音轨：源音频或任一分轨\n"
+            "分轨尚未导出时会自动补上分轨任务；批量与专辑中每首都取同一种分轨"
+        )
+        self.audio_track.activated.connect(self._audio_track_picked)
+        self.fast_capture = self._check(
+            "pl_fast_capture", "快速截图", d.fast_capture,
+            "浏览器取帧改用 JPEG 而非无损 PNG，渲染约快 1.5 倍，细节略软；透明背景不受影响",
+        )  # fmt: skip
+        self.supersample = self._check(
+            "pl_supersample", "超采样", d.supersample,
+            "按两倍尺寸绘制再缩小到输出尺寸，文字与图标边缘更平滑；渲染约慢 2 到 3 倍",
+        )  # fmt: skip
+        self.album_mode = self._combo("pl_album_mode", ALBUM_MODES, "tracks")
+        self.album_mode.setToolTip(
+            "专辑模式下的输出方式\n"
+            "整张专辑连续播放：像歌单一样按专辑顺序从头播到尾，生成「<专辑名>_player」，\n"
+            "切歌时曲目信息、进度与歌词随之切换，背景与动态封面连续流动"
         )
         self.ui_scale = self.spin("pl_ui_scale", 0, 800, d.ui_scale, " %", step=25)
         self.ui_scale.setSpecialValueText("自动")
@@ -159,6 +202,12 @@ class PlayerPanel(FeaturePanel):
         self.romanization = self._check("pl_roman", "显示音译", d.romanization)
         self.swap = self._check("pl_swap", "交换翻译与音译", d.swap_trans_roman)
         self.bg_vocals = self._check("pl_bg_vocals", "显示和声", d.background_vocals)
+        self.filter_credits = self._check(
+            "pl_filter_credits",
+            "过滤标题与制作信息",
+            d.filter_credits,
+            "去掉歌词开头的「歌名 - 艺人」标题行、翻译来源说明与作词作曲等制作信息，以及结尾的版权声明\n只处理首尾连续的信息行，正文中带冒号的句子不受影响；不修改 TTML 文件",
+        )
         self.balance = self._check(
             "pl_balance", "均衡换行", d.balance, "长句需要折行时让各行长度接近，而不是第一行塞满"
         )
@@ -184,7 +233,13 @@ class PlayerPanel(FeaturePanel):
             "pl_bottom", "底部按钮", d.bottom_controls, "歌词 / 隔空播放 / 播放列表按钮"
         )
         self.remaining = self._check("pl_remaining", "显示剩余时间", d.show_remaining)
+        self.instrumental = self._edit(
+            "pl_instrumental", "留空则只显示居中的封面（AMLL 无歌词布局）"
+        )
+        self.instrumental.setText(d.instrumental_text)
+        self.instrumental.setToolTip("没有歌词的音轨（纯音乐）在歌词区显示的一行文字")
         self.quality_tag = self._edit("pl_quality_tag", "留空：全景声显示 Dolby Atmos，其余不显示")
+        self.quality_tag.setMinimumWidth(320)
         self.show_tag = self._check("pl_show_tag", "音质标签", True)
         self.show_tag.toggled.connect(self._sync_enabled)
 
@@ -198,15 +253,13 @@ class PlayerPanel(FeaturePanel):
         self.preview_length = self._seconds(
             "pl_preview_length", 8.0, "预览片段长度", low=1.0, high=60.0
         )
-        self.preview_button = QPushButton(QIcon.fromTheme("media-playback-start"), "渲染预览")
+        self.preview_button = PrimaryPushButton(fluent.icon("media-playback-start"), "渲染预览")
         self.preview_button.setToolTip("按当前参数以一半分辨率、30 fps 渲染一小段并播放")
         self.preview_button.clicked.connect(self._preview)
-        self.preview_progress = QProgressBar()
-        self.preview_progress.setTextVisible(False)
-        self.preview_progress.setMaximumWidth(160)
+        self.preview_progress = ProgressBar()
+        self.preview_progress.setFixedWidth(140)
         self.preview_progress.hide()
-        self.preview_status = QLabel()
-        self.preview_status.setEnabled(False)
+        self.preview_status = CaptionLabel()
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -225,7 +278,9 @@ class PlayerPanel(FeaturePanel):
                 widgets.two_column_grid([
                     ("尺寸：", widgets.size_row(self.width_spin, self.height_spin), "帧率：", self.fps),
                     ("编码器：", self.codec, "画质：", self.quality),
-                    ("音频：", self.audio_mode, "界面缩放：", self.ui_scale),
+                    ("音频：", widgets.hbox(self.audio_mode, self.audio_track), "界面缩放：", self.ui_scale),
+                    ("速度：", widgets.hbox(self.fast_capture, self.supersample), None, None),
+                    ("专辑模式：", self.album_mode, None, None),
                 ]),
             )
         )  # fmt: skip
@@ -246,8 +301,10 @@ class PlayerPanel(FeaturePanel):
                     ("字号：", self.lyric_size, "字重：", self.font_weight),
                     ("字间距：", self.letter_spacing, "渐变宽度：", self.word_fade),
                     ("右侧留白：", self.lyric_padding, None, widgets.hbox(self.balance)),
+                    ("纯音乐：", self.instrumental, None, None),
                     ("效果：", widgets.hbox(self.blur, self.scale, self.spring), None, None),
-                    ("内容：", widgets.hbox(self.translation, self.romanization, self.swap, self.bg_vocals),
+                    ("内容：", widgets.hbox(self.translation, self.romanization, self.swap, self.bg_vocals,
+                                         self.filter_credits),
                      None, None),
                 ]),
             )
@@ -273,8 +330,8 @@ class PlayerPanel(FeaturePanel):
 
     # ---- persisted controls ------------------------------------------------------------
 
-    def _check(self, key: str, text: str, value: bool, tip: str = "") -> QCheckBox:
-        box = QCheckBox(text)
+    def _check(self, key: str, text: str, value: bool, tip: str = "") -> CheckBox:
+        box = CheckBox(text)
         box.setChecked(value)
         if tip:
             box.setToolTip(tip)
@@ -282,8 +339,8 @@ class PlayerPanel(FeaturePanel):
         self._checks[key] = box
         return box
 
-    def _combo(self, key: str, items: dict[str, str], value: str) -> QComboBox:
-        box = QComboBox()
+    def _combo(self, key: str, items: dict[str, str], value: str) -> fluent.ComboBox:
+        box = fluent.ComboBox()
         for name, label in items.items():
             box.addItem(label, name)
         box.setCurrentIndex(max(0, box.findData(value)))
@@ -291,8 +348,8 @@ class PlayerPanel(FeaturePanel):
         self._combos[key] = box
         return box
 
-    def _edit(self, key: str, placeholder: str) -> QLineEdit:
-        edit = QLineEdit()
+    def _edit(self, key: str, placeholder: str) -> LineEdit:
+        edit = LineEdit()
         edit.setPlaceholderText(placeholder)
         edit.setClearButtonEnabled(True)
         edit.textChanged.connect(lambda _t: self.changed.emit())
@@ -301,8 +358,8 @@ class PlayerPanel(FeaturePanel):
 
     def _seconds(
         self, key: str, value: float, tip: str, low: float = 0.0, high: float = 3600.0
-    ) -> QDoubleSpinBox:
-        box = QDoubleSpinBox()
+    ) -> CompactDoubleSpinBox:
+        box = CompactDoubleSpinBox()
         box.setRange(low, high)
         box.setDecimals(1)
         box.setSingleStep(1.0)
@@ -313,7 +370,12 @@ class PlayerPanel(FeaturePanel):
         self._spins[key] = box
         return box
 
+    def _quality_range(self) -> None:
+        # NVENC reads CQ 0 as "automatic", not as the best quality
+        self.quality.setRange(*QUALITY_RANGE.get(self.codec.currentData(), (0, 51)))
+
     def _codec_changed(self) -> None:
+        self._quality_range()
         self.quality.setValue(DEFAULT_QUALITY[self.codec.currentData()])
         self._sync_enabled()
 
@@ -327,20 +389,58 @@ class PlayerPanel(FeaturePanel):
         self.light_wave.setEnabled(bg == "isolation")
         self.volume.setEnabled(self.show_volume.isChecked())
         self.quality_tag.setEnabled(self.show_tag.isChecked())
+        self.audio_track.setEnabled(self.audio_mode.currentData() != "none")
+
+    # ---- the audio mixed in ------------------------------------------------------------
+
+    def _fill_audio_tracks(self, project: Project) -> None:
+        self.audio_track.clear()
+        for track in project.tracks:
+            # the file is named on the inputs page; here it would only crowd the row
+            text = "源音频" if track.is_original else track.label
+            self.audio_track.addItem(text, track.key)
+            self.audio_track.setItemData(
+                self.audio_track.count() - 1, track.hint, Qt.ItemDataRole.ToolTipRole
+            )
+        if not project.tracks:
+            self.audio_track.addItem("源音频", ORIGINAL)
+        index = self.audio_track.findData(self._audio_key)
+        if index < 0:
+            # kept for the tracks that have it; this one falls back to its source
+            self.audio_track.addItem(
+                f"{stem_label(self._audio_key)}（此音频没有，改用源音频）", self._audio_key
+            )
+            index = self.audio_track.count() - 1
+        self.audio_track.setCurrentIndex(index)
+
+    def _audio_track_picked(self, index: int) -> None:
+        self._audio_key = self.audio_track.itemData(index) or ORIGINAL
+        self.changed.emit()
+
+    def _mix_audio(self, project: Project) -> Path | None:
+        """The audio the video takes: the chosen stem when there is one to mix in, else the source."""
+        if project.info is None:
+            return None
+        if self.audio_mode.currentData() != "none":
+            for track in project.tracks:
+                if track.key == self._audio_key:
+                    return track.path
+        return project.audio
 
     def _info_placeholders(self, project: Project) -> None:
         info = project.info
-        self._tag_title = info.title if info else ""
-        self._tag_artist = info.artist if info else ""
-        self._tag_album = info.album if info else ""
         fallback = "留空则使用 TTML 元数据"
-        self.title_edit.setPlaceholderText(self._tag_title or fallback)
-        self.artist_edit.setPlaceholderText(self._tag_artist or f"{fallback}，多位艺人用 / 分隔")
-        self.album_edit.setPlaceholderText(self._tag_album or fallback)
+        self.title_edit.setPlaceholderText((info and info.title) or fallback)
+        self.artist_edit.setPlaceholderText(
+            (info and info.artist) or f"{fallback}，多位艺人用 / 分隔"
+        )
+        self.album_edit.setPlaceholderText((info and info.album) or fallback)
 
-    def spec(self, project: Project | None = None) -> PlayerSpec:
+    def spec(self, project: Project | None = None, batch: bool = False) -> PlayerSpec:
+        """`batch` leaves the title to each track: one typed title cannot name them all."""
         info = project.info if project else None
         atmos = bool(info and info.atmos)
+        typed_title = "" if batch else self.title_edit.text().strip()
         tag = ""
         if self.show_tag.isChecked():
             tag = self.quality_tag.text().strip() or (ATMOS_TAG if atmos else "")
@@ -373,9 +473,13 @@ class PlayerPanel(FeaturePanel):
             background_vocals=self.bg_vocals.isChecked(),
             balance=self.balance.isChecked(),
             lyric_padding=self.lyric_padding.value(),
-            title=self.title_edit.text().strip() or self._tag_title,
-            artists=_split_artists(self.artist_edit.text() or self._tag_artist),
-            album=self.album_edit.text().strip() or self._tag_album,
+            instrumental_text=self.instrumental.text().strip(),
+            fast_capture=self.fast_capture.isChecked(),
+            supersample=self.supersample.isChecked(),
+            filter_credits=self.filter_credits.isChecked(),
+            title=typed_title or (info.title if info else ""),
+            artists=_split_artists(self.artist_edit.text() or (info.artist if info else "")),
+            album=self.album_edit.text().strip() or (info.album if info else ""),
             show_name=self.show_name.isChecked(),
             show_artists=self.show_artists.isChecked(),
             show_album=self.show_album.isChecked(),
@@ -393,6 +497,13 @@ class PlayerPanel(FeaturePanel):
     def refresh(self, project: Project) -> None:
         self._project = project
         self._info_placeholders(project)
+        self._fill_audio_tracks(project)
+
+    def required_stems(self, project: Project) -> set[str]:
+        audio = self._mix_audio(project)
+        if audio is None or audio == project.audio or audio.is_file():
+            return set()
+        return {self._audio_key}
 
     # ---- preview -----------------------------------------------------------------------
 
@@ -405,11 +516,13 @@ class PlayerPanel(FeaturePanel):
         if problem:
             self.preview_status.setText(problem)
             return
-        assert project is not None and project.ttml is not None
+        assert project is not None
         spec = preview_spec(self.spec(project))
         ttml = project.ttml
         cover = project.cover if project.cover and project.cover.is_file() else None
-        audio = project.audio if project.info else None
+        audio = self._mix_audio(project)
+        if audio is not None and not audio.is_file():
+            audio = project.audio  # a preview does not wait for the stem to be split
         song = project.info.duration if project.info else None
         start = self.preview_start.value()
         if song is not None and start >= song:
@@ -425,7 +538,7 @@ class PlayerPanel(FeaturePanel):
         self._job = PreviewJob(render, target, self)
         self._job.progress.connect(self._preview_progress)
         self._job.done.connect(self._preview_done)
-        self.preview_button.setIcon(QIcon.fromTheme("process-stop"))
+        self.preview_button.setIcon(fluent.icon("process-stop"))
         self.preview_button.setText("取消")
         self.preview_progress.setValue(0)
         self.preview_progress.show()
@@ -439,7 +552,7 @@ class PlayerPanel(FeaturePanel):
 
     def _preview_done(self, path: Path | None, error: str) -> None:
         self._job = None
-        self.preview_button.setIcon(QIcon.fromTheme("media-playback-start"))
+        self.preview_button.setIcon(fluent.icon("media-playback-start"))
         self.preview_button.setText("渲染预览")
         self.preview_progress.hide()
         if path is None:
@@ -459,12 +572,16 @@ class PlayerPanel(FeaturePanel):
             self._job.wait(15000)
 
     def problem(self, ctx: PlanContext) -> str | None:
+        too_big = frame_problem(self.width_spin.value(), self.height_spin.value())
+        if too_big:
+            return too_big
         project = ctx.project
         ttml = project.ttml
-        if not ttml:
-            return "请选择 TTML 逐字歌词文件"
-        if not ttml.is_file():
+        if ttml and not ttml.is_file():
             return "指定的歌词文件不存在"
+        # an instrumental runs for as long as its audio
+        if not ttml and project.info is None:
+            return "请选择 TTML 逐字歌词文件，纯音乐需要可读取的源音频"
         if self.background.currentData() == "none" and self.codec.currentData() != "vp9":
             return "透明背景需要 VP9 编码器（唯一支持 Alpha 通道的选项）"
         needs_audio = (
@@ -475,19 +592,46 @@ class PlayerPanel(FeaturePanel):
         return renderer_problem("player.mjs")
 
     def summary(self, ctx: PlanContext) -> str | None:
-        return f"播放器视频 {self.width_spin.value()}×{self.height_spin.value()}"
+        size = f"播放器视频 {self.width_spin.value()}×{self.height_spin.value()}"
+        return size if ctx.project.ttml else f"{size}（无歌词，按纯音乐只显示封面）"
 
     def plan(self, ctx: PlanContext) -> list[Step]:
         project = ctx.project
-        ttml, out = project.ttml, project.output_dir
-        if ttml is None or out is None:
+        ttml, out, name = project.ttml, project.output_dir, project.audio or project.ttml
+        if out is None or name is None:
             return []
-        spec = self.spec(project)
+        if ctx.album and self.album_mode.currentData() == "queue":
+            return []  # played as part of the whole album instead
+        spec = self.spec(project, ctx.batch)
         seconds = project.info.duration if project.info else None
-        audio = project.audio if project.info else None
+        audio = self._mix_audio(project)
         cover = project.cover if project.cover and project.cover.is_file() else None
-        target = player_target(out, project.audio or ttml, spec)
+        target = player_target(out, name, spec)
         return [player_step(ttml, cover, audio, target, spec, seconds)]
+
+    def album_plan(
+        self, ctx: PlanContext, tracks: Sequence[tuple[Project, list[Step]]]
+    ) -> list[Step]:
+        album = ctx.project
+        if self.album_mode.currentData() == "tracks" or not tracks:
+            return []
+        if album.audio is None or album.output_dir is None:
+            return []
+        queue = []
+        for project, _steps in tracks:
+            assert project.audio is not None
+            tags = self.spec(project, True)
+            queue.append(
+                QueueTrack(
+                    self._mix_audio(project) or project.audio, project.ttml,
+                    tags.title or without_number(project.audio.stem), tags.artists, tags.album,
+                )
+            )  # fmt: skip
+        # the first track's spec: its format picks the quality tag, the title goes unused
+        spec = self.spec(tracks[0][0], True)
+        target = player_target(album.output_dir, album.audio, spec)
+        cover = album.cover if album.cover and album.cover.is_file() else None
+        return [queue_step(queue, cover, target, spec)]
 
     # ---- settings --------------------------------------------------------------------
 
@@ -498,6 +642,7 @@ class PlayerPanel(FeaturePanel):
             self.settings.setValue(key, combo.currentData())
         for key, edit in self._edits.items():
             self.settings.setValue(key, edit.text())
+        self.settings.setValue("pl_audio_track", self._audio_key)
         self.settings.setValue("pl_color", self.color.hex())
         self.settings.setValue("pl_fonts", self.fonts.families())
 
@@ -507,11 +652,15 @@ class PlayerPanel(FeaturePanel):
         for key, combo in self._combos.items():
             value = self.settings.value(key, combo.currentData())
             combo.setCurrentIndex(max(0, combo.findData(value)))
+        self._quality_range()
         self.quality.setValue(quality)
         for key, box in self._checks.items():
             box.setChecked(self.settings.value(key, box.isChecked(), type=bool))
         for key, edit in self._edits.items():
-            edit.setText(self.settings.value(key, "", type=str))
+            edit.setText(self.settings.value(key, edit.text(), type=str))
+        self._audio_key = self.settings.value("pl_audio_track", ORIGINAL, type=str) or ORIGINAL
+        if self._project is not None:
+            self._fill_audio_tracks(self._project)
         self.color.setColor(self.settings.value("pl_color", self.color.hex()))
         self.fonts.set_families(self.settings.value("pl_fonts", [], type=list))
         self._sync_enabled()

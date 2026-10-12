@@ -1,4 +1,4 @@
-"""Stem split: decode the source (Dolby Atmos to 5.1.4), then split it by channel layout."""
+"""Stem split: decode the source (Dolby Atmos to the chosen layout), then split it by channel layout."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from pathlib import Path
 from dolbytool.core.atmos import decode_atmos
 from dolbytool.core.cancel import CancellationToken
 from dolbytool.core.pcm import load_audio
+from dolbytool.core.speakers import DEFAULT_ATMOS, SpeakerLayout
 from dolbytool.core.stems import StemKind, stem_label, stem_path
 from dolbytool.core.task import Report, Step
 from dolbytool.features.stems.pipeline import clipped, split
@@ -29,6 +30,7 @@ def split_stems(
     *,
     atmos: bool,
     adm: Path | None,
+    speakers: SpeakerLayout | None,
     token: CancellationToken,
     report: Report,
 ) -> list[str]:
@@ -37,7 +39,7 @@ def split_stems(
         decoded = decode_atmos(
             source, token,
             lambda f: report(round(f * _ATMOS_DECODE), f"解码全景声 {f:.0%}"),
-            speakers=bool(kinds), adm=adm,
+            layout=speakers or DEFAULT_ATMOS, speakers=bool(kinds), adm=adm,
         )  # fmt: skip
         audio, start = decoded.speakers, _ATMOS_DECODE
     else:
@@ -48,7 +50,9 @@ def split_stems(
     if audio is None:
         return []
     with audio:
-        peaks = split(audio, source, output_dir, kinds, crossover_hz, token, report, start)
+        peaks = split(
+            audio, source, output_dir, kinds, crossover_hz, token, report, start, speakers
+        )
     return list(clipped(peaks))
 
 
@@ -60,6 +64,7 @@ def split_step(
     *,
     atmos: bool,
     adm: Path | None,
+    speakers: SpeakerLayout | None,
 ) -> Step:
     """Write exactly `kinds` (and the ADM BWF if asked) into `output_dir`."""
 
@@ -71,6 +76,7 @@ def split_step(
             crossover_hz,
             atmos=atmos,
             adm=adm,
+            speakers=speakers,
             token=token,
             report=report,
         )

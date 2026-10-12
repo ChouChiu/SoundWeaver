@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QSettings
-from PySide6.QtWidgets import QComboBox, QVBoxLayout
+from PySide6.QtWidgets import QVBoxLayout
 
+from dolbytool.core.ffmpeg import MAX_FRAME_SIDE, frame_problem
 from dolbytool.core.project import PlanContext, Project, Track
 from dolbytool.core.task import Step
 from dolbytool.features.waveform.encoders import DEFAULT_ENCODER, ENCODER_LABELS
 from dolbytool.features.waveform.service import WaveformSpec, waveform_step, waveform_target
-from dolbytool.ui import widgets
+from dolbytool.ui import fluent, widgets
 from dolbytool.ui.feature import FeaturePanel
 
 DEFAULT_TRACKS = ("surround",)
@@ -31,14 +32,14 @@ class WaveformPanel(FeaturePanel):
         d = WaveformSpec()
         self.pps = self.spin("pps", 10, 1000, d.pps, " 像素/秒")
         self.fps = self.spin("fps", 10, 120, d.fps, " fps")
-        self.screen_w = self.spin("screen_w", 64, 7680, d.screen_width, " px", step=2)
-        self.screen_h = self.spin("screen_h", 32, 4320, d.height, " px", step=2)
+        self.screen_w = self.spin("screen_w", 64, MAX_FRAME_SIDE, d.screen_width, " px", step=2)
+        self.screen_h = self.spin("screen_h", 32, MAX_FRAME_SIDE, d.height, " px", step=2)
         self.wave_color = widgets.ColorButton(d.wave_color, "选择波形颜色")
         self.background = widgets.ColorButton(d.background, "选择背景颜色")
         self.playhead = widgets.ColorButton(d.playhead, "选择播放头颜色")
         self.unplayed = self.spin("unplayed", 0, 100, round(d.unplayed_level * 100), " %")
         self.unplayed.setToolTip("播放头右侧未播放波形保留的不透明度（100% 为不暗化）")
-        self.encoder = QComboBox()
+        self.encoder = fluent.ComboBox()
         for name, label in ENCODER_LABELS.items():
             self.encoder.addItem(label, name)
         self.encoder.setToolTip("硬件编码器不可用时将自动回退至 libx264 软件编码")
@@ -78,17 +79,18 @@ class WaveformPanel(FeaturePanel):
             encoder=self.encoder.currentData(),
         )
 
-    def _selected(self, project: Project) -> list[Track]:
-        keys = self.tracks.checked()
-        return [t for t in project.tracks if t.key in keys]
+    def _selected(self, project: Project, batch: bool = False) -> list[Track]:
+        keys = self.tracks.keys()
+        picked = [t for t in project.tracks if t.key in keys]
+        # a batch track whose layout shares no ticked key gets its source, as refresh() would
+        if batch and not picked and project.tracks:
+            return [project.tracks[0]]
+        return picked
 
     # ---- hooks -----------------------------------------------------------------------
 
     def refresh(self, project: Project) -> None:
-        if self.tracks.is_empty():
-            checked = set(self.settings.value("tracks", list(DEFAULT_TRACKS), type=list))
-        else:
-            checked = self.tracks.checked()
+        checked = self.tracks.keys()
         items = []
         for track in project.tracks:
             if track.is_original:
@@ -102,20 +104,25 @@ class WaveformPanel(FeaturePanel):
                 )
             )  # fmt: skip
         if items and not checked & {i.key for i in items}:
-            # Nothing remembered applies to this layout (e.g. a stereo file): default to the source.
-            checked = {items[0].key}
+            # Nothing remembered applies to this layout (e.g. a stereo file): show the source
+            # ticked, as a batch would make it, without forgetting the other layouts' picks.
+            self.tracks.set_tracks(items, {items[0].key}, remember=False)
+            return
         self.tracks.set_tracks(items, checked)
 
     def required_stems(self, project: Project) -> set[str]:
         return {t.key for t in self._selected(project) if not t.is_original and not t.exists}
 
     def problem(self, ctx: PlanContext) -> str | None:
-        if ctx.project.info is not None and not self._selected(ctx.project):
+        too_big = frame_problem(self.screen_w.value(), self.screen_h.value())
+        if too_big:
+            return too_big
+        if ctx.project.info is not None and not self._selected(ctx.project, ctx.batch):
             return "请至少勾选一条需要生成波形的音轨"
         return None
 
     def summary(self, ctx: PlanContext) -> str | None:
-        count = len(self._selected(ctx.project))
+        count = len(self._selected(ctx.project, ctx.batch))
         return f"{count} 个波形视频" if count else None
 
     def plan(self, ctx: PlanContext) -> list[Step]:
@@ -125,17 +132,17 @@ class WaveformPanel(FeaturePanel):
         spec = self.spec()
         return [
             waveform_step(track, waveform_target(out, track.path), spec)
-            for track in self._selected(ctx.project)
+            for track in self._selected(ctx.project, ctx.batch)
         ]
 
     def save_extra(self) -> None:
         for key, button in zip(COLOR_KEYS, self._colors(), strict=True):
             self.settings.setValue(key, button.hex())
         self.settings.setValue("encoder", self.encoder.currentData())
-        if not self.tracks.is_empty():
-            self.settings.setValue("tracks", sorted(self.tracks.checked()))
+        self.settings.setValue("tracks", sorted(self.tracks.keys()))
 
     def restore_extra(self) -> None:
+        self.tracks.seed(set(self.settings.value("tracks", list(DEFAULT_TRACKS), type=list)))
         d = WaveformSpec()
         defaults = (d.wave_color, d.background, d.playhead)
         for key, button, default in zip(COLOR_KEYS, self._colors(), defaults, strict=True):

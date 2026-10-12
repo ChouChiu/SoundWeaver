@@ -36,6 +36,8 @@ export function parseOptions(argv = process.argv.slice(2)): RenderOptions {
 			fade: { type: "string", default: "200" },
 			// translation opacity in percent
 			"sub-opacity": { type: "string", default: "70" },
+			// keep the title and credit lines around the lyrics
+			"keep-credits": { type: "boolean", default: false },
 			duration: { type: "string" },
 			crf: { type: "string", default: "30" },
 			// parallel browsers; default one per 2.5 cores, fewer for short songs
@@ -57,6 +59,7 @@ export function parseOptions(argv = process.argv.slice(2)): RenderOptions {
 			fontSize: number("font-size", values["font-size"], 1),
 			fadeMs: number("fade", values.fade, 0),
 			subOpacity: number("sub-opacity", values["sub-opacity"], 0, 100) / 100,
+			filterCredits: !values["keep-credits"],
 		},
 		duration: values.duration === undefined ? undefined : number("duration", values.duration, 0.001),
 		crf: number("crf", values.crf, 0, 63),

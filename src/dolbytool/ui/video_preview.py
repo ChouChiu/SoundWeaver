@@ -5,10 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import QUrl
-from PySide6.QtGui import QIcon
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
-from PySide6.QtWidgets import QDialog, QHBoxLayout, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QDialog, QHBoxLayout, QVBoxLayout, QWidget
+from qfluentwidgets import PrimaryPushButton, PushButton
+
+from dolbytool.ui import fluent
 
 
 class VideoPreview(QDialog):
@@ -24,10 +26,10 @@ class VideoPreview(QDialog):
         self.player.setVideoOutput(self.video)
         self.player.setAudioOutput(self.audio)
         self.player.setLoops(QMediaPlayer.Loops.Infinite)
-        self.toggle = QPushButton()
+        self.toggle = PrimaryPushButton()
         self.toggle.clicked.connect(self._toggle)
         self.player.playbackStateChanged.connect(self._sync)
-        close = QPushButton(QIcon.fromTheme("window-close"), "关闭")
+        close = PushButton(fluent.icon("window-close"), "关闭")
         close.clicked.connect(self.close)
         buttons = QHBoxLayout()
         buttons.addWidget(self.toggle)
@@ -56,7 +58,7 @@ class VideoPreview(QDialog):
     def _sync(self) -> None:
         playing = self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
         self.toggle.setIcon(
-            QIcon.fromTheme("media-playback-pause" if playing else "media-playback-start")
+            fluent.icon("media-playback-pause" if playing else "media-playback-start")
         )
         self.toggle.setText("暂停" if playing else "播放")
 

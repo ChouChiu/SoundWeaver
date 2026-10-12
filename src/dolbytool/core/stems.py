@@ -9,6 +9,8 @@ from __future__ import annotations
 from enum import StrEnum
 from pathlib import Path
 
+from dolbytool.core.speakers import SpeakerLayout
+
 
 class StemKind(StrEnum):
     """One stem, named by the marker its file carries.
@@ -25,17 +27,20 @@ class StemKind(StrEnum):
     MID_BAND = "mid_band"
     HIGH = "high"
     SURROUND = "surround"
+    BACK = "back"
+    WIDE = "wide"
     LFE = "lfe"
     FRONT = "front"
     FRONT_NO_CENTER = "front_no_center"
     HEIGHT = "height"
     HEIGHT_FRONT = "height_front"
     HEIGHT_REAR = "height_rear"
+    HEIGHT_SIDE = "height_side"
     DOWNMIX = "downmix"
 
 
 class StemLayout(StrEnum):
-    """Which path the channel count of the input picked."""
+    """Which path the input picked: a Dolby Atmos render, a surround master, or neither."""
 
     ATMOS = "atmos"
     SURROUND = "surround"
@@ -43,60 +48,54 @@ class StemLayout(StrEnum):
     MONO = "mono"
 
 
-_LAYOUT_STEMS: dict[StemLayout, tuple[StemKind, ...]] = {
-    StemLayout.ATMOS: (
-        StemKind.SURROUND,
-        StemKind.CENTER,
-        StemKind.LFE,
-        StemKind.FRONT,
-        StemKind.FRONT_NO_CENTER,
-        StemKind.HEIGHT,
-        StemKind.HEIGHT_FRONT,
-        StemKind.HEIGHT_REAR,
-        StemKind.DOWNMIX,
-        StemKind.LOW,
-        StemKind.HIGH,
-    ),
-    StemLayout.SURROUND: (
-        StemKind.SURROUND,
-        StemKind.CENTER,
-        StemKind.LFE,
-        StemKind.FRONT,
-        StemKind.FRONT_NO_CENTER,
-        StemKind.DOWNMIX,
-        StemKind.LOW,
-        StemKind.HIGH,
-    ),
-    StemLayout.STEREO: (
-        StemKind.CENTER,
-        StemKind.INSTRUMENTAL,
-        StemKind.SIDE,
-        StemKind.MID,
-        StemKind.LOW,
-        StemKind.HIGH,
-    ),
-    StemLayout.MONO: (StemKind.LOW, StemKind.MID_BAND, StemKind.HIGH),
-}
+_STEREO_STEMS = (
+    StemKind.CENTER,
+    StemKind.INSTRUMENTAL,
+    StemKind.SIDE,
+    StemKind.MID,
+    StemKind.LOW,
+    StemKind.HIGH,
+)
+_MONO_STEMS = (StemKind.LOW, StemKind.MID_BAND, StemKind.HIGH)
 
 # Six channels is where a discrete surround master starts.  Anything between
 # three and five is a layout the split has no decode matrix for, so it is
 # folded to its first two channels and split as stereo rather than guessed at.
-# Ten is a 5.1.4 render: the 5.1 floor followed by four height channels, which
-# is what a Dolby Atmos source is decoded to.
 SURROUND_CHANNELS = 6
-ATMOS_CHANNELS = 10
 
 
-def layout_for(channels: int) -> StemLayout:
-    if channels == ATMOS_CHANNELS:
+def layout_for(channels: int, atmos: bool = False) -> StemLayout:
+    if atmos:
         return StemLayout.ATMOS
     if channels >= SURROUND_CHANNELS:
         return StemLayout.SURROUND
     return StemLayout.MONO if channels == 1 else StemLayout.STEREO
 
 
-def layout_stems(layout: StemLayout) -> tuple[StemKind, ...]:
-    return _LAYOUT_STEMS[layout]
+def surround_stems(speakers: SpeakerLayout) -> tuple[StemKind, ...]:
+    """What a discrete master of `speakers` splits into: every pair it has, then the folds."""
+    kinds = [StemKind.SURROUND, StemKind.CENTER, StemKind.LFE, StemKind.FRONT]
+    kinds.append(StemKind.FRONT_NO_CENTER)
+    if speakers.has("Lb", "Rb"):
+        kinds.append(StemKind.BACK)
+    if speakers.has("Lw", "Rw"):
+        kinds.append(StemKind.WIDE)
+    if speakers.heights:
+        kinds.append(StemKind.HEIGHT)
+        if speakers.has("Tfl", "Tfr", "Tbl", "Tbr"):
+            kinds += [StemKind.HEIGHT_FRONT, StemKind.HEIGHT_REAR]
+            if speakers.has("Tsl", "Tsr"):
+                kinds.append(StemKind.HEIGHT_SIDE)
+    kinds += [StemKind.DOWNMIX, StemKind.LOW, StemKind.HIGH]
+    return tuple(kinds)
+
+
+def layout_stems(layout: StemLayout, speakers: SpeakerLayout | None) -> tuple[StemKind, ...]:
+    if layout is StemLayout.MONO:
+        return _MONO_STEMS
+    if layout is StemLayout.STEREO or speakers is None:
+        return _STEREO_STEMS
+    return surround_stems(speakers)
 
 
 def stem_path(source: Path, output_dir: Path, kind: StemKind) -> Path:
@@ -105,6 +104,8 @@ def stem_path(source: Path, output_dir: Path, kind: StemKind) -> Path:
 
 STEM_NAMES = {
     "surround": "环绕声道",
+    "back": "后环绕声道",
+    "wide": "前宽声道",
     "center": "中置声道",
     "lfe": "低频效果 (LFE)",
     "front": "前置主声道",
@@ -112,6 +113,7 @@ STEM_NAMES = {
     "height": "顶部声道缩混",
     "height_front": "顶部前置声道",
     "height_rear": "顶部后置声道",
+    "height_side": "顶部中置声道",
     "downmix": "立体声下混",
     "low": "低频段",
     "mid_band": "中频段",
@@ -122,14 +124,17 @@ STEM_NAMES = {
 }
 
 STEM_HINTS = {
-    "surround": "左/右环绕声道（含分摊中置成分）",
+    "surround": "左/右环绕声道，含后环绕与分摊的中置成分",
+    "back": "左/右后环绕声道 (Lb / Rb)",
+    "wide": "左/右前宽声道 (Lw / Rw)",
     "center": "中置独立声道",
     "lfe": "超低音声道 (Low-Frequency Effects)",
     "front": "左/右前置主声道",
     "front_no_center": "左/右前置声道（频谱抵消中置成分）",
-    "height": "四个顶部声道立体声缩混 (Tfl/Tfr/Tbl/Tbr)",
+    "height": "全部顶部声道的立体声缩混",
     "height_front": "左/右顶部前置声道 (Tfl / Tfr)",
     "height_rear": "左/右顶部后置声道 (Tbl / Tbr)",
+    "height_side": "左/右顶部中置声道 (Tsl / Tsr)",
     "downmix": "全声道立体声下混 (Stereo Downmix)",
     "low": "分频点以下频段信号",
     "mid_band": "分频点至 4 kHz 频段信号",

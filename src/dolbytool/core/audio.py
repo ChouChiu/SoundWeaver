@@ -6,10 +6,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from dolbytool.core import ffmpeg
-from dolbytool.core.stems import ATMOS_CHANNELS, StemLayout, layout_for
+from dolbytool.core.speakers import SpeakerLayout, file_layout
+from dolbytool.core.stems import StemLayout, layout_for
 
 LAYOUT_NAMES = {
-    StemLayout.ATMOS: "全景声 5.1.4",
+    StemLayout.ATMOS: "杜比全景声",
     StemLayout.SURROUND: "多声道母带",
     StemLayout.STEREO: "立体声",
     StemLayout.MONO: "单声道",
@@ -18,7 +19,7 @@ LAYOUT_NAMES = {
 
 @dataclass(frozen=True, slots=True)
 class AudioInfo:
-    # what the split works on: a Dolby Atmos track counts as its 5.1.4 render
+    # the stream's own channels; a Dolby Atmos track's are its core's
     channels: int
     duration: float
     atmos: bool = False
@@ -30,18 +31,25 @@ class AudioInfo:
     title: str = ""
     artist: str = ""
     album: str = ""
+    # position on the album, 0 when untagged
+    disc: int = 0
+    track: int = 0
+    # the speakers of a multichannel file; a Dolby Atmos track's are picked for the render
+    speakers: SpeakerLayout | None = None
 
     @property
     def layout(self) -> StemLayout:
-        return layout_for(self.channels)
+        return layout_for(self.channels, self.atmos)
 
-    def describe(self) -> str:
+    def describe(self, render: SpeakerLayout | None = None) -> str:
+        """One line about the file; `render` is what a Dolby Atmos track is rendered to."""
         minutes, seconds = int(self.duration // 60), int(self.duration % 60)
-        parts = (
-            ["杜比全景声 (5.1.4 渲染)"]
-            if self.atmos
-            else [f"{self.channels} 声道 ({LAYOUT_NAMES[self.layout]})"]
-        )
+        if self.atmos:
+            parts = [f"杜比全景声 ({render} 渲染)" if render else "杜比全景声"]
+        elif self.speakers is not None:
+            parts = [f"{self.channels} 声道 ({LAYOUT_NAMES[self.layout]} {self.speakers})"]
+        else:
+            parts = [f"{self.channels} 声道 ({LAYOUT_NAMES[self.layout]})"]
         parts.append(f"{minutes}:{seconds:02d}")
         if self.sample_rate:
             parts.append(f"{self.sample_rate / 1000:g} kHz")
@@ -65,6 +73,12 @@ def _tags(data: dict, stream: dict) -> dict[str, str]:
     return tags
 
 
+def _number(tag: str) -> int:
+    """The leading number of a "3" or "3/12" track or disc tag, 0 when there is none."""
+    head = tag.split("/", 1)[0].strip()
+    return int(head) if head.isdigit() else 0
+
+
 def probe_audio(path: Path) -> AudioInfo:
     """Layout, length and embedded cover of the first audio stream; raises FFmpegError if unusable."""
     data = ffmpeg.probe(path)
@@ -85,7 +99,7 @@ def probe_audio(path: Path) -> AudioInfo:
     atmos = _is_atmos(stream)
     tags = _tags(data, stream)
     return AudioInfo(
-        ATMOS_CHANNELS if atmos else channels,
+        channels,
         seconds,
         atmos=atmos,
         codec=str(stream.get("codec_long_name") or stream.get("codec_name") or ""),
@@ -94,4 +108,7 @@ def probe_audio(path: Path) -> AudioInfo:
         title=tags.get("title", ""),
         artist=tags.get("artist", "") or tags.get("album_artist", ""),
         album=tags.get("album", ""),
+        disc=_number(tags.get("disc", "")),
+        track=_number(tags.get("track", "")),
+        speakers=None if atmos else file_layout(str(stream.get("channel_layout", "")), channels),
     )

@@ -23,6 +23,7 @@ from typing import BinaryIO
 import numpy as np
 
 from dolbytool.core.paths import partial_path
+from dolbytool.core.speakers import BED_POSITIONS, SIDE_POSITIONS
 
 from .oamd import Program
 from .render import joc_objects
@@ -34,29 +35,16 @@ _FULL_SCALE = 2 ** (BIT_DEPTH - 1)
 _RIFF_LIMIT = 0xFFFFFFFF
 _DS64_SIZE = 28
 
-# Room positions (x 0..1 left to right, y 0..1 front to back, z 0..1 up) and
-# ADM speaker labels of the bed channels OAMD can name.
-_BED = {
-    "L": ((0.0, 0.0, 0.0), "RC_L"),
-    "R": ((1.0, 0.0, 0.0), "RC_R"),
-    "C": ((0.5, 0.0, 0.0), "RC_C"),
-    "LFE": ((0.5, 0.0, -1.0), "RC_LFE"),
-    "Ls": ((0.0, 1.0, 0.0), "RC_Ls"),
-    "Rs": ((1.0, 1.0, 0.0), "RC_Rs"),
-    "Lb": ((0.0, 1.0, 0.0), "RC_Lrs"),
-    "Rb": ((1.0, 1.0, 0.0), "RC_Rrs"),
-    "Tfl": ((0.0, 0.0, 1.0), "RC_Ltf"),
-    "Tfr": ((1.0, 0.0, 1.0), "RC_Rtf"),
-    "Tsl": ((0.0, 0.5, 1.0), "RC_Lts"),
-    "Tsr": ((1.0, 0.5, 1.0), "RC_Rts"),
-    "Tbl": ((0.0, 1.0, 1.0), "RC_Ltr"),
-    "Tbr": ((1.0, 1.0, 1.0), "RC_Rtr"),
-    "Lw": ((0.0, 0.25, 0.0), "RC_Lw"),
-    "Rw": ((1.0, 0.25, 0.0), "RC_Rw"),
-    "LFE2": ((0.5, 0.0, -1.0), "RC_LFE2"),
+# ADM speaker labels of the bed channels OAMD can name, with their room positions.
+_ADM_LABELS = {
+    "L": "RC_L", "R": "RC_R", "C": "RC_C", "LFE": "RC_LFE", "Ls": "RC_Ls", "Rs": "RC_Rs",
+    "Lb": "RC_Lrs", "Rb": "RC_Rrs", "Tfl": "RC_Ltf", "Tfr": "RC_Rtf", "Tsl": "RC_Lts",
+    "Tsr": "RC_Rts", "Tbl": "RC_Ltr", "Tbr": "RC_Rtr", "Lw": "RC_Lw", "Rw": "RC_Rw",
+    "LFE2": "RC_LFE2",
 }  # fmt: skip
+_BED = {label: (BED_POSITIONS[label], adm) for label, adm in _ADM_LABELS.items()}
 # With back surrounds in the bed, Ls and Rs are the side pair.
-_SIDE = {"Ls": ((0.0, 0.5, 0.0), "RC_Lss"), "Rs": ((1.0, 0.5, 0.0), "RC_Rss")}
+_SIDE = {"Ls": (SIDE_POSITIONS["Ls"], "RC_Lss"), "Rs": (SIDE_POSITIONS["Rs"], "RC_Rss")}
 
 DIRECT_SPEAKERS = ("0001", "DirectSpeakers")
 OBJECTS = ("0003", "Objects")

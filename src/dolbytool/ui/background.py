@@ -47,6 +47,41 @@ class Latest(QObject):
             callback(result)
 
 
+class Each(QObject):
+    """Runs calls in the background and delivers every result, unless dropped.
+
+    `drop()` forgets every call still running, e.g. when the list they fill is cleared.
+    """
+
+    def __init__(self, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._generation = 0
+        self._pending = 0
+        self._relay = _Relay(self)
+        self._relay.done.connect(self._deliver)
+
+    def run(self, call: Callable[[], Any], on_done: Callable[[Any], None]) -> None:
+        generation, relay = self._generation, self._relay
+        self._pending += 1
+        task = _Task(call, lambda r, cb=on_done: relay.done.emit(generation, (cb, r)))
+        QThreadPool.globalInstance().start(task)
+
+    def drop(self) -> None:
+        self._generation += 1
+        self._pending = 0
+
+    @property
+    def busy(self) -> bool:
+        return self._pending > 0
+
+    def _deliver(self, generation: int, payload: object) -> None:
+        if generation != self._generation:
+            return
+        callback, result = payload  # type: ignore[misc]
+        self._pending -= 1
+        callback(result)
+
+
 class _Task(QRunnable):
     def __init__(self, call: Callable[[], Any], deliver: Callable[[Any], None]) -> None:
         super().__init__()

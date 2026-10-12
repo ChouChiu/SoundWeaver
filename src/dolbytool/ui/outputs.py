@@ -5,57 +5,62 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from PySide6.QtCore import QSize, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QIcon, QPalette
-from PySide6.QtWidgets import (
-    QAbstractItemView,
-    QCheckBox,
-    QGridLayout,
-    QLabel,
-    QListWidget,
-    QListWidgetItem,
-    QWidget,
-)
+from PySide6.QtGui import QColor
+from PySide6.QtWidgets import QAbstractItemView, QGridLayout, QListWidgetItem, QWidget
+from qfluentwidgets import CaptionLabel, IconWidget, ListWidget, StrongBodyLabel, SwitchButton
 
+from dolbytool.ui import fluent
 from dolbytool.ui.feature import FeaturePanel
-
-# Breeze's negative text colour, readable on light and dark schemes alike
-_NEGATIVE = QColor("#da4453")
 
 
 class _Row(QWidget):
     def __init__(self, panel: FeaturePanel) -> None:
         super().__init__()
-        self.check = QCheckBox()
+        self.check = SwitchButton()
+        self.check.setOnText("")
+        self.check.setOffText("")
+        self.check.label.hide()
         self.check.setToolTip(f"启用/禁用 {panel.title}")
-        self.check.toggled.connect(panel.set_enabled)
-        icon = QLabel()
-        icon.setPixmap(QIcon.fromTheme(panel.icon).pixmap(QSize(22, 22)))
-        title = QLabel(panel.title)
-        bold = QFont(title.font())
-        bold.setBold(True)
-        title.setFont(bold)
-        self.status = QLabel()
+        self.check.checkedChanged.connect(panel.set_enabled)
+        icon = IconWidget(fluent.icon(panel.icon))
+        icon.setFixedSize(20, 20)
+        self.title = title = StrongBodyLabel(panel.title)
+        self.status = CaptionLabel()
         self.status.setMinimumWidth(1)
-        small = QFont(self.status.font())
-        small.setPointSizeF(small.pointSizeF() * 0.9)
-        self.status.setFont(small)
+        # a batch's status can say why some tracks cannot make the output
+        self.status.setWordWrap(True)
         layout = QGridLayout(self)
-        layout.setContentsMargins(6, 5, 6, 5)
-        layout.setHorizontalSpacing(8)
+        layout.setContentsMargins(10, 7, 6, 7)
+        layout.setHorizontalSpacing(12)
         layout.setVerticalSpacing(0)
-        layout.addWidget(self.check, 0, 0, 2, 1)
-        layout.addWidget(icon, 0, 1, 2, 1)
-        layout.addWidget(title, 0, 2)
-        layout.addWidget(self.status, 1, 2)
-        layout.setColumnStretch(2, 1)
+        layout.addWidget(icon, 0, 0, 2, 1)
+        layout.addWidget(title, 0, 1)
+        layout.addWidget(self.status, 1, 1)
+        layout.addWidget(self.check, 0, 2, 2, 1)
+        layout.setColumnStretch(1, 1)
+
+    def height_for(self, width: int) -> int:
+        """The row's height at `width`, its status wrapped to the room beside icon and switch."""
+        margins = self.layout().contentsMargins()
+        spacing = 2 * self.layout().horizontalSpacing()
+        room = width - margins.left() - margins.right() - spacing - 20
+        room -= self.check.sizeHint().width()
+        # a wrapping label's own size hint assumes its minimum width, one pixel: far too tall
+        line = self.status.fontMetrics().height()
+        status = self.status.heightForWidth(max(room, 1)) if self.status.text() else line
+        text = self.title.sizeHint().height() + max(status, line)
+        return max(text, self.check.sizeHint().height()) + margins.top() + margins.bottom()
 
     def set_status(self, text: str, problem: bool) -> None:
         self.status.setText(text)
-        color = _NEGATIVE if problem else self.palette().color(QPalette.ColorRole.PlaceholderText)
-        self.status.setStyleSheet(f"color: {color.name()}")
+        self.status.setToolTip(text)
+        if problem:
+            self.status.setTextColor(QColor("#c42b1c"), QColor("#ff99a4"))
+        else:
+            self.status.setTextColor(QColor(96, 96, 96), QColor(206, 206, 206))
 
 
-class OutputList(QListWidget):
+class OutputList(ListWidget):
     """One row per output panel; the current row is the page shown beside it."""
 
     selected = Signal(int)
@@ -76,9 +81,16 @@ class OutputList(QListWidget):
     def resizeEvent(self, event) -> None:
         # list mode keeps each item at its hinted width; stretch the rows to the viewport
         super().resizeEvent(event)
+        self._fit_rows()
+
+    def _fit_rows(self) -> None:
         width = self.viewport().width()
         for i, row in enumerate(self.rows):
-            self.item(i).setSizeHint(QSize(width, row.sizeHint().height()))
+            self.item(i).setSizeHint(QSize(width, row.height_for(width)))
+        # a new size hint alone leaves the rows, and the widgets on them, where they were
+        self.doItemsLayout()
+        for i, row in enumerate(self.rows):
+            row.setGeometry(self.visualItemRect(self.item(i)))
 
     def sync(self, panels: Sequence[FeaturePanel]) -> None:
         """Show each panel's enabled state without echoing it back."""
@@ -88,7 +100,13 @@ class OutputList(QListWidget):
             row.check.blockSignals(False)
 
     def set_status(self, index: int, text: str, problem: bool = False) -> None:
-        self.rows[index].set_status(text, problem)
+        row = self.rows[index]
+        if text != row.status.text():
+            row.set_status(text, problem)
+            # a wrapped status may take another line, or give one back
+            self._fit_rows()
+        else:
+            row.set_status(text, problem)
 
     def set_locked(self, locked: bool) -> None:
         for row in self.rows:

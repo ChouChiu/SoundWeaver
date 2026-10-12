@@ -8,11 +8,21 @@ body,
 	background: #000;
 }
 
-/* What the AMLL Player app sets around the prebuilt player: white text, a sans-serif stack */
+/*
+ * White text and a sans-serif stack, as the AMLL Player app sets around the prebuilt player.
+ * Its stack leads with the Apple faces (SF Pro, PingFang), which may not be used in a video
+ * made off Apple hardware; these are free for commercial use.  system-ui is left out: on
+ * Linux it is fontconfig's default and would shadow every face after it.
+ */
 #root {
 	color: #fff;
-	font-family: system-ui, -apple-system, "SF Pro", "PingFang SC", "Noto Sans CJK SC", "Noto Sans", sans-serif;
+	font-family: "HarmonyOS Sans SC", "MiSans", "Noto Sans CJK SC", "Noto Sans", sans-serif;
 	user-select: none;
+}
+
+/* the quality tag names its own Apple stack, PingFang included; give it the page's */
+[class*="_commonTagText"] {
+	font-family: inherit !important;
 }
 
 /* background "none": nothing behind the player, the frame keeps its alpha */

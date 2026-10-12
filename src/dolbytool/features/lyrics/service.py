@@ -28,6 +28,8 @@ class SubtitleSpec:
     fade_ms: int = 200
     # translation line opacity in percent; AMLL's own 30 % is too faint over video
     translation_opacity: int = 70
+    # drop the title and credit lines around the lyrics
+    filter_credits: bool = True
     crf: int = 30
 
 
@@ -54,6 +56,7 @@ def render_subtitle_video(
         "--fps", str(spec.fps), "--font", css_font_list(spec.font_families), "--font-size", str(spec.font_size),
         "--fade", str(spec.fade_ms),
         "--sub-opacity", str(spec.translation_opacity), "--crf", str(spec.crf),
+        *(() if spec.filter_credits else ("--keep-credits",)),
     ]  # fmt: skip
     if duration:
         args += ["--duration", f"{duration:.3f}"]

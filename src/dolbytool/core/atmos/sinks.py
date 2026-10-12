@@ -1,4 +1,4 @@
-"""What the decoder hands its outputs for every rendered syncframe, and the 5.1.4 feeds."""
+"""What the decoder hands its outputs for every rendered syncframe, and the speaker feeds."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ from dataclasses import dataclass
 import numpy as np
 
 from .oamd import Frame
-from .render import CH
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,8 +28,8 @@ def container_span(index: int, samples: int, first: int, last: int) -> slice:
     return slice(lo - a, max(lo, hi) - a)
 
 
-def speaker_feeds(f: RenderedFrame) -> np.ndarray:
-    """The 5.1.4 render of the frame's span, (speakers, samples) as float32."""
+def speaker_feeds(f: RenderedFrame, lfe: int) -> np.ndarray:
+    """The render of the frame's span, (speakers, samples) as float32; `lfe` is the LFE's channel."""
     speakers = np.einsum("ots,ot->ts", f.gains, f.essence)
-    speakers[:, CH["LFE"]] = f.lfe
+    speakers[:, lfe] = f.lfe
     return speakers[f.span].T.astype(np.float32)

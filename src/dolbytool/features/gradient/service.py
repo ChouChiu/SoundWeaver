@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
+from dolbytool.core import motion
 from dolbytool.core.cancel import CancellationToken
 from dolbytool.core.ffmpeg import run_ffmpeg
 from dolbytool.core.paths import atomic_output
 from dolbytool.core.task import Report, Step
+from dolbytool.features.gradient import palette
 
 # The reference: 4000x4000 with the blend running from y=1200 to y=2800
 REFERENCE_SIZE = 4000
@@ -56,10 +58,23 @@ def render_gradient(spec: GradientSpec, output: Path, token: CancellationToken) 
         )  # fmt: skip
 
 
-def gradient_step(spec: GradientSpec, target: Path) -> Step:
+def cover_spec(spec: GradientSpec, cover: Path) -> GradientSpec:
+    """`spec` with its colours taken from the dominant colour of `cover` (motion artwork's first frame)."""
+    swatches = palette.palette(motion.still(cover))
+    top, bottom = palette.gradient_pair(palette.dominant(swatches).rgb)
+    return replace(spec, top=top, bottom=bottom)
+
+
+def gradient_step(spec: GradientSpec, target: Path, cover: Path | None = None) -> Step:
+    """With `cover`, the colours are picked from it when the step runs."""
+
     def run(token: CancellationToken, report: Report) -> str:
-        report(10, f"{spec.top} → {spec.bottom}")
-        render_gradient(spec, target, token)
+        used = spec
+        if cover is not None:
+            report(5, "提取封面主色调")
+            used = cover_spec(spec, cover)
+        report(10, f"{used.top} → {used.bottom}")
+        render_gradient(used, target, token)
         return target.name
 
     return Step("渐变图", run, (target,))

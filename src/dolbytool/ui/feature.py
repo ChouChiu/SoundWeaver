@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from PySide6.QtCore import QSettings, Signal
 from PySide6.QtWidgets import QDoubleSpinBox, QSpinBox, QWidget
 
@@ -20,6 +22,8 @@ class FeaturePanel(QWidget):
     """
 
     changed = Signal()
+    # a setting of this panel changed which tracks every project has
+    tracks_changed = Signal()
     log = Signal(str)
 
     title = ""
@@ -30,6 +34,8 @@ class FeaturePanel(QWidget):
     enabled_default = True
     # whether ticking this output requires a readable source audio
     needs_audio = True
+    # made once per album from what the tracks share (the cover), not once per track
+    per_album = False
 
     def __init__(self, settings: QSettings, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -79,6 +85,14 @@ class FeaturePanel(QWidget):
         return None
 
     def plan(self, ctx: PlanContext) -> list[Step]:
+        return []
+
+    def album_plan(
+        self, ctx: PlanContext, tracks: Sequence[tuple[Project, list[Step]]]
+    ) -> list[Step]:
+        """Steps to run once every track of an album is done, given what this panel
+        planned for each; `ctx` is the album's.
+        """
         return []
 
     def confirm(self, ctx: PlanContext) -> bool:

@@ -6,16 +6,19 @@ The rendering lives in `renderer/` (Node + headless Chromium, entry point
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import json
+import tempfile
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from dolbytool.core import ffmpeg, motion
 from dolbytool.core.cancel import CancellationToken
-from dolbytool.core.paths import atomic_output
+from dolbytool.core.paths import atomic_output, work_root
 from dolbytool.core.renderer import renderer_script, run_renderer
 from dolbytool.core.task import Report, Step
 from dolbytool.features.lyrics.service import css_font_list
-from dolbytool.features.waveform.encoders import FALLBACK_ENCODER, encoder_available
+from dolbytool.features.waveform.encoders import encoder_for
 
 BACKGROUNDS = {
     "mesh": "流体渐变 (Mesh Gradient)",
@@ -82,6 +85,14 @@ class PlayerSpec:
     balance: bool = True
     # landscape: percent of the lyric column left empty on its right; -1 keeps AMLL's 15 % / 8 %
     lyric_padding: int = 3
+    # drop the title and credit lines around the lyrics
+    filter_credits: bool = True
+    # JPEG frames from the browser: about 1.5x faster, fine detail a little softer
+    fast_capture: bool = True
+    # draw at twice the size and scale down: smoother text edges, about 2-3x slower
+    supersample: bool = False
+    # the line a song without lyrics shows; empty leaves the cover alone
+    instrumental_text: str = "纯音乐，请欣赏"
     # song info and controls
     title: str = ""
     artists: tuple[str, ...] = ()
@@ -100,7 +111,8 @@ class PlayerSpec:
 
     @property
     def suffix(self) -> str:
-        return ".webm" if self.codec == "vp9" else ".mp4"
+        # Matroska holds any audio as is: E-AC-3 JOC, and the PCM of a stem
+        return ".webm" if self.codec == "vp9" else ".mkv"
 
 
 def _flag(on: bool, name: str) -> list[str]:
@@ -117,6 +129,9 @@ def player_args(spec: PlayerSpec, duration: float | None) -> list[str]:
         "--lyric-size", spec.lyric_size, "--word-fade", f"{max(spec.word_fade, 1) / 100:g}",
         "--controls", spec.controls, "--ui-scale", f"{spec.ui_scale / 100:g}",
         "--lyric-padding", str(spec.lyric_padding), *_flag(not spec.balance, "--no-balance"),
+        "--instrumental-text", spec.instrumental_text, *_flag(spec.fast_capture, "--fast-capture"),
+        *_flag(spec.supersample, "--supersample"),
+        *_flag(not spec.filter_credits, "--keep-credits"),
         *_flag(spec.light_wave, "--light-wave"),
         *_flag(not spec.blur, "--no-blur"), *_flag(not spec.scale, "--no-scale"),
         *_flag(not spec.spring, "--no-spring"), *_flag(not spec.translation, "--no-translation"),
@@ -144,7 +159,7 @@ def player_args(spec: PlayerSpec, duration: float | None) -> list[str]:
 
 
 def render_player_video(
-    ttml: Path,
+    ttml: Path | None,
     cover: Path | None,
     audio: Path | None,
     output: Path,
@@ -154,22 +169,33 @@ def render_player_video(
     on_fraction: Callable[[float], None],
     on_status: Callable[[str], None],
     excerpt: tuple[float, float] | None = None,
+    playlist: Path | None = None,
 ) -> None:
-    """`duration` is the song's; `excerpt` (start, length in seconds) renders only that part."""
+    """`duration` is the song's; `excerpt` (start, length in seconds) renders only that part.
+
+    Motion artwork as `cover` loops on the cover; the background takes its first frame.
+    Without `ttml` (an instrumental) the cover stands alone, for `duration`.  A
+    `playlist` (see `render_queue`) plays in place of `ttml`, `audio` its songs' joined.
+    """
     script = renderer_script("player.mjs")
-    args = ["--ttml", str(ttml), *player_args(spec, duration)]
+    source = ["--playlist", str(playlist)] if playlist else ["--ttml", str(ttml)] if ttml else []
+    args = [*source, *player_args(spec, duration)]
     if excerpt:
         start, length = excerpt
         args += ["--start", f"{start:.3f}", "--duration", f"{length:.3f}", "--jobs", "1"]
         if duration:
             args += ["--song-length", f"{duration:.3f}"]
-    if cover:
+    on_fraction(0.0)
+    if cover and motion.is_motion(cover):
+        on_status("提取动态封面帧")
+        frames = motion.frames(cover, motion.side_for(spec.width, spec.height), token)
+        args += ["--cover", str(motion.still(cover)), "--cover-frames", str(frames)]
+    elif cover:
         args += ["--cover", str(cover)]
     if audio:
         args += ["--audio", str(audio), "--audio-mode", spec.audio_mode]
         if spec.beat and spec.background == "mesh":
             args.append("--beat")
-    on_fraction(0.0)
     with atomic_output(output) as partial:
         run_renderer(
             script, [*args, "--out", str(partial)], token, on_fraction, on_status,
@@ -202,8 +228,18 @@ def player_target(output_dir: Path, name_source: Path, spec: PlayerSpec) -> Path
     return output_dir / f"{name_source.stem}_player{spec.suffix}"
 
 
+def _available(spec: PlayerSpec, report: Report) -> PlayerSpec:
+    """`spec` with libx264 in place of an NVENC encoder this machine lacks."""
+    if spec.codec.endswith("_nvenc"):
+        codec, note = encoder_for(spec.codec, spec.width, spec.height)
+        if note:
+            report(0, note)
+            return replace(spec, codec=codec, quality=DEFAULT_QUALITY[codec])
+    return spec
+
+
 def player_step(
-    ttml: Path,
+    ttml: Path | None,
     cover: Path | None,
     audio: Path | None,
     target: Path,
@@ -213,10 +249,7 @@ def player_step(
     """`duration` is the song's, so the progress bar and the video run its whole length."""
 
     def run(token: CancellationToken, report: Report) -> str:
-        use = spec
-        if use.codec.endswith("_nvenc") and not encoder_available(use.codec):
-            report(0, f"{use.codec} 不可用，改用 {FALLBACK_ENCODER}")
-            use = replace(use, codec=FALLBACK_ENCODER, quality=DEFAULT_QUALITY[FALLBACK_ENCODER])
+        use = _available(spec, report)
         done = 0
 
         def on_fraction(fraction: float) -> None:
@@ -232,3 +265,86 @@ def player_step(
         return target.name
 
     return Step("播放器视频", run, (target,))
+
+
+@dataclass(frozen=True, slots=True)
+class QueueTrack:
+    """A song of a player video that plays several back to back."""
+
+    audio: Path
+    ttml: Path | None
+    title: str
+    artists: tuple[str, ...]
+    album: str
+
+
+def _needs_audio(spec: PlayerSpec) -> bool:
+    return (
+        spec.audio_mode != "none"
+        or spec.controls == "fft"
+        or (spec.beat and spec.background == "mesh")
+    )
+
+
+def render_queue(
+    tracks: Sequence[QueueTrack],
+    cover: Path | None,
+    output: Path,
+    spec: PlayerSpec,
+    token: CancellationToken,
+    on_fraction: Callable[[float], None],
+    on_status: Callable[[str], None],
+) -> None:
+    """`tracks` played one after another as the player's queue would, an album say.
+
+    One page plays them all, so at each song the info, progress and lyrics
+    change over as in the player while the background flows on.  Their audio is
+    joined without re-encoding, which suits an album's tracks of one format.
+    """
+    lengths = [ffmpeg.duration(track.audio) for track in tracks]
+    with tempfile.TemporaryDirectory(dir=work_root()) as scratch:
+        playlist = Path(scratch) / "playlist.json"
+        entries = [
+            {"ttml": str(t.ttml) if t.ttml else None, "title": t.title,
+             "artists": list(t.artists), "album": t.album, "duration": length}
+            for t, length in zip(tracks, lengths, strict=True)
+        ]  # fmt: skip
+        playlist.write_text(json.dumps(entries, ensure_ascii=False), encoding="utf-8")
+        audio = None
+        if _needs_audio(spec):
+            on_status("拼接专辑音频")
+            listing = Path(scratch) / "audio.txt"
+            listing.write_text(
+                "".join("file '{}'\n".format(str(t.audio).replace("'", "'\\''")) for t in tracks),
+                encoding="utf-8",
+            )
+            audio = Path(scratch) / "queue.mka"
+            ffmpeg.run_ffmpeg(
+                ["-f", "concat", "-safe", "0", "-i", str(listing), "-map", "0:a", "-c", "copy",
+                 str(audio)],
+                token,
+            )  # fmt: skip
+        render_player_video(
+            None, cover, audio, output, spec, sum(lengths), token, on_fraction, on_status,
+            playlist=playlist,
+        )  # fmt: skip
+
+
+def queue_step(
+    tracks: Sequence[QueueTrack], cover: Path | None, target: Path, spec: PlayerSpec
+) -> Step:
+    def run(token: CancellationToken, report: Report) -> str:
+        use = _available(spec, report)
+        done = 0
+
+        def on_fraction(fraction: float) -> None:
+            nonlocal done
+            done = round(fraction * 100)
+            report(done, "逐帧渲染与编码")
+
+        render_queue(
+            tracks, cover, target, use, token, on_fraction, lambda message: report(done, message)
+        )
+        return f"{target.name}（{len(tracks)} 首连续播放）"
+
+    return Step("整张专辑播放器视频", run, (target,))

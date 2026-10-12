@@ -16,12 +16,14 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
+from dolbytool.core.speakers import SpeakerLayout
+
 from . import joc
 from .adm import adm_block, pcm24
 from .bitstream import BitstreamError
 from .oamd import Frame, OamdDecoder, ObjectState
 from .qmf import BANDS, DELAY, LENGTH, Analysis, Synthesis
-from .render import SPEAKERS, Renderer, RendererState, joc_objects
+from .render import Renderer, RendererState, joc_objects
 from .sinks import RenderedFrame, container_span, speaker_feeds
 from .trace import Measure, measure
 
@@ -58,6 +60,7 @@ class ChunkJob:
     gains: RendererState | None  # None at the start of the stream
     first: int  # the container's span of the stream's timeline
     last: int
+    layout: SpeakerLayout  # what the speaker feeds and the trace's shares are in
     speakers: Path | None  # planar float32 (speakers, container samples) buffer to fill
     adm: Path | None  # where this stretch's ADM PCM goes
     adm_channels: int
@@ -79,12 +82,14 @@ class _Chunk:
         self.objects = np.zeros((0, 0))  # rebuilt samples not yet rendered
         self.skip = 0
         self.queue: list[tuple[int, Frame, np.ndarray]] = []  # (frame, metadata, LFE)
-        self.renderer = Renderer.restore(job.gains) if job.gains is not None else None
+        self.renderer = Renderer.restore(job.gains, job.layout) if job.gains is not None else None
         self.oamd = OamdDecoder(job.oamd_state)
         self.measured: list[Measure] = []
         self.clipped = 0
         self.speakers = (
-            np.memmap(job.speakers, dtype=np.float32, mode="r+").reshape(len(SPEAKERS), -1)
+            np.memmap(job.speakers, dtype=np.float32, mode="r+").reshape(
+                len(job.layout.channels), -1
+            )
             if job.speakers is not None
             else None
         )
@@ -165,7 +170,7 @@ class _Chunk:
 
     def render(self, k: int, meta: Frame, lfe: np.ndarray) -> None:
         if self.renderer is None:
-            self.renderer = Renderer(self.objects.shape[0])
+            self.renderer = Renderer(self.objects.shape[0], self.job.layout)
         if len(joc_objects(meta)) != self.objects.shape[0]:
             raise AtmosError("全景声对象元数据与 JOC 对象数对不上")
         gains = self.renderer.gains(meta, FRAME)
@@ -180,7 +185,9 @@ class _Chunk:
             return
         if self.speakers is not None:
             at = k * FRAME + f.span.start - job.first
-            self.speakers[:, at : at + f.span.stop - f.span.start] = speaker_feeds(f)
+            self.speakers[:, at : at + f.span.stop - f.span.start] = speaker_feeds(
+                f, job.layout.index["LFE"]
+            )
         if self.adm is not None:
             data, clipped = pcm24(adm_block(f, job.adm_channels))
             self.adm.write(data)

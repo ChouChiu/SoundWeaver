@@ -1,6 +1,6 @@
 /** Render a frame range of the timeline into one WebM. */
 
-import { type Encoding, encoder } from "./ffmpeg";
+import { captureFormat, type Encoding, encoder } from "./ffmpeg";
 import { debug } from "./log";
 import type { Run } from "./run";
 import type { Stage } from "./stage";
@@ -40,6 +40,7 @@ export async function renderSegment(
 	// With no line on screen every frame is the same empty picture: capture it once,
 	// then skip the browser for the intro, gaps and outro.
 	let blank: Buffer | undefined;
+	const format = captureFormat(encoding);
 	for (let frame = from; frame < to; frame++) {
 		if (failure) throw failure;
 		run.throwIfAborted();
@@ -48,7 +49,7 @@ export async function renderSegment(
 			previous = blank;
 		} else {
 			// No damage means no new screenshot: the picture is unchanged, repeat the last one.
-			previous = (await stage.frame(true)) ?? previous ?? (await stage.frame(true));
+			previous = (await stage.frame(format)) ?? previous ?? (await stage.frame(format));
 			if (!previous) throw new Error(`第 ${frame} 帧截图失败`);
 			if (visible === 0) blank = previous;
 		}

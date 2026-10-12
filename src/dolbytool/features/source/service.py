@@ -10,6 +10,7 @@ from pathlib import Path
 
 from dolbytool.core import ffmpeg
 from dolbytool.core.audio import AudioInfo, probe_audio
+from dolbytool.core.motion import is_motion
 from dolbytool.core.paths import cache_dir, content_key
 
 AUDIO_SUFFIXES = {".m4a", ".mp4", ".mka", ".mkv", ".ec3", ".eac3", ".ac3", ".thd", ".wav", ".flac"}
@@ -51,9 +52,9 @@ def sibling_ttml(audio: Path) -> Path | None:
 
 
 def kind_of(path: Path) -> str | None:
-    """Which input a dropped file is: audio, cover or ttml."""
+    """Which input a dropped file is: audio, cover (motion artwork included) or ttml."""
     suffix = path.suffix.lower()
-    if suffix in IMAGE_SUFFIXES:
+    if suffix in IMAGE_SUFFIXES or is_motion(path):
         return "cover"
     if suffix in TTML_SUFFIXES:
         return "ttml"

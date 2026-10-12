@@ -11,7 +11,7 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { parseArgs } from "node:util";
-import type { SoundfieldOptions, SoundfieldScene, ViewPreset } from "../shared/api";
+import type { ColorMode, SoundfieldOptions, SoundfieldScene, ViewPreset } from "../shared/api";
 import { headlessShell } from "./chrome";
 import { debug, status } from "./log";
 import { defaultJobs, number } from "./options";
@@ -19,6 +19,7 @@ import { renderTimeline, start } from "./parallel";
 import { Stage, type StageSettings } from "./stage";
 
 const VIEWS: ViewPreset[] = ["iso", "top", "angle"];
+const COLOR_MODES: ColorMode[] = ["tint", "height", "object"];
 const WEBGL_ARGS = [
 	"--use-angle=vulkan",
 	"--enable-features=Vulkan",
@@ -26,6 +27,11 @@ const WEBGL_ARGS = [
 	"--ignore-gpu-blocklist",
 	"--enable-unsafe-swiftshader",
 ];
+
+function invalid(name: string, value: string | undefined): never {
+	console.error(`invalid --${name}: ${value}`);
+	process.exit(2);
+}
 
 function parseOptions(argv = process.argv.slice(2)) {
 	const { values } = parseArgs({
@@ -43,7 +49,15 @@ function parseOptions(argv = process.argv.slice(2)) {
 			"gate-db": { type: "string", default: "-90" },
 			fade: { type: "string", default: "180" },
 			dim: { type: "string", default: "0.25" },
+			"level-response": { type: "string", default: "0" },
+			glow: { type: "string", default: "0" },
+			trail: { type: "string", default: "0" },
+			drop: { type: "boolean", default: false },
+			color: { type: "string", default: "tint" },
+			zoom: { type: "string", default: "1" },
 			duration: { type: "string" },
+			// seconds into the track to start at, for a preview
+			start: { type: "string", default: "0" },
 			crf: { type: "string", default: "30" },
 			jobs: { type: "string" },
 		},
@@ -64,6 +78,12 @@ function parseOptions(argv = process.argv.slice(2)) {
 		gateDb: number("gate-db", values["gate-db"], -200, 0),
 		fadeMs: number("fade", values.fade, 0),
 		dim: number("dim", values.dim, 0, 1),
+		levelResponse: number("level-response", values["level-response"], 0, 1),
+		glow: number("glow", values.glow, 0, 1),
+		trail: number("trail", values.trail, 0, 10),
+		drop: values.drop!,
+		colorMode: COLOR_MODES.includes(values.color as ColorMode) ? (values.color as ColorMode) : invalid("color", values.color),
+		zoom: number("zoom", values.zoom, 0.2, 5),
 	};
 	return {
 		scene: path.resolve(values.scene),
@@ -74,6 +94,7 @@ function parseOptions(argv = process.argv.slice(2)) {
 		fps: number("fps", values.fps, 1),
 		options,
 		duration: values.duration === undefined ? undefined : number("duration", values.duration, 0.001),
+		start: number("start", values.start, 0),
 		crf: number("crf", values.crf, 0, 63),
 		jobs: values.jobs === undefined ? defaultJobs() : Math.floor(number("jobs", values.jobs, 1)),
 	};
@@ -101,6 +122,7 @@ start(async (run) => {
 
 	status("启动浏览器");
 	const first = await Stage.open(run, settings);
-	const seconds = opts.duration ?? (await first.endTime()) / 1000;
-	await renderTimeline(run, first, () => Stage.open(run, settings), { ...opts, seconds });
+	const seconds = opts.duration ?? Math.max(0.1, (await first.endTime()) / 1000 - opts.start);
+	const startFrame = Math.round(opts.start * opts.fps);
+	await renderTimeline(run, first, () => Stage.open(run, settings), { ...opts, seconds, startFrame });
 });

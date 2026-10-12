@@ -29,6 +29,9 @@ ENCODER_LABELS = {
 }
 DEFAULT_ENCODER = "h264_nvenc"
 FALLBACK_ENCODER = "libx264"
+# Largest side NVENC encodes on this generation of cards (H.264 level 6.2 / HEVC);
+# beyond it the session fails with "No capable devices found".
+NVENC_MAX_SIDE = {"h264_nvenc": 4096, "hevc_nvenc": 8192}
 
 
 @cache
@@ -42,3 +45,30 @@ def encoder_available(name: str) -> bool:
         creationflags=NO_WINDOW,
     )  # fmt: skip
     return result.returncode == 0
+
+
+def encoder_for(name: str, width: int, height: int) -> tuple[str, str | None]:
+    """`name`, or the next encoder that works here and takes frames this large, with why it changed.
+
+    H.264 NVENC hands over to HEVC NVENC, which keeps the GPU, before the software encoder.
+    """
+    side = max(width, height)
+    candidates = [name]
+    if name == "h264_nvenc":
+        candidates.append("hevc_nvenc")
+    candidates.append(FALLBACK_ENCODER)
+    for candidate in candidates:
+        limit = NVENC_MAX_SIDE.get(candidate)
+        if limit and side > limit:
+            continue
+        if candidate != FALLBACK_ENCODER and not encoder_available(candidate):
+            continue
+        if candidate == name:
+            return name, None
+        reason = (
+            f"超出 {name} 最大 {NVENC_MAX_SIDE[name]} px"
+            if NVENC_MAX_SIDE.get(name, side) < side
+            else f"{name} 不可用"
+        )
+        return candidate, f"{reason}，改用 {candidate}"
+    return FALLBACK_ENCODER, f"改用 {FALLBACK_ENCODER}"

@@ -20,12 +20,7 @@ from dolbytool.core.ffmpeg import duration, run_ffmpeg
 from dolbytool.core.paths import atomic_output, work_root
 from dolbytool.core.project import Track
 from dolbytool.core.task import Report, Step, percent
-from dolbytool.features.waveform.encoders import (
-    DEFAULT_ENCODER,
-    ENCODERS,
-    FALLBACK_ENCODER,
-    encoder_available,
-)
+from dolbytool.features.waveform.encoders import DEFAULT_ENCODER, ENCODERS, encoder_for
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,10 +116,10 @@ def waveform_target(output_dir: Path, source: Path) -> Path:
 
 def waveform_step(track: Track, target: Path, spec: WaveformSpec) -> Step:
     def run(token: CancellationToken, report: Report) -> str:
-        use = spec
-        if not encoder_available(use.encoder):
-            report(0, f"{use.encoder} 不可用，改用 {FALLBACK_ENCODER}")
-            use = replace(use, encoder=FALLBACK_ENCODER)
+        encoder, note = encoder_for(spec.encoder, spec.screen_width, spec.height)
+        if note:
+            report(0, note)
+        use = replace(spec, encoder=encoder)
         if not track.path.is_file():
             raise FileNotFoundError(f"音轨文件不存在：{track.path}")
         render_waveform_video(track.path, target, use, token, percent(report, "渲染与编码"))

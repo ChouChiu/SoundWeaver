@@ -24,8 +24,17 @@ export const song = { time: 0 };
 
 /** mulberry32: small, fast and the same sequence everywhere for one seed. */
 export function seedRandom(seed: number): void {
+	Math.random = randomFrom(seed);
+	random.seed = seed;
+}
+
+/** The seed of the page, for code that needs a sequence of its own. */
+export const random = { seed: 1 };
+
+/** A fresh mulberry32 sequence starting at `seed`. */
+export function randomFrom(seed: number): () => number {
 	let state = seed >>> 0;
-	Math.random = () => {
+	return () => {
 		state = (state + 0x6d2b79f5) >>> 0;
 		let t = state;
 		t = Math.imul(t ^ (t >>> 15), t | 1);

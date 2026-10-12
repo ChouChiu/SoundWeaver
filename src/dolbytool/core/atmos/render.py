@@ -1,10 +1,10 @@
-"""Object essences + OAMD -> 5.1.4 speaker feeds.
+"""Object essences + OAMD -> speaker feeds, in any of the layouts of `core.speakers`.
 
-A room-cube panner: every speaker sits at a corner or an edge of the unit
-room (TS 103 420 room-anchored coordinates), and an object is panned with
-constant power along x within a row, along y between the front and back rows,
-and along z between the floor and the ceiling.  In a 5.X layout the surrounds
-take the back of the room (TS 103 420 table A.7, note 2).
+A room panner: every speaker sits in a row of the unit room (TS 103 420
+room-anchored coordinates), and an object is panned with constant power along
+x within a row, along y between the two rows around it, and along z between
+the floor and the ceiling.  A layout with a single row of heights takes every
+elevated object on that row; one without heights folds them to the floor.
 """
 
 from __future__ import annotations
@@ -14,25 +14,11 @@ from functools import lru_cache
 
 import numpy as np
 
+from dolbytool.core.speakers import BED_POSITIONS, SIDE_POSITIONS, Row, SpeakerLayout
+
 from .oamd import Frame, Render
 
-# Output order: FL FR FC LFE SL SR TFL TFR TBL TBR (WAVE_FORMAT_EXTENSIBLE order)
-SPEAKERS = ("L", "R", "C", "LFE", "Ls", "Rs", "Tfl", "Tfr", "Tbl", "Tbr")
-CH = {name: i for i, name in enumerate(SPEAKERS)}
-POSITIONS = {
-    "L": (0.0, 0.0, 0.0), "R": (1.0, 0.0, 0.0), "C": (0.5, 0.0, 0.0),
-    "Ls": (0.0, 1.0, 0.0), "Rs": (1.0, 1.0, 0.0),
-    "Tfl": (0.0, 0.0, 1.0), "Tfr": (1.0, 0.0, 1.0), "Tbl": (0.0, 1.0, 1.0), "Tbr": (1.0, 1.0, 1.0),
-}  # fmt: skip
-# Bed labels this layout has no speaker for, spread over the ones it has.
-BED_FALLBACK = {
-    "Lb": {"Ls": 1.0}, "Rb": {"Rs": 1.0},
-    "Tsl": {"Tfl": math.sqrt(0.5), "Tbl": math.sqrt(0.5)},
-    "Tsr": {"Tfr": math.sqrt(0.5), "Tbr": math.sqrt(0.5)},
-    "Lw": {"L": math.sqrt(0.5), "Ls": math.sqrt(0.5)},
-    "Rw": {"R": math.sqrt(0.5), "Rs": math.sqrt(0.5)},
-    "LFE2": {"LFE": 1.0},
-}  # fmt: skip
+_SPREAD = math.sqrt(0.5)
 
 
 def _pair(t: float) -> tuple[float, float]:
@@ -43,6 +29,8 @@ def _pair(t: float) -> tuple[float, float]:
 
 def _row(x: float, names: tuple[str, ...]) -> dict[str, float]:
     """Pan along x over speakers spaced evenly across the room."""
+    if len(names) == 1:
+        return {names[0]: 1.0}
     x = min(1.0, max(0.0, x))
     span = len(names) - 1
     i = min(span - 1, int(x * span))
@@ -50,50 +38,75 @@ def _row(x: float, names: tuple[str, ...]) -> dict[str, float]:
     return {names[i]: a, names[i + 1]: b}
 
 
-@lru_cache(maxsize=4096)
-def object_gains(render: Render) -> np.ndarray:
-    x, y, z = render.position
-    g = np.zeros(len(SPEAKERS))
-    if render.snap:
-        nearest = min(
-            POSITIONS, key=lambda s: sum((p - q) ** 2 for p, q in zip(POSITIONS[s], (x, y, z)))
-        )
-        g[CH[nearest]] = 1.0
-        return g
-    if not render.elevation:
-        z = 0.0
-    floor, top = _pair(z)
-    front, back = _pair(y)
-    for layer, rows in (
-        (floor, ((front, ("L", "C", "R")), (back, ("Ls", "Rs")))),
-        (top, ((front, ("Tfl", "Tfr")), (back, ("Tbl", "Tbr")))),
-    ):
-        for weight, names in rows:
+def _rows(y: float, rows: tuple[Row, ...]) -> list[tuple[float, tuple[str, ...]]]:
+    """Pan along y between the two rows around `y`; one row takes everything."""
+    if len(rows) == 1:
+        return [(1.0, rows[0][1])]
+    y = min(rows[-1][0], max(rows[0][0], y))
+    i = next(i for i in range(len(rows) - 1) if y <= rows[i + 1][0])
+    (near, a_names), (far, b_names) = rows[i], rows[i + 1]
+    a, b = _pair((y - near) / (far - near))
+    return [(a, a_names), (b, b_names)]
+
+
+def _place(layout: SpeakerLayout, x: float, y: float, z: float) -> np.ndarray:
+    g = np.zeros(len(layout.channels))
+    floor, top = _pair(z) if layout.top else (1.0, 0.0)
+    for layer, rows in ((floor, layout.floor), (top, layout.top)):
+        if not layer:
+            continue
+        for weight, names in _rows(y, rows):
             for name, w in _row(x, names).items():
-                g[CH[name]] += layer * weight * w
+                g[layout.index[name]] += layer * weight * w
     return g
 
 
-def bed_gains(label: str) -> np.ndarray:
-    g = np.zeros(len(SPEAKERS))
-    for name, w in ({label: 1.0} if label in CH else BED_FALLBACK[label]).items():
-        g[CH[name]] = w
+@lru_cache(maxsize=4096)
+def object_gains(layout: SpeakerLayout, render: Render) -> np.ndarray:
+    x, y, z = render.position
+    if render.snap:
+        positions = layout.positions
+        nearest = min(
+            positions, key=lambda s: sum((p - q) ** 2 for p, q in zip(positions[s], (x, y, z)))
+        )
+        g = np.zeros(len(layout.channels))
+        g[layout.index[nearest]] = 1.0
+        return g
+    return _place(layout, x, y, 0.0 if not render.elevation else z)
+
+
+def bed_gains(layout: SpeakerLayout, label: str, backs: bool) -> np.ndarray:
+    """A bed channel on its own speaker, or where it stands when the layout lacks one.
+
+    `backs`: the bed has Lb and Rb, so its Ls and Rs are the side pair.  A 5.X
+    bed's surrounds in a layout with backs are spread over the side and the back.
+    """
+    g = np.zeros(len(layout.channels))
+    if label in ("LFE", "LFE2"):
+        g[layout.index["LFE"]] = 1.0
+    elif label in ("Ls", "Rs") and not backs and layout.has("Lb"):
+        g[layout.index[label]] = g[layout.index[label[0] + "b"]] = _SPREAD
+    elif label in layout.index:
+        g[layout.index[label]] = 1.0
+    else:
+        g = _place(layout, *(SIDE_POSITIONS if backs else {}).get(label, BED_POSITIONS[label]))
     return g
-
-
-# One more column than there are speakers: the object's own linear gain, which
-# glides over the same ramps, for outputs that keep objects apart.
-_WIDTH = len(SPEAKERS) + 1
-_SILENT = np.zeros(_WIDTH)
-_SILENT.flags.writeable = False
 
 
 @lru_cache(maxsize=8192)
-def _target(source: Render | str, gain_db: float) -> np.ndarray:
-    """Speaker gains and the object's own gain for one update; shared, so read-only."""
+def _target(layout: SpeakerLayout, source: Render | str, gain_db: float, backs: bool) -> np.ndarray:
+    """Speaker gains and the object's own gain for one update; shared, so read-only.
+
+    One more column than there are speakers: the object's own linear gain, which
+    glides over the same ramps, for outputs that keep objects apart.
+    """
     gain = 10 ** (gain_db / 20)
-    g = np.empty(_WIDTH)
-    g[:-1] = (bed_gains(source) if isinstance(source, str) else object_gains(source)) * gain
+    g = np.empty(len(layout.channels) + 1)
+    g[:-1] = (
+        bed_gains(layout, source, backs)
+        if isinstance(source, str)
+        else object_gains(layout, source)
+    ) * gain
     g[-1] = gain
     g.flags.writeable = False
     return g
@@ -105,9 +118,13 @@ RendererState = tuple[np.ndarray, np.ndarray, np.ndarray]
 class Renderer:
     """Turns each frame's updates into per-sample gains, gliding over each ramp."""
 
-    def __init__(self, objects: int):
-        self.current = np.zeros((objects, _WIDTH))
-        self.target = np.zeros((objects, _WIDTH))
+    def __init__(self, objects: int, layout: SpeakerLayout):
+        self.layout = layout
+        width = len(layout.channels) + 1
+        self.current = np.zeros((objects, width))
+        self.target = np.zeros((objects, width))
+        self.silent = np.zeros(width)
+        self.silent.flags.writeable = False
         self.remaining = np.zeros(objects, dtype=np.int64)
         self._steps = np.arange(0)
 
@@ -115,8 +132,8 @@ class Renderer:
         return self.current.copy(), self.target.copy(), self.remaining.copy()
 
     @classmethod
-    def restore(cls, state: RendererState) -> Renderer:
-        renderer = cls(state[0].shape[0])
+    def restore(cls, state: RendererState, layout: SpeakerLayout) -> Renderer:
+        renderer = cls(state[0].shape[0], layout)
         renderer.current[:], renderer.target[:], renderer.remaining[:] = state
         return renderer
 
@@ -125,7 +142,7 @@ class Renderer:
 
         The last column is each object's own gain, the rest its speaker gains.
         """
-        out = np.empty((self.current.shape[0], samples, _WIDTH))
+        out = np.empty((self.current.shape[0], samples, self.current.shape[1]))
         self._frame(frame, samples, out)
         return out
 
@@ -135,14 +152,16 @@ class Renderer:
 
     def _frame(self, frame: Frame, samples: int, out: np.ndarray | None) -> None:
         labels = frame.program.bed_labels
+        backs = "Lb" in labels
         for o, meta_index in enumerate(joc_objects(frame)):
             source = labels[meta_index] if meta_index < len(labels) else None
             events = []
             for u in frame.updates[meta_index]:
                 if u.active and u.gain_db != -math.inf:
-                    g = _target(u.render if source is None else source, u.gain_db)
+                    render = u.render if source is None else source
+                    g = _target(self.layout, render, u.gain_db, backs)
                 else:
-                    g = _SILENT
+                    g = self.silent
                 events.append((u.start, u.ramp, g))
             self._envelope(o, events, samples, None if out is None else out[o])
 

@@ -16,6 +16,19 @@ class FFmpegError(RuntimeError):
     pass
 
 
+# Largest frame side the UI offers; FFmpeg itself refuses a frame once
+# (width + 128) * (height + 128) reaches INT_MAX / 8 (av_image_check_size2).
+MAX_FRAME_SIDE = 16384
+_MAX_PADDED_PIXELS = (2**31 - 1) // 8
+
+
+def frame_problem(width: int, height: int) -> str | None:
+    """Why FFmpeg cannot encode frames of this size, or None."""
+    if (width + 128) * (height + 128) >= _MAX_PADDED_PIXELS:
+        return f"画面 {width}×{height} 像素过多，超出 FFmpeg 单帧上限（约 2.68 亿像素）"
+    return None
+
+
 def missing_tools() -> list[str]:
     """The ffmpeg tools this machine lacks, for a warning before anything runs."""
     return [tool for tool in ("ffmpeg", "ffprobe") if shutil.which(tool) is None]

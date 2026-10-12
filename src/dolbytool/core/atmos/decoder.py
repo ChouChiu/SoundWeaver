@@ -1,4 +1,4 @@
-"""A Dolby Atmos (E-AC-3 JOC) track, decoded and rendered to 5.1.4.
+"""A Dolby Atmos (E-AC-3 JOC) track, decoded and rendered to a speaker layout.
 
 ffmpeg decodes the channel-based core; everything past that is TS 103 420:
 the OAMD and JOC payloads are read from each syncframe, the objects are
@@ -33,6 +33,7 @@ from dolbytool.core.cancel import CancellationToken
 from dolbytool.core.ffmpeg import run_ffmpeg
 from dolbytool.core.paths import cache_dir, content_key, work_root
 from dolbytool.core.pcm import AudioData, create_pcm_audio
+from dolbytool.core.speakers import DEFAULT_ATMOS, SpeakerLayout
 
 from .adm import AdmFile
 from .bitstream import BitstreamError
@@ -40,7 +41,7 @@ from .chunk import CORE_CHANNELS, FRAME, AtmosError, ChunkJob, ChunkResult, deco
 from .eac3 import INDEPENDENT, syncframes
 from .emdf import JOC_PAYLOAD, OAMD_PAYLOAD, object_payloads
 from .oamd import OamdDecoder
-from .render import SPEAKERS, Renderer, joc_objects
+from .render import Renderer, joc_objects
 from .trace import ObjectTrace, Tracer
 
 logger = logging.getLogger(__name__)
@@ -62,8 +63,9 @@ _PASS_SHARE = 0.1
 @dataclass(frozen=True, slots=True)
 class AtmosDecode:
     trace: ObjectTrace
-    # the 5.1.4 render on the container's timeline, owned by the caller (`with` it)
+    # the speaker render on the container's timeline, owned by the caller (`with` it)
     speakers: AudioData | None = None
+    layout: SpeakerLayout = DEFAULT_ATMOS
 
 
 def decode_atmos(
@@ -71,38 +73,42 @@ def decode_atmos(
     token: CancellationToken,
     on_fraction: Callable[[float], None] = lambda _f: None,
     *,
+    layout: SpeakerLayout = DEFAULT_ATMOS,
     speakers: bool = False,
     adm: Path | None = None,
 ) -> AtmosDecode:
     """Decode the first audio track of `source` once and produce every output asked for.
 
-    `speakers` returns the 5.1.4 render, `adm` writes the objects there as ADM
+    `speakers` returns the render to `layout` (in its channel order), `adm` writes the objects there as ADM
     BWF.  The object trace always comes along: it is cached, so a sound field
     video of the same file needs no second decode.
     """
     with _prepare(source, token) as (frames, core, rate, first, length):
-        out = create_pcm_audio(len(SPEAKERS), length, rate) if speakers else None
+        out = create_pcm_audio(len(layout.channels), length, rate) if speakers else None
         try:
-            trace = _Decode(frames, core, rate, first, length, out, adm).run(token, on_fraction)
+            trace = _Decode(frames, core, rate, first, length, layout, out, adm).run(
+                token, on_fraction
+            )
         except BaseException:
             if out is not None:
                 out.cleanup()
             raise
-    _store_trace(source, trace)
-    return AtmosDecode(trace, out)
+    _store_trace(source, layout, trace)
+    return AtmosDecode(trace, out, layout)
 
 
 def trace_atmos(
     source: Path,
     token: CancellationToken,
     on_fraction: Callable[[float], None] = lambda _f: None,
+    layout: SpeakerLayout = DEFAULT_ATMOS,
 ) -> ObjectTrace:
-    """Where each dynamic object is and how loud it is, on the container's timeline."""
-    cached = _cached_trace(source)
+    """Where each dynamic object is, how loud it is and how `layout` shares it out."""
+    cached = _cached_trace(source, layout)
     if cached is not None:
         on_fraction(1.0)
         return cached
-    return decode_atmos(source, token, on_fraction).trace
+    return decode_atmos(source, token, on_fraction, layout=layout).trace
 
 
 class _Decode:
@@ -113,10 +119,11 @@ class _Decode:
         rate: int,
         first: int,
         length: int,
+        layout: SpeakerLayout,
         speakers: AudioData | None,
         adm: Path | None,
     ) -> None:
-        self.frames, self.core, self.rate = frames, core, rate
+        self.frames, self.core, self.rate, self.layout = frames, core, rate, layout
         self.first, self.length = first, length
         self.speakers, self.adm_path = speakers, adm
         total = len(frames)
@@ -128,7 +135,7 @@ class _Decode:
 
     def run(self, token: CancellationToken, on_fraction: Callable[[float], None]) -> ObjectTrace:
         total = len(self.frames)
-        tracer = Tracer(self.rate, self.first, self.length, FRAME)
+        tracer = Tracer(self.rate, self.first, self.length, FRAME, self.layout)
         oamd = OamdDecoder()
         renderer: Renderer | None = None
         adm: AdmFile | None = None
@@ -160,7 +167,7 @@ class _Decode:
                     except BitstreamError as error:
                         raise AtmosError(f"第 {k} 帧的全景声元数据无法解析：{error}") from error
                     if renderer is None:
-                        renderer = Renderer(len(joc_objects(meta)))
+                        renderer = Renderer(len(joc_objects(meta)), self.layout)
                         if self.adm_path is not None:
                             adm = AdmFile(
                                 self.adm_path,
@@ -233,6 +240,7 @@ class _Decode:
             gains=gains,
             first=self.first,
             last=self.first + self.length,
+            layout=self.layout,
             speakers=self.speakers.backing_path if self.speakers is not None else None,
             adm=scratch / f"adm-{index}.pcm" if adm is not None else None,
             adm_channels=adm.channels if adm is not None else 0,
@@ -254,8 +262,13 @@ _TRACE_SUFFIX = ".trace.pickle"
 _KEEP_TRACES = 16
 
 
-def _cached_trace(source: Path) -> ObjectTrace | None:
-    path = cache_dir() / (content_key(source) + _TRACE_SUFFIX)
+def _trace_path(source: Path, layout: SpeakerLayout) -> Path:
+    # the shares are the layout's, so each layout keeps a trace of its own
+    return cache_dir() / f"{content_key(source)}.{layout.name}{_TRACE_SUFFIX}"
+
+
+def _cached_trace(source: Path, layout: SpeakerLayout) -> ObjectTrace | None:
+    path = _trace_path(source, layout)
     try:
         with path.open("rb") as file:
             trace = pickle.load(file)
@@ -265,12 +278,13 @@ def _cached_trace(source: Path) -> ObjectTrace | None:
         logger.warning("atmos: discarding unreadable trace cache %s", path, exc_info=True)
         path.unlink(missing_ok=True)
         return None
-    return trace if isinstance(trace, ObjectTrace) else None
+    fits = isinstance(trace, ObjectTrace) and getattr(trace, "speakers", None) == layout.channels
+    return trace if fits else None
 
 
-def _store_trace(source: Path, trace: ObjectTrace) -> None:
+def _store_trace(source: Path, layout: SpeakerLayout, trace: ObjectTrace) -> None:
     directory = cache_dir()
-    path = directory / (content_key(source) + _TRACE_SUFFIX)
+    path = _trace_path(source, layout)
     partial = path.with_suffix(".partial")
     with partial.open("wb") as file:
         pickle.dump(trace, file, protocol=pickle.HIGHEST_PROTOCOL)

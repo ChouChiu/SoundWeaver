@@ -6,9 +6,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from dolbytool.core.audio import AudioInfo
-from dolbytool.core.stems import layout_for, layout_stems, stem_hint, stem_label, stem_path
+from dolbytool.core.speakers import DEFAULT_ATMOS, SpeakerLayout
+from dolbytool.core.stems import layout_stems, stem_hint, stem_label, stem_path
 
 ORIGINAL = "original"
+# the setting holding the Dolby Atmos render layout, shared by every input panel
+ATMOS_LAYOUT_KEY = "atmos_layout"
 
 
 def default_output_dir(audio: Path) -> Path:
@@ -37,11 +40,18 @@ class Track:
         return "直接使用源文件的音频" if self.is_original else stem_hint(self.key)
 
 
-def expected_tracks(source: Path, output_dir: Path, channels: int) -> tuple[Track, ...]:
+def split_speakers(info: AudioInfo, atmos: SpeakerLayout) -> SpeakerLayout | None:
+    """The speakers a split works on: the render's for Dolby Atmos, else the file's own."""
+    return atmos if info.atmos else info.speakers
+
+
+def expected_tracks(
+    source: Path, output_dir: Path, info: AudioInfo, atmos: SpeakerLayout
+) -> tuple[Track, ...]:
     """The source itself, then the stems a split would write, in pipeline order."""
     stems = (
         Track(kind.value, stem_path(source, output_dir, kind))
-        for kind in layout_stems(layout_for(channels))
+        for kind in layout_stems(info.layout, split_speakers(info, atmos))
     )
     return (Track(ORIGINAL, source), *stems)
 
@@ -59,10 +69,17 @@ class Project:
     probing: bool = False
     # why the audio could not be read
     audio_error: str | None = None
+    # what a Dolby Atmos source is rendered to
+    atmos_layout: SpeakerLayout = DEFAULT_ATMOS
 
     @property
     def stems(self) -> tuple[Track, ...]:
         return tuple(t for t in self.tracks if not t.is_original)
+
+    @property
+    def speakers(self) -> SpeakerLayout | None:
+        """The speakers the stems are split from, None without a surround source."""
+        return split_speakers(self.info, self.atmos_layout) if self.info else None
 
     @property
     def has_audio(self) -> bool:
@@ -81,3 +98,8 @@ class PlanContext:
     required_stems: frozenset[str] = frozenset()
     # titles of the features asking for them
     requested_by: tuple[str, ...] = field(default=())
+    # one track of a batch: nothing may be asked of the user, and per-track
+    # details (title, cover colours) come from the track, not the panel
+    batch: bool = False
+    # one track of an album, whose outputs may be made for the album as a whole instead
+    album: bool = False

@@ -12,19 +12,14 @@ from pathlib import Path
 
 from PySide6.QtCore import QSettings, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QPixmap
-from PySide6.QtWidgets import (
-    QFileDialog,
-    QGridLayout,
-    QGroupBox,
-    QLabel,
-    QLineEdit,
-    QToolButton,
-    QWidget,
-)
+from PySide6.QtWidgets import QFileDialog, QGridLayout, QWidget
+from qfluentwidgets import BodyLabel, LineEdit, ToolButton
 
+from dolbytool.core import ffmpeg, motion
 from dolbytool.core.audio import AudioInfo
 from dolbytool.core.paths import FileStamp, file_stamp
-from dolbytool.core.project import Project, default_output_dir, expected_tracks
+from dolbytool.core.project import ATMOS_LAYOUT_KEY, Project, default_output_dir, expected_tracks
+from dolbytool.core.speakers import SpeakerLayout, atmos_layout
 from dolbytool.features.source.service import Inspection, inspect, kind_of, sibling_ttml
 from dolbytool.ui import widgets
 from dolbytool.ui.background import Latest
@@ -32,7 +27,9 @@ from dolbytool.ui.background import Latest
 AUDIO_FILTER = (
     "音频文件 (*.m4a *.mp4 *.mka *.mkv *.ec3 *.eac3 *.ac3 *.thd *.wav *.flac);;所有文件 (*)"
 )
-IMAGE_FILTER = "图片 (*.png *.jpg *.jpeg *.webp *.bmp);;所有文件 (*)"
+IMAGE_FILTER = (
+    "图片或动态封面 (*.png *.jpg *.jpeg *.webp *.bmp *.mp4 *.m4v *.mov *.webm *.mkv);;所有文件 (*)"
+)
 TTML_FILTER = "TTML 歌词 (*.ttml *.xml);;所有文件 (*)"
 OUTPUT_PLACEHOLDER = "默认保存至：<音频目录>/<音频名>_stems"
 # typing in a path field settles this long before it is acted on
@@ -44,7 +41,7 @@ def _path(text: str) -> Path | None:
     return Path(text).expanduser() if text else None
 
 
-class SourcePanel(QGroupBox):
+class SourcePanel(widgets.Card):
     changed = Signal()
     log = Signal(str)
 
@@ -57,11 +54,11 @@ class SourcePanel(QGroupBox):
         self._auto_cover: Path | None = None
         self._shown_cover: FileStamp | None = None
         self._probe = Latest(self)
-        self._buttons: list[QToolButton] = []
+        self._buttons: list[ToolButton] = []
 
-        grid = QGridLayout(self)
-        grid.setHorizontalSpacing(8)
-        grid.setVerticalSpacing(6)
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(8)
         self.cover_preview = widgets.preview_label(text="无封面", side=112)
         grid.addWidget(self.cover_preview, 0, 0, 5, 1, Qt.AlignmentFlag.AlignTop)
 
@@ -70,12 +67,14 @@ class SourcePanel(QGroupBox):
         )
         self.audio_info = widgets.hint_label()
         grid.addWidget(self.audio_info, 1, 2)
+        self.audio_info.hide()
         self.cover_edit = self._row(
             grid, 2, "封面(&C)", "封面图片（内嵌封面将自动提取）", self.pick_cover
         )
         self.ttml_edit = self._row(grid, 3, "歌词(&L)", "TTML 逐字歌词文件", self.pick_ttml)
         self.out_edit = self._row(grid, 4, "输出(&O)", OUTPUT_PLACEHOLDER, self.pick_output)
         grid.setColumnStretch(2, 1)
+        self.set_body(grid)
 
         # edits settle before anything reacts, so typing a path probes it once
         self._settle = QTimer(self, singleShot=True, interval=_SETTLE_MS)
@@ -84,14 +83,19 @@ class SourcePanel(QGroupBox):
             edit.textChanged.connect(lambda _t: self._settle.start())
             edit.editingFinished.connect(self._flush)
 
-    def _row(self, grid: QGridLayout, row: int, label: str, placeholder: str, slot) -> QLineEdit:
+    def _row(self, grid: QGridLayout, row: int, label: str, placeholder: str, slot) -> LineEdit:
         edit, button, line = widgets.browse_row(placeholder, slot)
         self._buttons.append(button)
-        buddy = QLabel(label)
+        buddy = BodyLabel(label)
         buddy.setBuddy(edit)
         grid.addWidget(buddy, row, 1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         grid.addLayout(line, row, 2)
         return edit
+
+    def _set_info(self, text: str) -> None:
+        # an empty line would still leave a gap between the audio and cover rows
+        self.audio_info.setText(text)
+        self.audio_info.setVisible(bool(text))
 
     # ---- state -----------------------------------------------------------------------
 
@@ -112,13 +116,22 @@ class SourcePanel(QGroupBox):
         ttml = self.ttml_path()
         return ttml.parent if ttml else None
 
+    def atmos_layout(self) -> SpeakerLayout:
+        return atmos_layout(str(self.settings.value(ATMOS_LAYOUT_KEY, "")))
+
     def project(self) -> Project:
         audio, out, info = self.audio_path(), self.output_dir(), self.info
-        tracks = expected_tracks(audio, out, info.channels) if audio and out and info else ()
+        render = self.atmos_layout()
+        tracks = expected_tracks(audio, out, info, render) if audio and out and info else ()
         return Project(
             audio, self.cover_path(), self.ttml_path(), out, info, tracks,
-            probing=self._probe.busy, audio_error=self._error,
+            probing=self._probe.busy, audio_error=self._error, atmos_layout=render,
         )  # fmt: skip
+
+    def layout_changed(self) -> None:
+        """The Atmos render layout changed: say what the audio is rendered to now."""
+        if self.info is not None:
+            self._set_info(self.info.describe(self.atmos_layout()))
 
     def start_dir(self) -> str:
         audio = self.audio_path()
@@ -206,14 +219,14 @@ class SourcePanel(QGroupBox):
             self._probe.cancel()
             path = self.audio_path()
             self._error = "文件不存在" if path else None
-            self.audio_info.setText(self._error or "")
+            self._set_info(self._error or "")
             return
         self.settings.setValue("last_dir", str(audio.parent))
         if not self.ttml_path() and (sibling := sibling_ttml(audio)):
             self.ttml_edit.setText(str(sibling))
         cover = self.cover_path()
         want_cover = cover is None or cover == self._auto_cover
-        self.audio_info.setText("正在读取…")
+        self._set_info("正在读取…")
         self._probe.run(lambda: inspect(audio, want_cover), self._audio_read)
 
     def _audio_read(self, result: Inspection | Exception) -> None:
@@ -226,7 +239,9 @@ class SourcePanel(QGroupBox):
                 self._auto_cover = result.cover
                 self.cover_edit.setText(str(result.cover))
                 self.log.emit(f"已提取内嵌封面：{result.cover.name}")
-        self.audio_info.setText(self.info.describe() if self.info else f"无法读取：{self._error}")
+        self._set_info(
+            self.info.describe(self.atmos_layout()) if self.info else f"无法读取：{self._error}"
+        )
         self._show_cover()
         self.changed.emit()
 
@@ -236,7 +251,14 @@ class SourcePanel(QGroupBox):
         if stamp == self._shown_cover:
             return
         self._shown_cover = stamp
-        pixmap = QPixmap(str(cover)) if cover and cover.is_file() else QPixmap()
+        picture, moving = cover, False
+        if cover and motion.is_motion(cover):
+            moving = True
+            try:
+                picture = motion.still(cover)
+            except ffmpeg.FFmpegError as error:
+                self.log.emit(f"动态封面无法读取：{error}")
+        pixmap = QPixmap(str(picture)) if picture and picture.is_file() else QPixmap()
         if pixmap.isNull():
             self.cover_preview.setPixmap(QPixmap())
             self.cover_preview.setText(
@@ -250,4 +272,6 @@ class SourcePanel(QGroupBox):
                 Qt.TransformationMode.SmoothTransformation,
             )
         )
-        self.cover_preview.setToolTip(str(cover))
+        self.cover_preview.setToolTip(
+            f"动态封面（播放器视频中循环播放）\n{cover}" if moving else str(cover)
+        )

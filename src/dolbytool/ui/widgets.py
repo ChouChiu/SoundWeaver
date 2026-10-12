@@ -6,25 +6,35 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 
 from PySide6.QtCore import QSize, Qt, Signal
-from PySide6.QtGui import QColor, QIcon, QPixmap
+from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
-    QColorDialog,
     QFormLayout,
     QGridLayout,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLayout,
     QLineEdit,
-    QListWidget,
     QListWidgetItem,
-    QPushButton,
-    QSpinBox,
-    QToolButton,
     QVBoxLayout,
     QWidget,
 )
+from qfluentwidgets import (
+    BodyLabel,
+    CaptionLabel,
+    ColorDialog,
+    CompactSpinBox,
+    FluentIcon,
+    HyperlinkButton,
+    LineEdit,
+    ListWidget,
+    PushButton,
+    SimpleCardWidget,
+    StrongBodyLabel,
+    ToolButton,
+)
+
+from dolbytool.ui import fluent
 
 
 def hex_name(color: QColor) -> str:
@@ -32,12 +42,23 @@ def hex_name(color: QColor) -> str:
 
 
 def swatch_icon(color: QColor, size: int = 16) -> QIcon:
-    pix = QPixmap(size, size)
-    pix.fill(color)
+    """A rounded colour chip with a faint outline, visible on light and dark alike."""
+    scale = 2
+    pix = QPixmap(size * scale, size * scale)
+    pix.setDevicePixelRatio(scale)
+    pix.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pix)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    path = QPainterPath()
+    path.addRoundedRect(0.5, 0.5, size - 1, size - 1, size / 4, size / 4)
+    painter.fillPath(path, color)
+    painter.setPen(QColor(128, 128, 128, 110))
+    painter.drawPath(path)
+    painter.end()
     return QIcon(pix)
 
 
-class ColorButton(QPushButton):
+class ColorButton(PushButton):
     """A button showing its colour; clicking opens the colour dialog."""
 
     colorChanged = Signal(QColor)
@@ -67,13 +88,15 @@ class ColorButton(QPushButton):
         self.setText(hex_name(self._color))
 
     def _pick(self) -> None:
-        color = QColorDialog.getColor(self._color, self, self._title)
-        if color.isValid():
-            self.setColor(color)
+        dialog = ColorDialog(self._color, self._title, self.window())
+        dialog.yesButton.setText("确定")
+        dialog.cancelButton.setText("取消")
+        dialog.colorChanged.connect(self.setColor)
+        dialog.exec()
 
 
-def spin(low: int, high: int, value: int, suffix: str = "", step: int = 1) -> QSpinBox:
-    box = QSpinBox()
+def spin(low: int, high: int, value: int, suffix: str = "", step: int = 1) -> CompactSpinBox:
+    box = CompactSpinBox()
     box.setRange(low, high)
     box.setValue(value)
     box.setSuffix(suffix)
@@ -84,27 +107,28 @@ def spin(low: int, high: int, value: int, suffix: str = "", step: int = 1) -> QS
 
 def browse_row(
     placeholder: str, slot: Callable[[], None], tooltip: str = "浏览…"
-) -> tuple[QLineEdit, QToolButton, QHBoxLayout]:
-    edit = QLineEdit()
+) -> tuple[LineEdit, ToolButton, QHBoxLayout]:
+    edit = LineEdit()
     edit.setPlaceholderText(placeholder)
     edit.setClearButtonEnabled(True)
-    button = QToolButton()
-    button.setIcon(QIcon.fromTheme("document-open-folder"))
+    button = ToolButton(FluentIcon.FOLDER)
     button.setToolTip(tooltip)
     button.clicked.connect(slot)
     row = QHBoxLayout()
-    row.setSpacing(4)
+    row.setSpacing(6)
     row.addWidget(edit, 1)
     row.addWidget(button)
     return edit, button, row
 
 
-def hbox(*items: QWidget | str | int, stretch: bool = True) -> QHBoxLayout:
+def hbox(*items: QWidget | str | int, stretch: bool = True, spacing: int = 16) -> QHBoxLayout:
     """A row of widgets; strings become labels, ints become spacing."""
     row = QHBoxLayout()
+    # Fluent check boxes and combo boxes carry no margin of their own
+    row.setSpacing(spacing)
     for item in items:
         if isinstance(item, str):
-            row.addWidget(QLabel(item))
+            row.addWidget(BodyLabel(item))
         elif isinstance(item, int):
             row.addSpacing(item)
         else:
@@ -114,43 +138,64 @@ def hbox(*items: QWidget | str | int, stretch: bool = True) -> QHBoxLayout:
     return row
 
 
-def size_row(width: QSpinBox, height: QSpinBox) -> QHBoxLayout:
-    return hbox(width, "×", height)
+def size_row(width: CompactSpinBox, height: CompactSpinBox) -> QHBoxLayout:
+    return hbox(width, "×", height, spacing=6)
 
 
 def preview_label(tooltip: str = "", text: str = "", side: int = 120) -> QLabel:
-    label = QLabel(text)
+    label = CaptionLabel(text)
     label.setFixedSize(side, side)
     label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-    label.setFrameShape(QLabel.Shape.StyledPanel)
+    label.setStyleSheet(
+        "border: 1px solid rgba(128, 128, 128, 0.35); border-radius: 6px;"
+        "background: rgba(128, 128, 128, 0.08);"
+    )
     label.setWordWrap(True)
     if tooltip:
         label.setToolTip(tooltip)
     return label
 
 
-def hint_label(text: str = "") -> QLabel:
-    label = QLabel(text)
-    label.setWordWrap(True)
-    label.setEnabled(False)
+def hint_label(text: str = "", wrap: bool = True) -> QLabel:
+    """Secondary text; `wrap=False` for a short note in a row, which wrapping would chop up."""
+    label = CaptionLabel(text)
+    label.setWordWrap(wrap)
+    label.setTextColor(QColor(96, 96, 96), QColor(206, 206, 206))
     return label
 
 
-def section(title: str, content: QLayout | QWidget) -> QGroupBox:
-    box = QGroupBox(title)
-    if isinstance(content, QWidget):
-        layout = QVBoxLayout()
-        layout.addWidget(content)
-        content = layout
-    box.setLayout(content)
-    return box
+class Card(SimpleCardWidget):
+    """A Fluent card with an optional title, holding one body layout or widget."""
+
+    def __init__(self, title: str = "", parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(16, 12, 16, 14)
+        self._layout.setSpacing(10)
+        if title:
+            self._layout.addWidget(StrongBodyLabel(title))
+
+    def set_body(self, content: QLayout | QWidget, stretch: int = 1) -> None:
+        if isinstance(content, QWidget):
+            self._layout.addWidget(content, stretch)
+        else:
+            self._layout.addLayout(content, stretch)
+
+
+def section(title: str, content: QLayout | QWidget) -> Card:
+    card = Card(title)
+    card.set_body(content)
+    return card
 
 
 def form(rows: Iterable[tuple[str, QWidget | QLayout]]) -> QFormLayout:
     layout = QFormLayout()
     layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
+    layout.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+    layout.setHorizontalSpacing(12)
+    layout.setVerticalSpacing(8)
     for label, field in rows:
-        layout.addRow(label, field)
+        layout.addRow(BodyLabel(label), field)
     return layout
 
 
@@ -159,24 +204,36 @@ Row = tuple[str, Cell, str | None, Cell | None]
 
 
 def two_column_grid(rows: Sequence[Row]) -> QGridLayout:
-    """Label/field pairs in two columns; a row with nothing on the right takes the full width."""
+    """Label/field pairs in two columns kept side by side, the slack after them.
+
+    A row with nothing on the right takes the full width; a text field there
+    stretches across it, other fields keep their own size.
+    """
     grid = QGridLayout()
     grid.setHorizontalSpacing(12)
+    grid.setVerticalSpacing(8)
     right_align = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
     for r, (left_label, left, right_label, right) in enumerate(rows):
-        grid.addWidget(QLabel(left_label), r, 0, right_align)
-        if isinstance(left, QLayout):
-            grid.addLayout(left, r, 1, 1, 1 if right is not None else 3)
+        grid.addWidget(BodyLabel(left_label), r, 0, right_align)
+        if right is None and isinstance(left, (QLayout, QLineEdit)):
+            if isinstance(left, QLayout):
+                grid.addLayout(left, r, 1, 1, 4)
+            else:
+                grid.addWidget(left, r, 1, 1, 4)
+        elif isinstance(left, QLayout):
+            grid.addLayout(left, r, 1)
         else:
             grid.addWidget(left, r, 1, Qt.AlignmentFlag.AlignLeft)
         if right is not None:
-            grid.addWidget(QLabel(right_label or ""), r, 2, right_align)
+            label = BodyLabel(right_label or "")
+            # a gap between the two pairs, which would otherwise touch
+            label.setContentsMargins(36, 0, 0, 0)
+            grid.addWidget(label, r, 2, right_align)
             if isinstance(right, QLayout):
                 grid.addLayout(right, r, 3)
             else:
                 grid.addWidget(right, r, 3, Qt.AlignmentFlag.AlignLeft)
-    grid.setColumnStretch(1, 1)
-    grid.setColumnStretch(3, 1)
+    grid.setColumnStretch(4, 1)
     return grid
 
 
@@ -196,26 +253,29 @@ class TrackList(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.list = QListWidget()
+        self.list = ListWidget()
         self.list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self.list.setMinimumHeight(110)
         self.list.setUniformItemSizes(True)
-        self.list.itemChanged.connect(lambda _item: self.changed.emit())
+        self.list.itemChanged.connect(lambda _item: self._remember())
         buttons = QHBoxLayout()
         buttons.setSpacing(4)
         for text, state in (("全选", True), ("全不选", False)):
-            button = QPushButton(text)
-            button.setFlat(True)
+            button = HyperlinkButton()
+            button.setText(text)
             button.clicked.connect(lambda _=False, on=state: self.check_all(on))
             buttons.addWidget(button)
         buttons.addStretch(1)
-        self.count_label = hint_label()
+        self.count_label = hint_label(wrap=False)
         buttons.addWidget(self.count_label)
         layout = QGridLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.list, 0, 0)
+        layout.setVerticalSpacing(4)
         layout.addLayout(buttons, 1, 0)
         self.changed.connect(self._count)
+        # ticked keys, including those of layouts not shown right now
+        self._memory: set[str] = set()
 
     def is_empty(self) -> bool:
         return self.list.count() == 0
@@ -227,10 +287,24 @@ class TrackList(QWidget):
             if self.list.item(i).checkState() == Qt.CheckState.Checked
         }
 
-    def set_tracks(self, tracks: Sequence[TrackItem], checked: set[str]) -> None:
+    def seed(self, keys: set[str]) -> None:
+        """Start from remembered keys, before any layout has been shown."""
+        self._memory = set(keys)
+
+    def keys(self) -> set[str]:
+        """Every ticked key, also those the current layout does not show."""
+        return set(self._memory)
+
+    def set_tracks(
+        self, tracks: Sequence[TrackItem], checked: set[str], remember: bool = True
+    ) -> None:
+        """Show `tracks` ticked by `checked`; `remember=False` shows a default without keeping it."""
+        if remember:
+            shown = {track.key for track in tracks}
+            self._memory = (self._memory - shown) | (checked & shown)
         self.list.blockSignals(True)
         self.list.clear()
-        dim = self.palette().placeholderText()
+        dim = fluent.dim()
         for track in tracks:
             item = QListWidgetItem(track.text)
             item.setData(Qt.ItemDataRole.UserRole, track.key)
@@ -250,6 +324,11 @@ class TrackList(QWidget):
         for i in range(self.list.count()):
             self.list.item(i).setCheckState(state)
         self.list.blockSignals(False)
+        self._remember()
+
+    def _remember(self) -> None:
+        shown = {self.list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.list.count())}
+        self._memory = (self._memory - shown) | self.checked()
         self.changed.emit()
 
     def _count(self) -> None:

@@ -17,6 +17,7 @@ from pathlib import Path
 
 from dolbytool.core.cancel import CancellationToken
 from dolbytool.core.pcm import AudioData, create_pcm_audio, write_wav
+from dolbytool.core.speakers import SURROUND_5_1, SpeakerLayout
 from dolbytool.core.stems import (
     StemKind,
     StemLayout,
@@ -46,12 +47,6 @@ from dolbytool.features.stems.dsp.matrix import (
     FRONT_LEFT,
     FRONT_RIGHT,
     LOW_FREQUENCY,
-    SIDE_LEFT,
-    SIDE_RIGHT,
-    TOP_BACK_LEFT,
-    TOP_BACK_RIGHT,
-    TOP_FRONT_LEFT,
-    TOP_FRONT_RIGHT,
 )
 
 logger = logging.getLogger(__name__)
@@ -103,15 +98,30 @@ class _Writer:
         logger.info("wrote the %s stem: %s", kind.value, path)
 
 
-def _surround(source: AudioData, out: _Writer, crossover: float, token: CancellationToken) -> None:
+def _surround(
+    source: AudioData,
+    out: _Writer,
+    crossover: float,
+    token: CancellationToken,
+    speakers: SpeakerLayout,
+) -> None:
     """A discrete surround master, decoded channel by channel.
 
     Nothing here is estimated except the leak of the centre channel into the
     front pair: the ambience, the lead and the sub are separate channels on the
-    master, which is why this path is worth taking when a file offers it.  A
-    5.1.4 render adds its heights, as their own stems and into the fold-down.
+    master, which is why this path is worth taking when a file offers it.  The
+    backs, wides and heights a layout has come out as their own stems, and
+    every one of them goes into the fold-down.
     """
     frames, rate, depth = source.frames, source.sample_rate, source.bit_depth
+    ch = speakers.index
+
+    def pair(left: str) -> tuple[int, int]:
+        return ch[left], ch["R" + left[1:] if left[0] == "L" else left[:-1] + "r"]
+
+    def by_side(labels: tuple[str, ...]) -> tuple[tuple[int, ...], tuple[int, ...]]:
+        present = [pair(label) for label in labels if label in ch]
+        return tuple(a for a, _ in present), tuple(b for _, b in present)
 
     def buffer(channels: int) -> AudioData:
         return create_pcm_audio(channels, frames, rate, depth)
@@ -121,14 +131,14 @@ def _surround(source: AudioData, out: _Writer, crossover: float, token: Cancella
 
     if StemKind.SURROUND in out:
         # Both start silent, which the spectral pass needs: it adds into what it is given.
-        with buffer(1) as shared, buffer(2) as pair:
+        with buffer(1) as shared, buffer(2) as surround:
             share_centre_with_surrounds(
-                source, shared, FRONT_CENTER, (SIDE_LEFT, SIDE_RIGHT), token,
+                source, shared, FRONT_CENTER, pair("Ls"), token,
                 out.rendering(StemKind.SURROUND),
             )  # fmt: skip
-            surround_into(pair, source, shared, token, lag)
-            fit_group((pair,), token)
-            out.write(StemKind.SURROUND, pair)
+            surround_into(surround, source, shared, by_side(("Ls", "Lb")), token, lag)
+            fit_group((surround,), token)
+            out.write(StemKind.SURROUND, surround)
 
     def copy(kind: StemKind, channels: tuple[int, ...]) -> None:
         if kind in out:
@@ -140,6 +150,10 @@ def _surround(source: AudioData, out: _Writer, crossover: float, token: Cancella
     copy(StemKind.CENTER, (FRONT_CENTER,))
     copy(StemKind.LFE, (LOW_FREQUENCY,))
     copy(StemKind.FRONT, (FRONT_LEFT, FRONT_RIGHT))
+    if speakers.has("Lb"):
+        copy(StemKind.BACK, pair("Lb"))
+    if speakers.has("Lw"):
+        copy(StemKind.WIDE, pair("Lw"))
 
     if StemKind.FRONT_NO_CENTER in out:
         with buffer(2) as cleaned:
@@ -152,11 +166,16 @@ def _surround(source: AudioData, out: _Writer, crossover: float, token: Cancella
     if StemKind.HEIGHT in out:
         out.rendering(StemKind.HEIGHT)
         with buffer(2) as height:
-            height_into(height, source, token)
+            height_into(height, source, by_side(("Tfl", "Tsl", "Tbl")), token)
             fit_group((height,), token)
             out.write(StemKind.HEIGHT, height)
-    copy(StemKind.HEIGHT_FRONT, (TOP_FRONT_LEFT, TOP_FRONT_RIGHT))
-    copy(StemKind.HEIGHT_REAR, (TOP_BACK_LEFT, TOP_BACK_RIGHT))
+    for kind, left in (
+        (StemKind.HEIGHT_FRONT, "Tfl"),
+        (StemKind.HEIGHT_REAR, "Tbl"),
+        (StemKind.HEIGHT_SIDE, "Tsl"),
+    ):
+        if left in ch:
+            copy(kind, pair(left))
 
     if out.any(*bands):
         # The fold-down and its two bands are one decomposition - the bands
@@ -164,7 +183,7 @@ def _surround(source: AudioData, out: _Writer, crossover: float, token: Cancella
         # scale by one shared factor, whichever of them is written.
         out.rendering(next(k for k in bands if k in out))
         with buffer(2) as downmix, buffer(2) as low, buffer(2) as high:
-            downmix_into(downmix, source, token, lag)
+            downmix_into(downmix, source, speakers.sides(), token, lag)
             lowpass(downmix, low, crossover, token)
             difference(high, downmix, low, token)
             fit_group((downmix, low, high), token)
@@ -235,12 +254,7 @@ def _mono(source: AudioData, out: _Writer, crossover: float, token: Cancellation
             out.write(kind, audio)
 
 
-_SPLITTERS = {
-    StemLayout.ATMOS: _surround,
-    StemLayout.SURROUND: _surround,
-    StemLayout.STEREO: _stereo,
-    StemLayout.MONO: _mono,
-}
+_SPLITTERS = {StemLayout.STEREO: _stereo, StemLayout.MONO: _mono}
 
 
 def split(
@@ -252,19 +266,31 @@ def split(
     token: CancellationToken,
     report: Report,
     start: int = 0,
+    speakers: SpeakerLayout | None = None,
 ) -> dict[StemKind, float]:
     """Write the stems in `kinds` that `audio`'s layout has, named after `source`.
 
-    Progress runs from `start` to 99; returns each written stem's peak.
+    `speakers` names the channels of a surround master (a render's or the
+    file's); one it does not fit is read as 5.1 from its first six.  Progress
+    runs from `start` to 99; returns each written stem's peak.
     """
     layout = layout_for(audio.channels)
-    wanted = tuple(k for k in layout_stems(layout) if k in kinds)
+    if layout is StemLayout.SURROUND and (
+        speakers is None or len(speakers.channels) != audio.channels
+    ):
+        speakers = SURROUND_5_1
+    if layout is not StemLayout.SURROUND:
+        speakers = None
+    wanted = tuple(k for k in layout_stems(layout, speakers) if k in kinds)
     if not wanted:
         raise ValueError("所选分轨不属于这种声道布局")
-    logger.info("%d channels: splitting as %s into %s", audio.channels, layout, wanted)
+    logger.info("%d channels: splitting as %s into %s", audio.channels, speakers or layout, wanted)
     output_dir.mkdir(parents=True, exist_ok=True)
     out = _Writer(source, output_dir, wanted, token, report, start)
-    _SPLITTERS[layout](audio, out, crossover_hz, token)
+    if speakers is not None:
+        _surround(audio, out, crossover_hz, token, speakers)
+    else:
+        _SPLITTERS[layout](audio, out, crossover_hz, token)
     return out.peaks
 
 

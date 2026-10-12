@@ -2,7 +2,7 @@
 
 Only dynamic objects are traced: beds sit on their speakers and ISF objects
 carry no position.  Times are seconds on the container's timeline, the same
-one the rendered 5.1.4 audio and every video are cut to.
+one the rendered speaker feeds and every video are cut to.
 
 The positions follow from the metadata alone and are collected in syncframe
 order by `Tracer`; the levels need the rebuilt audio, so each decode worker
@@ -17,8 +17,10 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from dolbytool.core.speakers import SpeakerLayout
+
 from .oamd import Frame, Program
-from .render import CH, SPEAKERS, joc_objects
+from .render import joc_objects
 from .sinks import RenderedFrame
 
 # Level reported for a frame with no signal at all.
@@ -48,14 +50,20 @@ class ObjectTrace:
     duration: float
     program: Program
     objects: tuple[ObjectPath, ...]
+    # the speakers the shares are of, in column order
+    speakers: tuple[str, ...]
 
     def to_json(self, speakers: Collection[str] | None = None) -> dict:
         """The scene for the renderer.
 
         With `speakers`, each object also gets `trackLevels`: its level counting
-        only the energy that reaches those speakers.
+        only the energy that reaches those of them the trace's layout has.
         """
-        columns = [CH[s] for s in speakers] if speakers is not None else None
+        columns = (
+            [i for i, s in enumerate(self.speakers) if s in speakers]
+            if speakers is not None
+            else None
+        )
         return {
             "sampleRate": self.sample_rate,
             "levelStart": self.level_start,
@@ -108,7 +116,10 @@ def measure(f: RenderedFrame) -> Measure:
 class Tracer:
     """Collects every dynamic object's position keys, fed the metadata in syncframe order."""
 
-    def __init__(self, sample_rate: int, first: int, length: int, samples: int) -> None:
+    def __init__(
+        self, sample_rate: int, first: int, length: int, samples: int, layout: SpeakerLayout
+    ) -> None:
+        self.layout = layout
         self.sample_rate, self.first, self.length, self.samples = (
             sample_rate,
             first,
@@ -146,7 +157,7 @@ class Tracer:
                 index,
                 keys,
                 np.full(frames, SILENCE_DB),
-                np.zeros((frames, len(SPEAKERS)), dtype=np.float32),
+                np.zeros((frames, len(self.layout.channels)), dtype=np.float32),
             )
             for index, keys in sorted(self.keys.items())
         }
@@ -163,4 +174,5 @@ class Tracer:
             duration=self.length / self.sample_rate,
             program=self.program,
             objects=tuple(paths.values()),
+            speakers=self.layout.channels,
         )

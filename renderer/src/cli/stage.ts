@@ -9,6 +9,8 @@ import type { Run } from "./run";
 
 // the bundle sits next to the built page in dist/
 const here = path.dirname(fileURLToPath(import.meta.url));
+// SSIM 0.994 against a PNG capture after a CRF 18 encode; 100 costs a third more time
+const JPEG_QUALITY = 95;
 
 export interface StageSettings {
 	executablePath: string;
@@ -27,6 +29,8 @@ export interface StageSettings {
 
 export class Stage {
 	private frameTime: number;
+	// the first uncaught error of the page: whatever it draws after that cannot be trusted
+	private pageError: string | null = null;
 
 	private constructor(
 		private readonly run: Run,
@@ -78,9 +82,19 @@ export class Stage {
 				color: { r: 0, g: 0, b: 0, a: 0 },
 			});
 			const stage = new Stage(run, browser, page, cdp, 1000 / fps);
+			page.on("pageerror", (error) => stage.noteError(error));
+			page.on("console", (message) => debug(`console ${message.type()}: ${message.text()}`));
 			debug(`browser ${browser.process()?.pid} target ready`);
 			await stage.navigate(settings.html);
-			await settings.setup(stage);
+			stage.throwIfBroken();
+			try {
+				await settings.setup(stage);
+			} catch (error) {
+				// the page's own error says more than the check that tripped over it
+				stage.throwIfBroken();
+				throw error;
+			}
+			stage.throwIfBroken();
 			debug(`browser ${browser.process()?.pid} loaded`);
 			return stage;
 		} catch (error) {
@@ -129,19 +143,43 @@ export class Stage {
 		return this.page.evaluate((t) => window.renderPage.prerollStart(t), ms);
 	}
 
-	seek(ms: number): Promise<number> {
-		return this.page.evaluate((t) => window.renderPage.seek(t), ms);
+	/** Show the page at `ms`, and wait for whatever the page still loads for it (a motion artwork still). */
+	async seek(ms: number): Promise<number> {
+		this.throwIfBroken();
+		const visible = await this.page.evaluate(async (t) => {
+			const visible = window.renderPage.seek(t);
+			await window.renderPage.ready?.();
+			return visible;
+		}, ms);
+		this.throwIfBroken();
+		return visible;
 	}
 
-	/** Advance one frame interval; with `screenshot`, return the PNG (none when nothing changed). */
-	async frame(screenshot: boolean): Promise<Buffer | undefined> {
+	private noteError(error: unknown): void {
+		const message = error instanceof Error ? error.message || error.name : String(error);
+		debug(`page error: ${message}`);
+		this.pageError ??= message;
+	}
+
+	/**
+	 * Fail on an uncaught page error.  A page that threw may keep answering with
+	 * blank or half-built frames (React unmounts the whole player on a render
+	 * error), which would otherwise be encoded as a black video.
+	 */
+	throwIfBroken(): void {
+		if (this.pageError !== null) throw new Error(`渲染页面出错：${this.pageError}`);
+	}
+
+	/** Advance one frame interval; with a `screenshot` format, return the picture (none when nothing changed). */
+	async frame(screenshot: "png" | "jpeg" | false): Promise<Buffer | undefined> {
 		this.frameTime += this.interval;
 		const result = (await this.cdp.send("HeadlessExperimental.beginFrame", {
 			frameTimeTicks: this.frameTime,
 			interval: this.interval,
 			noDisplayUpdates: false,
 			// optimizeForSpeed only lowers the zlib effort, the PNG stays lossless
-			...(screenshot ? { screenshot: { format: "png" as const, optimizeForSpeed: true } } : {}),
+			...(screenshot === "png" ? { screenshot: { format: "png" as const, optimizeForSpeed: true } } : {}),
+			...(screenshot === "jpeg" ? { screenshot: { format: "jpeg" as const, quality: JPEG_QUALITY } } : {}),
 		})) as { hasDamage: boolean; screenshotData?: string };
 		return result.screenshotData ? Buffer.from(result.screenshotData, "base64") : undefined;
 	}

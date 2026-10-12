@@ -8,6 +8,7 @@
 
 import { type LyricLine, LyricPlayer } from "@applemusic-like-lyrics/core";
 import { parseTTML } from "@applemusic-like-lyrics/ttml";
+import { withoutCredits } from "../shared/credits";
 import type { AmllRender, RenderPage, StageOptions } from "../shared/api";
 import * as timeline from "./timeline";
 
@@ -59,7 +60,13 @@ export class Stage implements AmllRender, RenderPage {
 		this.root.replaceChildren();
 		for (const slot of this.slots) slot.player.dispose();
 
-		const lines = timeline.cleanLines(parseTTML(ttml).lines as LyricLine[]);
+		const parsed = parseTTML(ttml);
+		let lines = timeline.cleanLines(parsed.lines as LyricLine[]);
+		if (options.filterCredits) {
+			const meta = parsed.metadata as [string, string[]][];
+			const names = meta.filter(([key]) => key === "musicName" || key === "artists").flatMap(([, v]) => v);
+			lines = withoutCredits(lines, names);
+		}
 		const windows = timeline.lineWindows(lines, options.fadeMs);
 		this.slots = lines.map((line, i) => {
 			const wrapper = document.createElement("div");

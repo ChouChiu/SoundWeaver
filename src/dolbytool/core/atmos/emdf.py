@@ -18,6 +18,8 @@ _SYNC_BYTES = SYNCWORD.to_bytes(2, "big")
 OAMD_PAYLOAD = 11
 JOC_PAYLOAD = 14
 _WANTED = (OAMD_PAYLOAD, JOC_PAYLOAD)
+# protection_length_primary/secondary codes; primary 0 is reserved
+_PROTECTION_BITS = (0, 8, 32, 128)
 
 
 def _parse_container(frame: bytes, bit_pos: int) -> dict[int, bytes]:
@@ -25,7 +27,8 @@ def _parse_container(frame: bytes, bit_pos: int) -> dict[int, bytes]:
     head = BitReader(frame, bit_pos, bit_pos + 32)
     if head.read(16) != SYNCWORD:
         raise BitstreamError("no EMDF syncword")
-    end = head.pos + head.read(16) * 8
+    length = head.read(16)
+    end = head.pos + length * 8
     if end > len(frame) * 8:
         raise BitstreamError("EMDF container runs past the syncframe")
     bits = BitReader(frame, head.pos, end)
@@ -62,6 +65,12 @@ def _parse_container(frame: bytes, bit_pos: int) -> dict[int, bytes]:
         data = bits.read_bytes(size)
         if payload_id in _WANTED:
             payloads[payload_id] = data
+    # emdf_protection (H.2.2.11) fills the rest of the container, give or take
+    # byte padding; a stray 0x5838 in the audio data that parses this far won't
+    primary = _PROTECTION_BITS[bits.read(2)]
+    secondary = _PROTECTION_BITS[bits.read(2)]
+    if primary == 0 or not 0 <= end - bits.pos - primary - secondary < 8:
+        raise BitstreamError("EMDF protection does not close the container")
     return payloads
 
 

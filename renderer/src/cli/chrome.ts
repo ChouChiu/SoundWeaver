@@ -27,6 +27,9 @@ export const BROWSER_ARGS = [
 	"--force-device-scale-factor=1",
 	"--hide-scrollbars",
 	"--font-render-hinting=none",
+	// The default tile budget runs out on frames past 8K: the frame is captured
+	// with whole areas never rasterised.  Raise it well above what 16K needs.
+	"--force-gpu-mem-available-mb=8192",
 ];
 
 export async function headlessShell(): Promise<string> {
