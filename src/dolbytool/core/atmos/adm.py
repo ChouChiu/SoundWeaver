@@ -67,6 +67,8 @@ _BED_CHANNELS = {
     "Rrs": ("RoomCentricRightRearSurround", "RC_Rrs", (1.0, -1.0, 0.0)),
     "Lts": ("RoomCentricLeftTopSurround", "RC_Lts", (-1.0, 0.0, 1.0)),
     "Rts": ("RoomCentricRightTopSurround", "RC_Rts", (1.0, 0.0, 1.0)),
+    # Table 2-14: Dolby Atmos Master ADM Profile specifies (-1.0, -1.0, 0.0) for both RC_Ls/RC_Rs
+    # and RC_Lrs/RC_Rrs in room-centric Cartesian space (MediaInfo conforms via alias tolerance).
     "Ls": ("RoomCentricLeftSurround", "RC_Ls", (-1.0, -1.0, 0.0)),
     "Rs": ("RoomCentricRightSurround", "RC_Rs", (1.0, -1.0, 0.0)),
 }
@@ -177,7 +179,7 @@ def adm_block(f: RenderedFrame, sources: tuple[int | None, ...]) -> np.ndarray:
     meta = f.metadata
     audio = {index: f.essence[o] * f.envelope[o] for o, index in enumerate(joc_objects(meta))}
     for index, label in enumerate(meta.program.bed_labels):
-        if label == "LFE":
+        if label.startswith("LFE"):
             audio[index] = f.lfe
     block = np.zeros((len(sources), f.span.stop - f.span.start))
     for track, source in enumerate(sources):

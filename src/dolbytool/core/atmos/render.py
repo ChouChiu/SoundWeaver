@@ -245,6 +245,6 @@ class Renderer:
 
 
 def joc_objects(frame: Frame) -> list[int]:
-    """OAMD indices of the objects JOC carries: all but the LFE, which bypasses it."""
+    """OAMD indices of the objects JOC carries: all but the LFE channels, which bypass it."""
     labels = frame.program.bed_labels
-    return [i for i in range(frame.object_count) if i >= len(labels) or labels[i] != "LFE"]
+    return [i for i in range(frame.object_count) if i >= len(labels) or not labels[i].startswith("LFE")]
