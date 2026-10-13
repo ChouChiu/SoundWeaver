@@ -215,7 +215,6 @@ class MainWindow(QMainWindow):
         self._routes: dict[str, QWidget] = {}
 
         self._add_route(ROUTE_INPUTS, "home", "素材", self._build_inputs_page())
-        self.nav.addSeparator()
         self.nav.addItemHeader("输出设置")
         self.headers: list[_PageHeader] = []
         for index, panel in enumerate(self.panels):
