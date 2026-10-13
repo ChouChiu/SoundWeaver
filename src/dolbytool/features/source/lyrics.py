@@ -1,4 +1,4 @@
-"""Pairing a batch's tracks with lyric files whose names only roughly agree.
+"""Pairing tracks with lyric files whose names only roughly agree.
 
 Downloads name the same song "XLOV - HIPS (Hyun&Haru) [Dolby Atmos 768 kbps]"
 on one side and "03. HIPS" on the other, so both names are boiled down to
@@ -17,8 +17,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from functools import lru_cache
 from pathlib import Path
 
-from dolbytool.core.paths import file_stamp
-from dolbytool.features.batch.service import natural_key
+from dolbytool.core.paths import file_stamp, natural_key
 
 # subfolders lyrics are commonly kept in, beside the audio or the album's discs
 LYRIC_DIRS = {"lyrics", "lyric", "ttml", "歌词"}

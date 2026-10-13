@@ -4,7 +4,7 @@ Each track is read in the background like the single source; its cover is
 the album's (picked, or the motion artwork or image in the folder), else its
 embedded one or the art in its folder.  Its lyrics are one picked for it,
 else the lyric file found nearby or imported whose name fits it (see
-`batch.lyrics`).  Every track becomes its own `Project` for the output
+`source.lyrics`).  Every track becomes its own `Project` for the output
 panels to plan, with an output folder of its own.
 """
 
@@ -15,6 +15,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from PySide6.QtCore import QSettings, Qt, QTimer, Signal
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFileDialog,
@@ -33,12 +34,11 @@ from qfluentwidgets import (
     RoundMenu,
     SwitchButton,
     TransparentPushButton,
-    TreeWidget,
 )
 
+from dolbytool.core.paths import path_from_text
 from dolbytool.core.project import ATMOS_LAYOUT_KEY, Project, expected_tracks
 from dolbytool.core.speakers import SpeakerLayout, atmos_layout
-from dolbytool.features.batch import lyrics as lyric_match
 from dolbytool.features.batch.service import (
     BatchTrack,
     album_name,
@@ -46,12 +46,12 @@ from dolbytool.features.batch.service import (
     album_root,
     audio_files,
     common_folder,
-    folder_cover,
     safe_name,
     track_output_dir,
 )
+from dolbytool.features.source import lyrics as lyric_match
 from dolbytool.features.source.panel import AUDIO_FILTER, IMAGE_FILTER, TTML_FILTER
-from dolbytool.features.source.service import Inspection, inspect
+from dolbytool.features.source.service import Inspection, folder_cover, inspect
 from dolbytool.ui import fluent, widgets
 from dolbytool.ui.background import Each
 
@@ -61,11 +61,6 @@ ALBUM_TIP = (
     "按碟号与音轨号排序，所有音轨共用专辑封面，\n"
     "输出统一保存到「<专辑名>_stems/<音轨名>」，渐变图整张专辑只生成一张"
 )
-
-
-def _path(text: str) -> Path | None:
-    text = text.strip()
-    return Path(text).expanduser() if text else None
 
 
 class BatchPanel(widgets.Card):
@@ -86,7 +81,9 @@ class BatchPanel(widgets.Card):
         self._probe = Each(self)
         self._running = False
 
-        self.list = TreeWidget()
+        self.list = widgets.HintTree(
+            "拖入音频文件或专辑文件夹，或点击下方「添加文件」「添加文件夹」"
+        )
         self.list.setColumnCount(4)
         self.list.setHeaderLabels(["音轨", "信息", "歌词", "状态"])
         self.list.setRootIsDecorated(False)
@@ -104,6 +101,9 @@ class BatchPanel(widgets.Card):
         self.list.itemSelectionChanged.connect(self._selection_changed)
         self.list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.list.customContextMenuRequested.connect(self._context_menu)
+        remove = QShortcut(QKeySequence.StandardKey.Delete, self.list)
+        remove.setContext(Qt.ShortcutContext.WidgetShortcut)
+        remove.activated.connect(self.remove_selected)
 
         self._buttons: list[QWidget] = []
         add_files = self._button("添加文件…", "list-add", self.pick_files)
@@ -114,6 +114,7 @@ class BatchPanel(widgets.Card):
         )
         self.lyrics_btn = self._button("指定歌词…", "text-xml", self.pick_ttml)
         self.remove_btn = self._button("移除", "list-remove", self.remove_selected)
+        self.remove_btn.setToolTip("移除选中的音轨（Delete）")
         clear = self._button("清空", "edit-clear-all", self.clear, flat=True)
         buttons = QHBoxLayout()
         buttons.setSpacing(6)
@@ -134,22 +135,20 @@ class BatchPanel(widgets.Card):
         )
         self.out_edit, out_btn, out_row = widgets.browse_row("", self.pick_output)
         self._buttons += [cover_btn, out_btn]
-        self.album_rows = QWidget()
-        album_form = QFormLayout(self.album_rows)
-        album_form.setContentsMargins(0, 0, 0, 0)
-        album_form.setVerticalSpacing(8)
-        album_form.addRow(BodyLabel("专辑名："), self.album_name)
-        album_form.addRow(BodyLabel("专辑封面："), cover_row)
-        options = QFormLayout()
-        options.addRow(BodyLabel("输出根目录："), out_row)
+        # one form, so the labels line up whether the album rows show or not
+        self.form = QFormLayout()
+        self.form.setVerticalSpacing(8)
+        self.form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.form.addRow(BodyLabel("专辑名："), self.album_name)
+        self.form.addRow(BodyLabel("专辑封面："), cover_row)
+        self.form.addRow(BodyLabel("输出根目录："), out_row)
 
         layout = QVBoxLayout()
         layout.setSpacing(8)
         layout.addWidget(self.list, 1)
         layout.addLayout(buttons)
         layout.addWidget(self.album)
-        layout.addWidget(self.album_rows)
-        layout.addLayout(options)
+        layout.addLayout(self.form)
         self.set_body(layout)
 
         self._settle = QTimer(self, singleShot=True, interval=_SETTLE_MS)
@@ -181,13 +180,13 @@ class BatchPanel(widgets.Card):
 
     def output_root(self) -> Path | None:
         """Where the tracks' folders go; None leaves each track's next to it."""
-        if root := _path(self.out_edit.text()):
+        if root := path_from_text(self.out_edit.text()):
             return root
         return album_root(self.tracks, self.album_title()) if self.is_album else None
 
     def album_cover_path(self) -> Path | None:
         """The cover every track of the album shares."""
-        if cover := _path(self.album_cover.text()):
+        if cover := path_from_text(self.album_cover.text()):
             return cover
         folder = common_folder(self.tracks)
         if folder and (found := folder_cover(folder)):
@@ -197,7 +196,7 @@ class BatchPanel(widgets.Card):
     def _cover(self, track: BatchTrack) -> Path | None:
         if self.is_album:
             return self.album_cover_path() or track.cover
-        return track.cover or folder_cover(track.audio.parent)
+        return track.cover
 
     def project(self, track: BatchTrack) -> Project:
         out = track_output_dir(track.audio, self.output_root())
@@ -229,20 +228,18 @@ class BatchPanel(widgets.Card):
             return self._ttml[track.audio]
         return self._auto.get(track.audio)
 
-    def current_index(self) -> int:
-        items = self.list.selectedItems()
-        return self.list.indexOfTopLevelItem(items[0]) if items else 0
+    def _selected_rows(self) -> list[int]:
+        return sorted(self.list.indexOfTopLevelItem(i) for i in self.list.selectedItems())
 
     def current_project(self) -> Project:
         """The selected track, or the first, for the output pages to show."""
         if not self.tracks:
             return Project()
-        return self.project(self.tracks[min(self.current_index(), len(self.tracks) - 1)])
+        rows = self._selected_rows()
+        return self.project(self.tracks[rows[0] if rows else 0])
 
     def set_status(self, index: int, text: str, problem: bool = False) -> None:
         item = self.list.topLevelItem(index)
-        if item is None:
-            return
         item.setText(_STATUS, text)
         item.setToolTip(_STATUS, text)
         if problem:
@@ -289,10 +286,10 @@ class BatchPanel(widgets.Card):
             self._flush()
 
     def pick_ttml(self) -> None:
-        items = self.list.selectedItems()
-        if len(items) != 1:
+        rows = self._selected_rows()
+        if len(rows) != 1:
             return
-        track = self.tracks[self.list.indexOfTopLevelItem(items[0])]
+        track = self.tracks[rows[0]]
         path, _ = QFileDialog.getOpenFileName(
             self, f"为 {track.audio.name} 指定歌词", str(track.audio.parent), TTML_FILTER
         )
@@ -333,7 +330,7 @@ class BatchPanel(widgets.Card):
         self._sync()
 
     def _context_menu(self, pos) -> None:
-        rows = sorted({self.list.indexOfTopLevelItem(i) for i in self.list.selectedItems()})
+        rows = self._selected_rows()
         if not rows or self._running:
             return
         menu = RoundMenu(parent=self)
@@ -381,7 +378,7 @@ class BatchPanel(widgets.Card):
         return added
 
     def remove_selected(self) -> None:
-        rows = {self.list.indexOfTopLevelItem(i) for i in self.list.selectedItems()}
+        rows = set(self._selected_rows())
         self.tracks = [t for i, t in enumerate(self.tracks) if i not in rows]
         # a removed track's lyrics may be the next best for another
         self._match()
@@ -435,14 +432,12 @@ class BatchPanel(widgets.Card):
 
     def _sync(self) -> None:
         """Order the tracks, redraw the list and tell the window."""
-        selected = {
-            self.tracks[self.list.indexOfTopLevelItem(i)].audio
-            for i in self.list.selectedItems()
-            if self.list.indexOfTopLevelItem(i) < len(self.tracks)
-        }
+        # by audio, kept on each row: the rows may be stale after a removal or reorder
+        selected = {i.data(0, Qt.ItemDataRole.UserRole) for i in self.list.selectedItems()}
         if self.is_album and not self._probe.busy:
             self.tracks = album_order(self.tracks)
-        self.album_rows.setVisible(self.is_album)
+        for row in (0, 1):
+            self.form.setRowVisible(row, self.is_album)
         self.album_name.setPlaceholderText(
             album_name(self.tracks) or "留空则使用音频标签中的专辑名"
         )
@@ -467,6 +462,7 @@ class BatchPanel(widgets.Card):
             manual = track.audio in self._ttml
             shown = lyrics.name if lyrics else ("不使用" if manual else "无")
             item = QTreeWidgetItem([f"{number:02d}. {name}", detail, shown, ""])
+            item.setData(0, Qt.ItemDataRole.UserRole, track.audio)
             item.setToolTip(0, str(track.audio))
             item.setToolTip(1, detail)
             how = "手动指定" if manual else "自动匹配" if lyrics else "未找到，可导入或手动指定"

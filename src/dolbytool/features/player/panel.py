@@ -9,9 +9,6 @@ from PySide6.QtCore import QSettings, Qt, QThread, Signal
 from PySide6.QtWidgets import QVBoxLayout
 from qfluentwidgets import (
     CaptionLabel,
-    CheckBox,
-    CompactDoubleSpinBox,
-    LineEdit,
     PrimaryPushButton,
     ProgressBar,
 )
@@ -22,9 +19,7 @@ from dolbytool.core.paths import work_root
 from dolbytool.core.project import ORIGINAL, PlanContext, Project
 from dolbytool.core.renderer import renderer_problem
 from dolbytool.core.stems import stem_label
-from dolbytool.core.task import Step
-from dolbytool.features.batch.lyrics import without_number
-from dolbytool.features.lyrics.panel import FontList
+from dolbytool.core.task import Progress, Step
 from dolbytool.features.player.service import (
     AUDIO_MODES,
     BACKGROUNDS,
@@ -40,8 +35,10 @@ from dolbytool.features.player.service import (
     queue_step,
     render_player_video,
 )
+from dolbytool.features.source.lyrics import without_number
 from dolbytool.ui import fluent, widgets
 from dolbytool.ui.feature import FeaturePanel
+from dolbytool.ui.fonts import CREDITS_TIP, FontList
 from dolbytool.ui.video_preview import VideoPreview
 
 ATMOS_TAG = "Dolby Atmos"
@@ -73,18 +70,9 @@ class PreviewJob(QThread):
         self.token = CancellationToken()
 
     def run(self) -> None:
-        status = ""
-
-        def on_fraction(fraction: float) -> None:
-            self.progress.emit(round(fraction * 100), status or "逐帧渲染")
-
-        def on_status(message: str) -> None:
-            nonlocal status
-            status = message
-            self.progress.emit(-1, message)
-
+        progress = Progress(self.progress.emit, "逐帧渲染")
         try:
-            self._render(self.target, self.token, on_fraction, on_status)
+            self._render(self.target, self.token, progress.fraction, progress.status)
         except ProcessingCancelled:
             self.done.emit(None, "")
             return
@@ -108,9 +96,6 @@ class PlayerPanel(FeaturePanel):
     def __init__(self, settings: QSettings, parent=None) -> None:
         super().__init__(settings, parent)
         d = PlayerSpec()
-        self._checks: dict[str, CheckBox] = {}
-        self._combos: dict[str, fluent.ComboBox] = {}
-        self._edits: dict[str, LineEdit] = {}
 
         # ---- frame and encoding
         self.width_spin = self.spin("pl_w", 64, MAX_FRAME_SIDE, d.width, " px", step=2)
@@ -121,7 +106,7 @@ class PlayerPanel(FeaturePanel):
             "高帧率下逐字扫光与滚动更顺滑，适合高刷新率屏幕观看；渲染耗时随帧率成正比增加\n"
             "上传平台多数只支持到 60 fps，部分支持 120 fps"
         )
-        self.codec = self._combo("pl_codec", CODECS, d.codec)
+        self.codec = self.combo("pl_codec", CODECS, d.codec)
         self.codec.setToolTip(
             "硬件编码器不可用时将自动回退至 libx264 软件编码；透明背景必须使用 VP9"
         )
@@ -131,7 +116,7 @@ class PlayerPanel(FeaturePanel):
             "NVENC 19 与无损相比约 54 dB，肉眼已难分辨；更清晰优先关闭“快速截图”"
         )
         self.codec.currentIndexChanged.connect(self._codec_changed)
-        self.audio_mode = self._combo("pl_audio", AUDIO_MODES, d.audio_mode)
+        self.audio_mode = self.combo("pl_audio", AUDIO_MODES, d.audio_mode)
         self.audio_mode.setToolTip(
             "将所选音轨混入视频；MKV 原样复制任何音频（含全景声与 PCM 分轨），\n"
             "WebM 只能容纳 Opus，选择复制时也会转码为 Opus"
@@ -146,15 +131,15 @@ class PlayerPanel(FeaturePanel):
             "分轨尚未导出时会自动补上分轨任务；批量与专辑中每首都取同一种分轨"
         )
         self.audio_track.activated.connect(self._audio_track_picked)
-        self.fast_capture = self._check(
+        self.fast_capture = self.check(
             "pl_fast_capture", "快速截图", d.fast_capture,
             "浏览器取帧改用 JPEG 而非无损 PNG，渲染约快 1.5 倍，细节略软；透明背景不受影响",
         )  # fmt: skip
-        self.supersample = self._check(
+        self.supersample = self.check(
             "pl_supersample", "超采样", d.supersample,
             "按两倍尺寸绘制再缩小到输出尺寸，文字与图标边缘更平滑；渲染约慢 2 到 3 倍",
         )  # fmt: skip
-        self.album_mode = self._combo("pl_album_mode", ALBUM_MODES, "tracks")
+        self.album_mode = self.combo("pl_album_mode", ALBUM_MODES, "tracks")
         self.album_mode.setToolTip(
             "专辑模式下的输出方式\n"
             "整张专辑连续播放：像歌单一样按专辑顺序从头播到尾，生成「<专辑名>_player」，\n"
@@ -169,19 +154,17 @@ class PlayerPanel(FeaturePanel):
         )
 
         # ---- background
-        self.background = self._combo("pl_bg", BACKGROUNDS, d.background)
+        self.background = self.combo("pl_bg", BACKGROUNDS, d.background)
         self.background.currentIndexChanged.connect(self._sync_enabled)
         self.flow = self.spin("pl_flow", 0, 1000, d.flow_speed, " %", step=10)
         self.flow.setToolTip("背景流动速度，100% 为 AMLL 默认值")
         self.render_scale = self.spin("pl_bg_scale", 5, 200, d.render_scale, " %", step=5)
         self.render_scale.setToolTip("背景画布相对画面的渲染分辨率；背景本身很模糊，50% 已足够")
-        self.color = widgets.ColorButton(d.color, "选择背景颜色")
+        self.bg_color = self.color("pl_color", d.color, "选择背景颜色")
         self.seed = self.spin("pl_seed", 0, 999999, d.seed)
         self.seed.setToolTip("背景的随机形态由此种子决定，换一个数字可得到不同的流动图案")
-        self.light_wave = self._check(
-            "pl_light_wave", "明暗光波", d.light_wave, "仅 Isolation 背景"
-        )
-        self.beat = self._check(
+        self.light_wave = self.check("pl_light_wave", "明暗光波", d.light_wave, "仅 Isolation 背景")
+        self.beat = self.check(
             "pl_beat",
             "随低频律动",
             d.beat,
@@ -189,26 +172,26 @@ class PlayerPanel(FeaturePanel):
         )
 
         # ---- lyrics
-        self.lyric_size = self._combo("pl_lyric_size", LYRIC_SIZES, d.lyric_size)
+        self.lyric_size = self.combo("pl_lyric_size", LYRIC_SIZES, d.lyric_size)
         self.font_weight = self.spin("pl_font_weight", 0, 1000, d.font_weight, step=100)
         self.font_weight.setSpecialValueText("默认")
         self.letter_spacing = self.spin("pl_letter_spacing", -50, 50, d.letter_spacing, " %em")
         self.word_fade = self.spin("pl_word_fade", 1, 500, d.word_fade, " %", step=5)
         self.word_fade.setToolTip("逐字高亮边缘的柔和宽度（相对行高）")
-        self.blur = self._check("pl_blur", "非当前行模糊", d.blur)
-        self.scale = self._check("pl_scale", "非当前行缩小", d.scale)
-        self.spring = self._check("pl_spring", "弹簧滚动动画", d.spring)
-        self.translation = self._check("pl_translation", "显示翻译", d.translation)
-        self.romanization = self._check("pl_roman", "显示音译", d.romanization)
-        self.swap = self._check("pl_swap", "交换翻译与音译", d.swap_trans_roman)
-        self.bg_vocals = self._check("pl_bg_vocals", "显示和声", d.background_vocals)
-        self.filter_credits = self._check(
+        self.blur = self.check("pl_blur", "非当前行模糊", d.blur)
+        self.scale = self.check("pl_scale", "非当前行缩小", d.scale)
+        self.spring = self.check("pl_spring", "弹簧滚动动画", d.spring)
+        self.translation = self.check("pl_translation", "显示翻译", d.translation)
+        self.romanization = self.check("pl_roman", "显示音译", d.romanization)
+        self.swap = self.check("pl_swap", "交换翻译与音译", d.swap_trans_roman)
+        self.bg_vocals = self.check("pl_bg_vocals", "显示和声", d.background_vocals)
+        self.filter_credits = self.check(
             "pl_filter_credits",
             "过滤标题与制作信息",
             d.filter_credits,
-            "去掉歌词开头的「歌名 - 艺人」标题行、翻译来源说明与作词作曲等制作信息，以及结尾的版权声明\n只处理首尾连续的信息行，正文中带冒号的句子不受影响；不修改 TTML 文件",
+            CREDITS_TIP,
         )
-        self.balance = self._check(
+        self.balance = self.check(
             "pl_balance", "均衡换行", d.balance, "长句需要折行时让各行长度接近，而不是第一行塞满"
         )
         self.lyric_padding = self.spin("pl_lyric_padding", -1, 50, d.lyric_padding, " %")
@@ -218,29 +201,28 @@ class PlayerPanel(FeaturePanel):
         )
 
         # ---- song info and controls
-        self.title_edit = self._edit("pl_title", "留空则使用音频标签或 TTML 元数据")
-        self.artist_edit = self._edit("pl_artist", "多位艺人用 / 分隔")
-        self.album_edit = self._edit("pl_album", "")
-        self.show_name = self._check("pl_show_name", "曲名", d.show_name)
-        self.show_artists = self._check("pl_show_artists", "艺人", d.show_artists)
-        self.show_album = self._check("pl_show_album", "专辑", d.show_album)
-        self.controls = self._combo("pl_controls", CONTROLS, d.controls)
+        self.title_edit = self.edit("pl_title", "留空则使用音频标签或 TTML 元数据")
+        self.artist_edit = self.edit("pl_artist", "多位艺人用 / 分隔")
+        self.album_edit = self.edit("pl_album", "")
+        self.show_name = self.check("pl_show_name", "曲名", d.show_name)
+        self.show_artists = self.check("pl_show_artists", "艺人", d.show_artists)
+        self.show_album = self.check("pl_show_album", "专辑", d.show_album)
+        self.controls = self.combo("pl_controls", CONTROLS, d.controls)
         self.controls.setToolTip("音频频谱需要源音频")
-        self.show_volume = self._check("pl_show_volume", "音量条", d.show_volume)
+        self.show_volume = self.check("pl_show_volume", "音量条", d.show_volume)
         self.volume = self.spin("pl_volume", 0, 100, d.volume, " %", step=5)
         self.show_volume.toggled.connect(self._sync_enabled)
-        self.bottom = self._check(
+        self.bottom = self.check(
             "pl_bottom", "底部按钮", d.bottom_controls, "歌词 / 隔空播放 / 播放列表按钮"
         )
-        self.remaining = self._check("pl_remaining", "显示剩余时间", d.show_remaining)
-        self.instrumental = self._edit(
-            "pl_instrumental", "留空则只显示居中的封面（AMLL 无歌词布局）"
+        self.remaining = self.check("pl_remaining", "显示剩余时间", d.show_remaining)
+        self.instrumental = self.edit(
+            "pl_instrumental", "留空则只显示居中的封面（AMLL 无歌词布局）", d.instrumental_text
         )
-        self.instrumental.setText(d.instrumental_text)
         self.instrumental.setToolTip("没有歌词的音轨（纯音乐）在歌词区显示的一行文字")
-        self.quality_tag = self._edit("pl_quality_tag", "留空：全景声显示 Dolby Atmos，其余不显示")
+        self.quality_tag = self.edit("pl_quality_tag", "留空：全景声显示 Dolby Atmos，其余不显示")
         self.quality_tag.setMinimumWidth(320)
-        self.show_tag = self._check("pl_show_tag", "音质标签", True)
+        self.show_tag = self.check("pl_show_tag", "音质标签", True)
         self.show_tag.toggled.connect(self._sync_enabled)
 
         self.fonts = FontList()
@@ -249,9 +231,12 @@ class PlayerPanel(FeaturePanel):
         self._project: Project | None = None
         self._job: PreviewJob | None = None
         self._dialog: VideoPreview | None = None
-        self.preview_start = self._seconds("pl_preview_start", 30.0, "从歌曲的第几秒开始预览")
-        self.preview_length = self._seconds(
-            "pl_preview_length", 8.0, "预览片段长度", low=1.0, high=60.0
+        # not part of the output: saved, but no reason to re-plan the run
+        self.preview_start = self.seconds(
+            "pl_preview_start", 30.0, 0.0, 3600.0, tip="从歌曲的第几秒开始预览", replan=False
+        )
+        self.preview_length = self.seconds(
+            "pl_preview_length", 8.0, 1.0, 60.0, tip="预览片段长度", replan=False
         )
         self.preview_button = PrimaryPushButton(fluent.icon("media-playback-start"), "渲染预览")
         self.preview_button.setToolTip("按当前参数以一半分辨率、30 fps 渲染一小段并播放")
@@ -288,7 +273,7 @@ class PlayerPanel(FeaturePanel):
             widgets.section(
                 "背景",
                 widgets.two_column_grid([
-                    ("渲染器：", self.background, "颜色：", self.color),
+                    ("渲染器：", self.background, "颜色：", self.bg_color),
                     ("流动速度：", self.flow, "渲染比例：", self.render_scale),
                     ("随机种子：", self.seed, None, widgets.hbox(self.beat, self.light_wave)),
                 ]),
@@ -328,48 +313,6 @@ class PlayerPanel(FeaturePanel):
         layout.addStretch(1)
         self._sync_enabled()
 
-    # ---- persisted controls ------------------------------------------------------------
-
-    def _check(self, key: str, text: str, value: bool, tip: str = "") -> CheckBox:
-        box = CheckBox(text)
-        box.setChecked(value)
-        if tip:
-            box.setToolTip(tip)
-        box.toggled.connect(self.changed)
-        self._checks[key] = box
-        return box
-
-    def _combo(self, key: str, items: dict[str, str], value: str) -> fluent.ComboBox:
-        box = fluent.ComboBox()
-        for name, label in items.items():
-            box.addItem(label, name)
-        box.setCurrentIndex(max(0, box.findData(value)))
-        box.currentIndexChanged.connect(self.changed)
-        self._combos[key] = box
-        return box
-
-    def _edit(self, key: str, placeholder: str) -> LineEdit:
-        edit = LineEdit()
-        edit.setPlaceholderText(placeholder)
-        edit.setClearButtonEnabled(True)
-        edit.textChanged.connect(lambda _t: self.changed.emit())
-        self._edits[key] = edit
-        return edit
-
-    def _seconds(
-        self, key: str, value: float, tip: str, low: float = 0.0, high: float = 3600.0
-    ) -> CompactDoubleSpinBox:
-        box = CompactDoubleSpinBox()
-        box.setRange(low, high)
-        box.setDecimals(1)
-        box.setSingleStep(1.0)
-        box.setValue(value)
-        box.setSuffix(" 秒")
-        box.setToolTip(tip)
-        # not part of the output: saved, but no reason to re-plan the run
-        self._spins[key] = box
-        return box
-
     def _quality_range(self) -> None:
         # NVENC reads CQ 0 as "automatic", not as the best quality
         self.quality.setRange(*QUALITY_RANGE.get(self.codec.currentData(), (0, 51)))
@@ -384,7 +327,7 @@ class PlayerPanel(FeaturePanel):
         webgl = bg in ("mesh", "isolation")
         for w in (self.flow, self.render_scale, self.seed):
             w.setEnabled(webgl)
-        self.color.setEnabled(bg == "solid")
+        self.bg_color.setEnabled(bg == "solid")
         self.beat.setEnabled(bg == "mesh")
         self.light_wave.setEnabled(bg == "isolation")
         self.volume.setEnabled(self.show_volume.isChecked())
@@ -455,7 +398,7 @@ class PlayerPanel(FeaturePanel):
             background=self.background.currentData(),
             flow_speed=self.flow.value(),
             render_scale=self.render_scale.value(),
-            color=self.color.hex(),
+            color=self.bg_color.hex(),
             seed=self.seed.value(),
             light_wave=self.light_wave.isChecked(),
             beat=self.beat.isChecked(),
@@ -546,8 +489,7 @@ class PlayerPanel(FeaturePanel):
         self._job.start()
 
     def _preview_progress(self, value: int, message: str) -> None:
-        if value >= 0:
-            self.preview_progress.setValue(value)
+        self.preview_progress.setValue(value)
         self.preview_status.setText(message)
 
     def _preview_done(self, path: Path | None, error: str) -> None:
@@ -636,31 +578,13 @@ class PlayerPanel(FeaturePanel):
     # ---- settings --------------------------------------------------------------------
 
     def save_extra(self) -> None:
-        for key, box in self._checks.items():
-            self.settings.setValue(key, box.isChecked())
-        for key, combo in self._combos.items():
-            self.settings.setValue(key, combo.currentData())
-        for key, edit in self._edits.items():
-            self.settings.setValue(key, edit.text())
         self.settings.setValue("pl_audio_track", self._audio_key)
-        self.settings.setValue("pl_color", self.color.hex())
         self.settings.setValue("pl_fonts", self.fonts.families())
 
     def restore_extra(self) -> None:
-        # the saved quality must win over the codec's default
-        quality = self.quality.value()
-        for key, combo in self._combos.items():
-            value = self.settings.value(key, combo.currentData())
-            combo.setCurrentIndex(max(0, combo.findData(value)))
-        self._quality_range()
-        self.quality.setValue(quality)
-        for key, box in self._checks.items():
-            box.setChecked(self.settings.value(key, box.isChecked(), type=bool))
-        for key, edit in self._edits.items():
-            edit.setText(self.settings.value(key, edit.text(), type=str))
         self._audio_key = self.settings.value("pl_audio_track", ORIGINAL, type=str) or ORIGINAL
         if self._project is not None:
             self._fill_audio_tracks(self._project)
-        self.color.setColor(self.settings.value("pl_color", self.color.hex()))
         self.fonts.set_families(self.settings.value("pl_fonts", [], type=list))
+        self._quality_range()
         self._sync_enabled()

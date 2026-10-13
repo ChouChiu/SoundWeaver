@@ -18,7 +18,6 @@ from pathlib import Path
 from PySide6.QtCore import QSettings, Qt, QUrl
 from PySide6.QtGui import (
     QCloseEvent,
-    QColor,
     QDesktopServices,
     QDragEnterEvent,
     QDropEvent,
@@ -38,7 +37,6 @@ from qfluentwidgets import (
     Action,
     BodyLabel,
     CaptionLabel,
-    CommandBar,
     IconWidget,
     InfoBar,
     InfoBarPosition,
@@ -57,9 +55,9 @@ from qfluentwidgets import (
 from dolbytool.core import ffmpeg
 from dolbytool.core.project import PlanContext, Project
 from dolbytool.core.task import Step
-from dolbytool.features.batch.lyrics import without_number
 from dolbytool.features.batch.panel import BatchPanel
 from dolbytool.features.registry import output_panels
+from dolbytool.features.source.lyrics import without_number
 from dolbytool.features.source.panel import SourcePanel
 from dolbytool.features.source.service import kind_of
 from dolbytool.ui import fluent, widgets
@@ -86,8 +84,7 @@ class _PageHeader(QWidget):
         self.check.setOnText("已启用")
         self.check.setOffText("未启用")
         self.check.checkedChanged.connect(panel.set_enabled)
-        self.status = CaptionLabel()
-        self.status.setWordWrap(True)
+        self.status = widgets.hint_label()
         self.status.hide()
         title = QHBoxLayout()
         title.setSpacing(12)
@@ -106,10 +103,9 @@ class _PageHeader(QWidget):
         self.check.setChecked(enabled)
         self.check.blockSignals(False)
         self.status.setText(text)
-        if problem:
-            self.status.setTextColor(QColor("#c42b1c"), QColor("#ff99a4"))
-        else:
-            self.status.setTextColor(QColor(96, 96, 96), QColor(206, 206, 206))
+        # the switch beside the title already says when it is off
+        self.status.setVisible(enabled and bool(text))
+        fluent.secondary(self.status, problem)
 
 
 def _scroll_page(*items: QWidget) -> ScrollArea:
@@ -204,21 +200,10 @@ class MainWindow(QMainWindow):
         )
         self.act_cancel = action("取消", "process-stop", self._cancel, QKeySequence("Escape"))
         self.act_cancel.setEnabled(False)
-        self.act_about = action("关于", "help-about", self._about)
         self.input_actions = (
             self.act_audio, self.act_cover, self.act_ttml,
             self.act_batch_files, self.act_batch_folder,
         )  # fmt: skip
-
-    def _build_command_bar(self) -> CommandBar:
-        bar = CommandBar()
-        bar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        bar.addActions([self.act_audio, self.act_cover, self.act_ttml])
-        bar.addSeparator()
-        bar.addActions([self.act_batch_files, self.act_batch_folder])
-        bar.addSeparator()
-        bar.addAction(self.act_open_dir)
-        return bar
 
     def _build_body(self) -> QWidget:
         """Navigation on the left; on the right the page it shows above the action bar."""
@@ -317,12 +302,17 @@ class MainWindow(QMainWindow):
         body.addWidget(outputs, 1)
         title = QHBoxLayout()
         title.addWidget(TitleLabel("素材"))
+        title.addSpacing(12)
+        title.addWidget(
+            widgets.hint_label("拖入音频、封面、歌词或整个专辑文件夹即可开始", wrap=False),
+            0,
+            Qt.AlignmentFlag.AlignBottom,
+        )
         title.addStretch(1)
         layout = QVBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
         layout.addLayout(title)
-        layout.addWidget(self._build_command_bar())
         layout.addLayout(body, 1)
         self._fit_mode()
         page = QWidget()
@@ -467,26 +457,26 @@ class MainWindow(QMainWindow):
     def _active(self, ctx: PlanContext) -> list[FeaturePanel]:
         return [panel for panel in self.panels if panel.is_active(ctx)]
 
-    def _input_problem(self, ctx: PlanContext, panel: FeaturePanel) -> str | None:
-        """What the shared inputs lack for `panel`."""
+    @staticmethod
+    def _why_not(ctx: PlanContext, panel: FeaturePanel) -> str | None:
+        """Why `panel` cannot make its output for `ctx`: the shared inputs first, then its own."""
         project = ctx.project
-        if not panel.needs_audio:
-            return None
-        if project.audio is None:
-            return "请添加音频文件" if ctx.batch else "请选择音频文件"
-        if project.probing:
-            return "正在解析音频…"
-        if project.info is None:
-            return f"无法解析音频：{project.audio_error}" if project.audio_error else "无法解析音频"
-        return None
+        if panel.needs_audio:
+            if project.audio is None:
+                return "请添加音频文件" if ctx.batch else "请选择音频文件"
+            if project.probing:
+                return "正在解析音频…"
+            if project.info is None:
+                return f"无法解析音频：{project.audio_error or '未知错误'}"
+        return panel.problem(ctx)
 
     def _problems(self, ctx: PlanContext) -> dict[int, str]:
         """Why each enabled output cannot run, by panel index."""
-        out = {}
-        for index, panel in enumerate(self.panels):
-            if panel.enabled and (p := self._input_problem(ctx, panel) or panel.problem(ctx)):
-                out[index] = p
-        return out
+        return {
+            index: problem
+            for index, panel in enumerate(self.panels)
+            if panel.enabled and (problem := self._why_not(ctx, panel))
+        }
 
     @staticmethod
     def _dir_problem(out: Path | None) -> str | None:
@@ -531,7 +521,7 @@ class MainWindow(QMainWindow):
         for panel in self._active(ctx):
             if album and panel.per_album:
                 continue
-            if panel.enabled and (p := self._input_problem(ctx, panel) or panel.problem(ctx)):
+            if panel.enabled and (p := self._why_not(ctx, panel)):
                 left_out.append(f"{panel.title}（{p}）")
                 continue
             steps[panel] = panel.plan(ctx)
@@ -620,7 +610,7 @@ class MainWindow(QMainWindow):
             missing: dict[str, int] = {}
             for project in projects:
                 ctx = self._context(project, batch=True)
-                if p := self._input_problem(ctx, panel) or panel.problem(ctx):
+                if p := self._why_not(ctx, panel):
                     missing[p] = missing.get(p, 0) + 1
             if not missing:
                 continue
@@ -830,6 +820,8 @@ class MainWindow(QMainWindow):
         self._show_status(message)
         self._log(f"—— {message}")
         QApplication.alert(self)
+        if outcome == Outcome.DONE:
+            self._notify_done(message)
         if failures:
             fluent.tell(
                 self,
@@ -837,6 +829,17 @@ class MainWindow(QMainWindow):
                 f"{message}，其余任务已完成，详细失败信息请查看下方列表与运行日志",
                 "\n".join(failures),
             )
+
+    def _notify_done(self, message: str) -> None:
+        bar = InfoBar.success(
+            "处理完成", message, duration=8000, position=InfoBarPosition.TOP,
+            parent=self.centralWidget(),
+        )  # fmt: skip
+        out = self._output_dir()
+        if out and out.is_dir():
+            button = PushButton(fluent.icon("folder-open"), "打开输出目录")
+            button.clicked.connect(self._open_output_dir)
+            bar.addWidget(button)
 
     def _set_running(self, running: bool) -> None:
         self.source.set_running(running)

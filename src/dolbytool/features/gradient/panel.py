@@ -15,6 +15,7 @@ from dolbytool.core.task import Step
 from dolbytool.features.gradient import palette
 from dolbytool.features.gradient.service import GradientSpec, gradient_step, gradient_target
 from dolbytool.ui import fluent, widgets
+from dolbytool.ui.background import Latest
 from dolbytool.ui.feature import FeaturePanel
 
 # The reference pair from the original command, until a cover supplies its own.
@@ -32,6 +33,7 @@ class GradientPanel(FeaturePanel):
     def __init__(self, settings: QSettings, parent=None) -> None:
         super().__init__(settings, parent)
         self._cover: FileStamp | None = None
+        self._swatches = Latest(self)
 
         self.swatch_row = QHBoxLayout()
         self.swatch_row.setSpacing(2)
@@ -94,14 +96,19 @@ class GradientPanel(FeaturePanel):
         self._clear_swatches()
         self.swatch_hint.show()
         if not cover or not cover.is_file():
+            self._swatches.cancel()
             self.swatch_hint.setText("选择封面后显示封面主要颜色")
             return
-        try:
-            swatches = palette.palette(motion.still(cover))
-        except Exception as error:  # noqa: BLE001 - Pillow raises many types for a broken image
+        self.swatch_hint.setText("正在提取封面颜色…")
+        self._swatches.run(lambda: palette.palette(motion.still(cover)), self._show_swatches)
+
+    def _show_swatches(self, result: list[palette.Swatch] | Exception) -> None:
+        if isinstance(result, Exception):
+            # Pillow and ffmpeg raise many kinds of error for a broken picture
             self.swatch_hint.setText("封面无法读取")
-            self.log.emit(f"封面取色失败：{error}")
+            self.log.emit(f"封面取色失败：{result}")
             return
+        swatches = result
         self.swatch_hint.hide()
         main = palette.dominant(swatches)
         for index, sw in enumerate(swatches):

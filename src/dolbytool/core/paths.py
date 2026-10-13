@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shutil
 import sys
 from collections.abc import Iterator
@@ -65,6 +66,18 @@ def cache_dir(name: str = "cache") -> Path:
     path = WORK_ROOT / name
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def path_from_text(text: str) -> Path | None:
+    """A path typed into a field, None for an empty one."""
+    text = text.strip()
+    return Path(text).expanduser() if text else None
+
+
+def natural_key(path: Path) -> tuple:
+    """Sort "2 x" before "10 x": digit runs compare as numbers."""
+    parts = re.split(r"(\d+)", str(path).casefold())
+    return tuple(int(p) if p.isdigit() else p for p in parts)
 
 
 def file_stamp(path: Path | None) -> FileStamp | None:

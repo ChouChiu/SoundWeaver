@@ -10,12 +10,10 @@ from dolbytool.core.project import PlanContext, Project, Track
 from dolbytool.core.task import Step
 from dolbytool.features.waveform.encoders import DEFAULT_ENCODER, ENCODER_LABELS
 from dolbytool.features.waveform.service import WaveformSpec, waveform_step, waveform_target
-from dolbytool.ui import fluent, widgets
+from dolbytool.ui import widgets
 from dolbytool.ui.feature import FeaturePanel
 
 DEFAULT_TRACKS = ("surround",)
-# "wave2/" keys: the dark look replaced the old white-background defaults.
-COLOR_KEYS = ("wave2/wave_color", "wave2/background", "wave2/playhead")
 
 
 class WaveformPanel(FeaturePanel):
@@ -34,19 +32,24 @@ class WaveformPanel(FeaturePanel):
         self.fps = self.spin("fps", 10, 120, d.fps, " fps")
         self.screen_w = self.spin("screen_w", 64, MAX_FRAME_SIDE, d.screen_width, " px", step=2)
         self.screen_h = self.spin("screen_h", 32, MAX_FRAME_SIDE, d.height, " px", step=2)
-        self.wave_color = widgets.ColorButton(d.wave_color, "选择波形颜色")
-        self.background = widgets.ColorButton(d.background, "选择背景颜色")
-        self.playhead = widgets.ColorButton(d.playhead, "选择播放头颜色")
-        self.unplayed = self.spin("unplayed", 0, 100, round(d.unplayed_level * 100), " %")
-        self.unplayed.setToolTip("播放头右侧未播放波形保留的不透明度（100% 为不暗化）")
-        self.encoder = fluent.ComboBox()
-        for name, label in ENCODER_LABELS.items():
-            self.encoder.addItem(label, name)
-        self.encoder.setToolTip("硬件编码器不可用时将自动回退至 libx264 软件编码")
+        # "wave2/" keys: the dark look replaced the old white-background defaults
+        self.wave_color = self.color("wave2/wave_color", d.wave_color, "选择波形颜色")
+        self.background = self.color("wave2/background", d.background, "选择背景颜色")
+        self.playhead = self.color("wave2/playhead", d.playhead, "选择播放头颜色")
+        self.unplayed = self.spin(
+            "unplayed", 0, 100, round(d.unplayed_level * 100), " %",
+            tip="播放头右侧未播放波形保留的不透明度（100% 为不暗化）",
+        )  # fmt: skip
+        self.encoder = self.combo(
+            "encoder",
+            ENCODER_LABELS,
+            DEFAULT_ENCODER,
+            "硬件编码器不可用时将自动回退至 libx264 软件编码",
+        )
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(widgets.section("音轨", self.tracks), 1)
+        layout.addWidget(widgets.section("音轨", self.tracks))
         layout.addWidget(
             widgets.section(
                 "画面",
@@ -65,6 +68,7 @@ class WaveformPanel(FeaturePanel):
                 ]),
             )
         )  # fmt: skip
+        layout.addStretch(1)
 
     def spec(self) -> WaveformSpec:
         return WaveformSpec(
@@ -94,9 +98,9 @@ class WaveformPanel(FeaturePanel):
         items = []
         for track in project.tracks:
             if track.is_original:
-                text = f"源音频（{track.path.name}）"
+                text = "源音频"
             else:
-                text = f"{track.label}（{track.key}{'' if track.exists else '，待生成'}）"
+                text = track.label + ("" if track.exists else "（待生成）")
             items.append(
                 widgets.TrackItem(
                     track.key, text, f"{track.hint}\n{track.path}",
@@ -136,19 +140,7 @@ class WaveformPanel(FeaturePanel):
         ]
 
     def save_extra(self) -> None:
-        for key, button in zip(COLOR_KEYS, self._colors(), strict=True):
-            self.settings.setValue(key, button.hex())
-        self.settings.setValue("encoder", self.encoder.currentData())
         self.settings.setValue("tracks", sorted(self.tracks.keys()))
 
     def restore_extra(self) -> None:
         self.tracks.seed(set(self.settings.value("tracks", list(DEFAULT_TRACKS), type=list)))
-        d = WaveformSpec()
-        defaults = (d.wave_color, d.background, d.playhead)
-        for key, button, default in zip(COLOR_KEYS, self._colors(), defaults, strict=True):
-            button.setColor(self.settings.value(key, default))
-        encoder = self.settings.value("encoder", DEFAULT_ENCODER)
-        self.encoder.setCurrentIndex(max(0, self.encoder.findData(encoder)))
-
-    def _colors(self) -> tuple[widgets.ColorButton, ...]:
-        return (self.wave_color, self.background, self.playhead)

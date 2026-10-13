@@ -16,7 +16,7 @@ from dolbytool.core import ffmpeg, motion
 from dolbytool.core.cancel import CancellationToken
 from dolbytool.core.paths import atomic_output, work_root
 from dolbytool.core.renderer import renderer_script, run_renderer
-from dolbytool.core.task import Report, Step
+from dolbytool.core.task import Progress, Report, Step
 from dolbytool.features.lyrics.service import css_font_list
 from dolbytool.features.waveform.encoders import encoder_for
 
@@ -250,18 +250,10 @@ def player_step(
 
     def run(token: CancellationToken, report: Report) -> str:
         use = _available(spec, report)
-        done = 0
-
-        def on_fraction(fraction: float) -> None:
-            nonlocal done
-            done = round(fraction * 100)
-            report(done, "逐帧渲染与编码")
-
-        # a status line must not rewind the bar
+        progress = Progress(report, "逐帧渲染与编码")
         render_player_video(
-            ttml, cover, audio, target, use, duration, token, on_fraction,
-            lambda message: report(done, message),
-        )  # fmt: skip
+            ttml, cover, audio, target, use, duration, token, progress.fraction, progress.status
+        )
         return target.name
 
     return Step("播放器视频", run, (target,))
@@ -335,16 +327,8 @@ def queue_step(
 ) -> Step:
     def run(token: CancellationToken, report: Report) -> str:
         use = _available(spec, report)
-        done = 0
-
-        def on_fraction(fraction: float) -> None:
-            nonlocal done
-            done = round(fraction * 100)
-            report(done, "逐帧渲染与编码")
-
-        render_queue(
-            tracks, cover, target, use, token, on_fraction, lambda message: report(done, message)
-        )
+        progress = Progress(report, "逐帧渲染与编码")
+        render_queue(tracks, cover, target, use, token, progress.fraction, progress.status)
         return f"{target.name}（{len(tracks)} 首连续播放）"
 
     return Step("整张专辑播放器视频", run, (target,))

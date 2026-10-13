@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 
-from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -32,6 +32,7 @@ from qfluentwidgets import (
     SimpleCardWidget,
     StrongBodyLabel,
     ToolButton,
+    TreeWidget,
 )
 
 from dolbytool.ui import fluent
@@ -142,25 +143,50 @@ def size_row(width: CompactSpinBox, height: CompactSpinBox) -> QHBoxLayout:
     return hbox(width, "×", height, spacing=6)
 
 
+class HintTree(TreeWidget):
+    """A tree that says what belongs in it while it is empty."""
+
+    def __init__(self, empty_text: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.empty_text = empty_text
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        if self.topLevelItemCount():
+            return
+        painter = QPainter(self.viewport())
+        painter.setPen(fluent.dim())
+        painter.drawText(
+            self.viewport().rect().adjusted(16, 16, -16, -16),
+            Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap,
+            self.empty_text,
+        )
+        painter.end()
+
+
+# a framed box for a picture, readable as a box even while empty
+PREVIEW_STYLE = (
+    "border: 1px solid rgba(128, 128, 128, 0.35); border-radius: 6px;"
+    "background: rgba(128, 128, 128, 0.08);"
+)
+
+
 def preview_label(tooltip: str = "", text: str = "", side: int = 120) -> QLabel:
     label = CaptionLabel(text)
     label.setFixedSize(side, side)
     label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-    label.setStyleSheet(
-        "border: 1px solid rgba(128, 128, 128, 0.35); border-radius: 6px;"
-        "background: rgba(128, 128, 128, 0.08);"
-    )
+    label.setStyleSheet(PREVIEW_STYLE)
     label.setWordWrap(True)
     if tooltip:
         label.setToolTip(tooltip)
     return label
 
 
-def hint_label(text: str = "", wrap: bool = True) -> QLabel:
+def hint_label(text: str = "", wrap: bool = True) -> CaptionLabel:
     """Secondary text; `wrap=False` for a short note in a row, which wrapping would chop up."""
     label = CaptionLabel(text)
     label.setWordWrap(wrap)
-    label.setTextColor(QColor(96, 96, 96), QColor(206, 206, 206))
+    fluent.secondary(label)
     return label
 
 
@@ -237,6 +263,10 @@ def two_column_grid(rows: Sequence[Row]) -> QGridLayout:
     return grid
 
 
+# rows a track list grows to before it scrolls
+_MAX_ROWS = 8
+
+
 @dataclass(frozen=True, slots=True)
 class TrackItem:
     key: str
@@ -255,7 +285,6 @@ class TrackList(QWidget):
         super().__init__(parent)
         self.list = ListWidget()
         self.list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
-        self.list.setMinimumHeight(110)
         self.list.setUniformItemSizes(True)
         self.list.itemChanged.connect(lambda _item: self._remember())
         buttons = QHBoxLayout()
@@ -317,6 +346,13 @@ class TrackList(QWidget):
             self.list.addItem(item)
         self.list.blockSignals(False)
         self._count()
+        self._fit()
+
+    def _fit(self) -> None:
+        """As tall as the tracks, so a layout's stems show without scrolling, up to a point."""
+        row = self.list.sizeHintForRow(0) if self.list.count() else 38
+        rows = min(max(self.list.count(), 3), _MAX_ROWS)
+        self.list.setFixedHeight(rows * row + 2 * self.list.frameWidth() + 10)
 
     def check_all(self, on: bool) -> None:
         self.list.blockSignals(True)
@@ -334,6 +370,3 @@ class TrackList(QWidget):
     def _count(self) -> None:
         total = self.list.count()
         self.count_label.setText(f"已选 {len(self.checked())}/{total}" if total else "")
-
-    def sizeHint(self) -> QSize:
-        return QSize(320, 180)

@@ -226,10 +226,10 @@ async function tracks(entries: PlaylistEntry[]): Promise<PlayerTrack[]> {
 	return Promise.all(
 		entries.map(async (entry) => ({
 			ttml: entry.ttml ? await readFile(path.resolve(entry.ttml), "utf8") : null,
-			title: entry.title ?? "",
-			artists: entry.artists ?? [],
-			album: entry.album ?? "",
-			durationMs: (entry.duration ?? 0) * 1000,
+			title: entry.title,
+			artists: entry.artists,
+			album: entry.album,
+			durationMs: entry.duration * 1000,
 		})),
 	);
 }

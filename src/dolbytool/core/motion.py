@@ -16,7 +16,7 @@ from pathlib import Path
 
 from dolbytool.core import ffmpeg
 from dolbytool.core.cancel import CancellationToken
-from dolbytool.core.paths import cache_dir, content_key, file_stamp
+from dolbytool.core.paths import atomic_output, cache_dir, content_key, file_stamp
 
 MOTION_SUFFIXES = {".mp4", ".m4v", ".mov", ".webm", ".mkv"}
 MANIFEST = "manifest.json"
@@ -52,7 +52,11 @@ def still(cover: Path) -> Path:
         return cover
     target = cache_dir("covers") / f"{cover.stem}_{content_key(cover)[:8]}_still.jpg"
     if not target.is_file():
-        ffmpeg.run_ffmpeg(["-i", str(cover), "-an", "-frames:v", "1", "-q:v", "2", str(target)])
+        # a frame cut short must not be taken for the cached one next time
+        with atomic_output(target) as partial:
+            ffmpeg.run_ffmpeg(
+                ["-i", str(cover), "-an", "-frames:v", "1", "-q:v", "2", str(partial)]
+            )
     return target
 
 

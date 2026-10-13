@@ -13,12 +13,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from dolbytool.core.audio import AudioInfo
-from dolbytool.core.motion import MOTION_SUFFIXES, is_motion
+from dolbytool.core.paths import natural_key
 from dolbytool.core.project import default_output_dir
-from dolbytool.features.source.service import AUDIO_SUFFIXES, IMAGE_SUFFIXES
+from dolbytool.features.source.service import is_audio
 
-# Cover art an album folder usually carries, best first
-_COVER_NAMES = ("cover", "folder", "front", "album", "albumart", "artwork")
 # Album folders hold "Disc 1" style subfolders, not whole libraries
 _MAX_DEPTH = 2
 _UNSAFE = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
@@ -29,19 +27,9 @@ class BatchTrack:
     audio: Path
     info: AudioInfo | None = None
     error: str | None = None
-    # the embedded cover, extracted
+    # the embedded cover, extracted, else the art in its folder
     cover: Path | None = None
     probing: bool = True
-
-    @property
-    def ready(self) -> bool:
-        return self.info is not None
-
-
-def natural_key(path: Path) -> tuple:
-    """Sort "2 x" before "10 x": digit runs compare as numbers."""
-    parts = re.split(r"(\d+)", str(path).casefold())
-    return tuple(int(p) if p.isdigit() else p for p in parts)
 
 
 def audio_files(paths: Iterable[Path]) -> list[Path]:
@@ -50,14 +38,9 @@ def audio_files(paths: Iterable[Path]) -> list[Path]:
     for path in paths:
         if path.is_dir():
             found.extend(_scan(path, _MAX_DEPTH))
-        elif _is_audio(path):
+        elif is_audio(path):
             found.append(path)
     return found
-
-
-def _is_audio(path: Path) -> bool:
-    # an .mp4 may be a song or soundless motion artwork
-    return path.is_file() and path.suffix.lower() in AUDIO_SUFFIXES and not is_motion(path)
 
 
 def _scan(folder: Path, depth: int) -> list[Path]:
@@ -72,29 +55,9 @@ def _scan(folder: Path, depth: int) -> list[Path]:
         if entry.is_dir():
             if depth > 0 and not entry.name.endswith("_stems"):
                 files.extend(_scan(entry, depth - 1))
-        elif _is_audio(entry):
+        elif is_audio(entry):
             files.append(entry)
     return files
-
-
-def folder_cover(folder: Path) -> Path | None:
-    """The album art lying in `folder`: motion artwork first, then an image by its
-    conventional name, else the only image there.
-    """
-    try:
-        files = sorted((p for p in folder.iterdir() if p.is_file()), key=natural_key)
-    except OSError:
-        return None
-    moving = [p for p in files if p.suffix.lower() in MOTION_SUFFIXES and is_motion(p)]
-    if moving:
-        # the player's cover frame is square: Apple's square artwork before the tall one
-        return min(moving, key=lambda p: "square" not in p.name.casefold())
-    images = [p for p in files if p.suffix.lower() in IMAGE_SUFFIXES]
-    by_name = {p.stem.casefold(): p for p in images}
-    for name in _COVER_NAMES:
-        if name in by_name:
-            return by_name[name]
-    return images[0] if len(images) == 1 else None
 
 
 def album_order(tracks: Sequence[BatchTrack]) -> list[BatchTrack]:

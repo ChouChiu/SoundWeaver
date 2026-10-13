@@ -63,8 +63,7 @@ class StemsPanel(FeaturePanel):
         self.crossover.setValue(DEFAULT_CROSSOVER_HZ)
         self.crossover.setToolTip("低频段与高频段的分频截止频率")
         self.remember("crossover", self.crossover)
-        self.adm = CheckBox(ADM_TEXT)
-        self.adm.toggled.connect(self.changed)
+        self.adm = self.check("stem_adm", ADM_TEXT, False)
         self.layout_box = fluent.ComboBox()
         for speakers in LAYOUTS:
             self.layout_box.addItem(speakers.name, speakers.name)
@@ -197,12 +196,10 @@ class StemsPanel(FeaturePanel):
         ]  # fmt: skip
 
     def save_extra(self) -> None:
-        self.settings.setValue("stem_adm", self.adm.isChecked())
         self.settings.setValue("stem_skip", sorted(self._skip))
 
     def restore_extra(self) -> None:
         self._skip = set(self.settings.value("stem_skip", [], type=list))
-        self.adm.setChecked(self.settings.value("stem_adm", False, type=bool))
         name = atmos_layout(str(self.settings.value(ATMOS_LAYOUT_KEY, ""))).name
         # the window reads the projects once everything is restored
         self.layout_box.blockSignals(True)

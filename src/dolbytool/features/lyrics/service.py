@@ -14,7 +14,7 @@ from pathlib import Path
 from dolbytool.core.cancel import CancellationToken
 from dolbytool.core.paths import atomic_output
 from dolbytool.core.renderer import renderer_script, run_renderer
-from dolbytool.core.task import Report, Step
+from dolbytool.core.task import Progress, Report, Step
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,16 +78,9 @@ def lyrics_step(ttml: Path, target: Path, spec: SubtitleSpec, duration: float | 
     """`duration` follows the audio so the overlay lines up with the waveform video."""
 
     def run(token: CancellationToken, report: Report) -> str:
-        done = 0
-
-        def on_fraction(fraction: float) -> None:
-            nonlocal done
-            done = round(fraction * 100)
-            report(done, "逐帧渲染与编码")
-
-        # a status line must not rewind the bar
+        progress = Progress(report, "逐帧渲染与编码")
         render_subtitle_video(
-            ttml, target, spec, duration, token, on_fraction, lambda message: report(done, message)
+            ttml, target, spec, duration, token, progress.fraction, progress.status
         )
         return target.name
 

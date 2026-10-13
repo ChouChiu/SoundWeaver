@@ -7,10 +7,10 @@ from pathlib import Path
 from PySide6.QtCore import QSize, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QHeaderView, QTreeWidgetItem, QVBoxLayout, QWidget
-from qfluentwidgets import ProgressBar, TreeWidget
+from qfluentwidgets import ProgressBar
 
 from dolbytool.core.task import Step
-from dolbytool.ui import fluent
+from dolbytool.ui import fluent, widgets
 from dolbytool.ui.worker import Outcome
 
 _ICONS = {
@@ -38,18 +38,19 @@ def _bar_cell(bar: ProgressBar) -> QWidget:
     return cell
 
 
-class TaskView(TreeWidget):
+class TaskView(widgets.HintTree):
     """One row per step; a finished row opens its output on double click."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
+        super().__init__("尚未运行任务：在「素材」页选好输入与输出后点击「开始」", parent)
         self.setColumnCount(3)
         self.setHeaderLabels(["任务", "进度", "状态"])
         self.setRootIsDecorated(False)
         self.setUniformRowHeights(True)
         header = self.header()
         header.setStretchLastSection(True)
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        header.resizeSection(0, 320)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
         header.resizeSection(1, 160)
         self.itemDoubleClicked.connect(self._open)

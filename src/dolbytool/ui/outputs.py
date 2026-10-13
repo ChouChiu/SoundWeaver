@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from PySide6.QtCore import QSize, Qt, Signal
-from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QAbstractItemView, QGridLayout, QListWidgetItem, QWidget
 from qfluentwidgets import CaptionLabel, IconWidget, ListWidget, StrongBodyLabel, SwitchButton
 
@@ -54,10 +53,7 @@ class _Row(QWidget):
     def set_status(self, text: str, problem: bool) -> None:
         self.status.setText(text)
         self.status.setToolTip(text)
-        if problem:
-            self.status.setTextColor(QColor("#c42b1c"), QColor("#ff99a4"))
-        else:
-            self.status.setTextColor(QColor(96, 96, 96), QColor(206, 206, 206))
+        fluent.secondary(self.status, problem)
 
 
 class OutputList(ListWidget):
@@ -101,12 +97,11 @@ class OutputList(ListWidget):
 
     def set_status(self, index: int, text: str, problem: bool = False) -> None:
         row = self.rows[index]
-        if text != row.status.text():
-            row.set_status(text, problem)
+        resized = text != row.status.text()
+        row.set_status(text, problem)
+        if resized:
             # a wrapped status may take another line, or give one back
             self._fit_rows()
-        else:
-            row.set_status(text, problem)
 
     def set_locked(self, locked: bool) -> None:
         for row in self.rows:

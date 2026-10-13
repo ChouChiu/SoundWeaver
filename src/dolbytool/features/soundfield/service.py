@@ -25,7 +25,7 @@ from dolbytool.core.cancel import CancellationToken
 from dolbytool.core.paths import atomic_output, work_root
 from dolbytool.core.renderer import renderer_script, run_renderer
 from dolbytool.core.speakers import DEFAULT_ATMOS, SpeakerLayout
-from dolbytool.core.task import Report, Step
+from dolbytool.core.task import Progress, Report, Step
 
 # The speakers behind each stem, as far as the stem is a set of speakers; the
 # source itself and the fold-down hold all of them (None).  A layout without
@@ -80,8 +80,8 @@ class SoundfieldSpec:
     level_response: int = 0
     # percent strength of the halo, 0 for none
     glow: int = 0
-    # tenths of a second of path drawn behind each object, 0 for none
-    trail: int = 0
+    # seconds of path drawn behind each object, 0 for none
+    trail: float = 0.0
     drop: bool = False
     color_mode: str = "tint"
     # percent of the distance that just fits the room; above 100 is closer
@@ -142,7 +142,7 @@ def _args(scene: Path, output: Path, spec: SoundfieldSpec, duration: float | Non
         f"--gate-db={spec.gate_db}", "--fade", str(spec.fade_ms), "--crf", str(spec.crf),
         "--dim", str(spec.dim / 100),
         "--level-response", str(spec.level_response / 100), "--glow", str(spec.glow / 100),
-        "--trail", str(spec.trail / 10), "--color", spec.color_mode, "--zoom", str(spec.zoom / 100),
+        "--trail", f"{spec.trail:g}", "--color", spec.color_mode, "--zoom", str(spec.zoom / 100),
         *(["--drop"] if spec.drop else []),
     ]  # fmt: skip
     if spec.head:
@@ -167,22 +167,15 @@ def soundfield_step(
     """`duration` follows the probed audio length, as the lyric video does."""
 
     def run(token: CancellationToken, report: Report) -> str:
-        done = 0
-        message = "解析全景声对象"
+        progress = Progress(report, "解析全景声对象")
 
         def on_fraction(fraction: float) -> None:
-            nonlocal done
-            done = round(fraction * 100)
-            report(done, message if fraction < TRACE_SHARE else "逐帧渲染与编码")
-
-        def on_status(text: str) -> None:
-            nonlocal message
-            message = text
-            # a status line must not rewind the bar
-            report(done, text)
+            if fraction >= TRACE_SHARE:
+                progress.message = "逐帧渲染与编码"
+            progress.fraction(fraction)
 
         paths = render_soundfield_videos(
-            audio, videos, spec, token, duration, on_fraction, on_status, layout
+            audio, videos, spec, token, duration, on_fraction, progress.status, layout
         )
         return "、".join(p.name for p in paths)
 

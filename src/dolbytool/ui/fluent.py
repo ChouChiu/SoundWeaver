@@ -32,6 +32,9 @@ from qfluentwidgets.components.dialog_box.mask_dialog_base import MaskDialogBase
 # Fluent's critical colours, readable on their own theme
 _NEGATIVE_LIGHT = QColor("#c42b1c")
 _NEGATIVE_DARK = QColor("#ff99a4")
+# secondary text on a light and on a dark theme
+_SECONDARY_LIGHT = QColor(96, 96, 96)
+_SECONDARY_DARK = QColor(206, 206, 206)
 
 # freedesktop icon names used across the app, mapped to Fluent's own
 _ICONS: dict[str, FluentIcon] = {
@@ -87,6 +90,14 @@ def qicon(name: str) -> QIcon:
 
 def negative() -> QColor:
     return _NEGATIVE_DARK if isDarkTheme() else _NEGATIVE_LIGHT
+
+
+def secondary(label: Any, problem: bool = False) -> None:
+    """Colour a Fluent label as secondary text, or as a problem to fix."""
+    if problem:
+        label.setTextColor(_NEGATIVE_LIGHT, _NEGATIVE_DARK)
+    else:
+        label.setTextColor(_SECONDARY_LIGHT, _SECONDARY_DARK)
 
 
 def dim() -> QColor:

@@ -6,7 +6,6 @@ from pathlib import Path
 
 from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QFileDialog, QVBoxLayout
-from qfluentwidgets import CheckBox
 
 from dolbytool.core.ffmpeg import MAX_FRAME_SIDE, frame_problem
 from dolbytool.core.project import PlanContext, Project, Track
@@ -22,7 +21,7 @@ from dolbytool.features.soundfield.service import (
     soundfield_target,
     track_speakers,
 )
-from dolbytool.ui import fluent, widgets
+from dolbytool.ui import widgets
 from dolbytool.ui.feature import FeaturePanel
 
 GLB_FILTER = "glTF 二进制模型 (*.glb);;所有文件 (*)"
@@ -45,13 +44,11 @@ class SoundfieldPanel(FeaturePanel):
         self.width_spin = self.spin("sf_w", 64, MAX_FRAME_SIDE, d.width, " px", step=2)
         self.height_spin = self.spin("sf_h", 64, MAX_FRAME_SIDE, d.height, " px", step=2)
         self.fps = self.spin("sf_fps", 10, 120, d.fps, " fps")
-        self.view = fluent.ComboBox()
-        for name, label in VIEWS.items():
-            self.view.addItem(label, name)
+        self.view = self.combo("sf_view", VIEWS, d.view)
         self.head_edit, _button, head_row = widgets.browse_row(
             "留空使用默认听者剪影", self._browse_head, "选择 3D 头模 (.glb)"
         )
-        self.head_edit.textChanged.connect(lambda _t: self.changed.emit())
+        self.persist_edit("sf_head", self.head_edit)
         self.object_scale = self.spin("sf_object_scale", 10, 1000, d.object_scale, " %")
         self.object_scale.setToolTip("动态对象小球的显示比例（100% 为标准尺寸）")
         self.head_scale = self.spin("sf_head_scale", 10, 1000, d.head_scale, " %")
@@ -71,22 +68,20 @@ class SoundfieldPanel(FeaturePanel):
         )
         self.glow = self.spin("sf_glow", 0, 100, d.glow, " %", step=10)
         self.glow.setToolTip("对象周围光晕的强度（0% 为关闭）")
-        self.trail = self.spin("sf_trail", 0, 100, d.trail, " ×0.1 秒")
-        self.trail.setToolTip("对象身后保留的运动轨迹时长（0 为关闭）；对象瞬移时轨迹会截断")
+        self.trail = self.seconds(
+            "sf_trail_seconds", d.trail, 0.0, 10.0, 0.1,
+            "对象身后保留的运动轨迹时长（0 为关闭）；对象瞬移时轨迹会截断",
+        )  # fmt: skip
         self.zoom = self.spin("sf_zoom", 50, 300, d.zoom, " %", step=5)
         self.zoom.setToolTip("相对于刚好容纳整个房间的机位距离，100% 为自动取景，越大越近")
-        self.color_mode = fluent.ComboBox()
-        for name, label in COLOR_MODES.items():
-            self.color_mode.addItem(label, name)
-        self.color_mode.currentIndexChanged.connect(self.changed)
-        self.drop = CheckBox("落地投影")
-        self.drop.setChecked(d.drop)
-        self.drop.setToolTip("从对象向地面画一条虚线并在落点标出圆环，便于判断高度")
-        self.drop.toggled.connect(self.changed)
+        self.color_mode = self.combo("sf_color_mode", COLOR_MODES, d.color_mode)
+        self.drop = self.check(
+            "sf_drop", "落地投影", d.drop, "从对象向地面画一条虚线并在落点标出圆环，便于判断高度"
+        )
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(widgets.section("音轨", self.tracks), 1)
+        layout.addWidget(widgets.section("音轨", self.tracks))
         layout.addWidget(
             widgets.section(
                 "画面与视角",
@@ -110,6 +105,7 @@ class SoundfieldPanel(FeaturePanel):
                 ]),
             )
         )  # fmt: skip
+        layout.addStretch(1)
 
     def _head(self) -> Path | None:
         text = self.head_edit.text().strip()
@@ -154,11 +150,7 @@ class SoundfieldPanel(FeaturePanel):
         for track in project.tracks:
             if track.key not in TRACK_SPEAKERS:
                 continue  # the LFE and the frequency bands have no place in the room
-            text = (
-                f"源音频（{track.path.name}）"
-                if track.is_original
-                else f"{track.label}（{track.key}）"
-            )
+            text = "源音频" if track.is_original else track.label
             speakers = " ".join(track_speakers(track.key, project.atmos_layout))
             tip = f"{track.hint}\n非此音轨扬声器（{speakers}）分配范围内的对象将暗化呈现"
             items.append(widgets.TrackItem(track.key, text, tip))
@@ -195,16 +187,9 @@ class SoundfieldPanel(FeaturePanel):
 
     def save_extra(self) -> None:
         self.settings.setValue("sf_tracks", sorted(self.tracks.keys()))
-        self.settings.setValue("sf_view", self.view.currentData())
-        self.settings.setValue("sf_head", self.head_edit.text().strip())
-        self.settings.setValue("sf_color_mode", self.color_mode.currentData())
-        self.settings.setValue("sf_drop", self.drop.isChecked())
 
     def restore_extra(self) -> None:
         self.tracks.seed(set(self.settings.value("sf_tracks", list(DEFAULT_TRACKS), type=list)))
-        view = self.settings.value("sf_view", SoundfieldSpec().view)
-        self.view.setCurrentIndex(max(0, self.view.findData(view)))
-        self.head_edit.setText(self.settings.value("sf_head", "", type=str))
-        mode = self.settings.value("sf_color_mode", SoundfieldSpec().color_mode)
-        self.color_mode.setCurrentIndex(max(0, self.color_mode.findData(mode)))
-        self.drop.setChecked(self.settings.value("sf_drop", SoundfieldSpec().drop, type=bool))
+        if not self.settings.contains("sf_trail_seconds") and self.settings.contains("sf_trail"):
+            # stored in tenths of a second before
+            self.trail.setValue(self.settings.value("sf_trail", 0, type=int) / 10)

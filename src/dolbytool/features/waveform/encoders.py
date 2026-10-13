@@ -57,18 +57,13 @@ def encoder_for(name: str, width: int, height: int) -> tuple[str, str | None]:
     if name == "h264_nvenc":
         candidates.append("hevc_nvenc")
     candidates.append(FALLBACK_ENCODER)
-    for candidate in candidates:
-        limit = NVENC_MAX_SIDE.get(candidate)
-        if limit and side > limit:
-            continue
-        if candidate != FALLBACK_ENCODER and not encoder_available(candidate):
-            continue
-        if candidate == name:
-            return name, None
-        reason = (
-            f"超出 {name} 最大 {NVENC_MAX_SIDE[name]} px"
-            if NVENC_MAX_SIDE.get(name, side) < side
-            else f"{name} 不可用"
-        )
-        return candidate, f"{reason}，改用 {candidate}"
-    return FALLBACK_ENCODER, f"改用 {FALLBACK_ENCODER}"
+    usable = next(
+        c
+        for c in candidates
+        if c == FALLBACK_ENCODER or side <= NVENC_MAX_SIDE.get(c, side) and encoder_available(c)
+    )
+    if usable == name:
+        return name, None
+    too_big = side > NVENC_MAX_SIDE.get(name, side)
+    reason = f"超出 {name} 最大 {NVENC_MAX_SIDE[name]} px" if too_big else f"{name} 不可用"
+    return usable, f"{reason}，改用 {usable}"
