@@ -32,15 +32,14 @@ from dolbytool.features.stems.dsp import (
     copy_channels_into,
     difference,
     downmix_into,
+    downmix_instrumental_into,
     fit_group,
     height_into,
     lfe_lag,
     lowpass,
     mid_into,
     separate_centre,
-    share_centre_with_surrounds,
     side_into,
-    surround_into,
 )
 from dolbytool.features.stems.dsp.matrix import (
     FRONT_CENTER,
@@ -127,18 +126,7 @@ def _surround(
         return create_pcm_audio(channels, frames, rate, depth)
 
     bands = (StemKind.DOWNMIX, StemKind.LOW, StemKind.HIGH)
-    lag = lfe_lag(source, token) if out.any(StemKind.SURROUND, *bands) else 0
-
-    if StemKind.SURROUND in out:
-        # Both start silent, which the spectral pass needs: it adds into what it is given.
-        with buffer(1) as shared, buffer(2) as surround:
-            share_centre_with_surrounds(
-                source, shared, FRONT_CENTER, pair("Ls"), token,
-                out.rendering(StemKind.SURROUND),
-            )  # fmt: skip
-            surround_into(surround, source, shared, by_side(("Ls", "Lb")), token, lag)
-            fit_group((surround,), token)
-            out.write(StemKind.SURROUND, surround)
+    lag = lfe_lag(source, token) if out.any(StemKind.INSTRUMENTAL, *bands) else 0
 
     def copy(kind: StemKind, channels: tuple[int, ...]) -> None:
         if kind in out:
@@ -147,13 +135,22 @@ def _surround(
                 copy_channels_into(audio, source, channels, token)
                 out.write(kind, audio)
 
-    copy(StemKind.CENTER, (FRONT_CENTER,))
-    copy(StemKind.LFE, (LOW_FREQUENCY,))
     copy(StemKind.FRONT, (FRONT_LEFT, FRONT_RIGHT))
+    copy(StemKind.CENTER, (FRONT_CENTER,))
+    if speakers.has("Ls"):
+        copy(StemKind.SURROUND, pair("Ls"))
+    copy(StemKind.LFE, (LOW_FREQUENCY,))
     if speakers.has("Lb"):
         copy(StemKind.BACK, pair("Lb"))
     if speakers.has("Lw"):
         copy(StemKind.WIDE, pair("Lw"))
+
+    if StemKind.INSTRUMENTAL in out:
+        out.rendering(StemKind.INSTRUMENTAL)
+        with buffer(2) as instrumental:
+            downmix_instrumental_into(instrumental, source, speakers.sides(), token, lag)
+            fit_group((instrumental,), token)
+            out.write(StemKind.INSTRUMENTAL, instrumental)
 
     if StemKind.FRONT_NO_CENTER in out:
         with buffer(2) as cleaned:
@@ -161,6 +158,7 @@ def _surround(
                 source, cleaned, (FRONT_LEFT, FRONT_RIGHT), FRONT_CENTER, token,
                 out.rendering(StemKind.FRONT_NO_CENTER),
             )  # fmt: skip
+            fit_group((cleaned,), token)
             out.write(StemKind.FRONT_NO_CENTER, cleaned)
 
     if StemKind.HEIGHT in out:
@@ -283,7 +281,13 @@ def split(
         speakers = None
     wanted = tuple(k for k in layout_stems(layout, speakers) if k in kinds)
     if not wanted:
-        raise ValueError("所选分轨不属于这种声道布局")
+        logger.warning(
+            "所选分轨 %s 不属于当前音频的声道布局 (%s, channels=%d)",
+            [k.value for k in kinds],
+            speakers or layout,
+            audio.channels,
+        )
+        return {}
     logger.info("%d channels: splitting as %s into %s", audio.channels, speakers or layout, wanted)
     output_dir.mkdir(parents=True, exist_ok=True)
     out = _Writer(source, output_dir, wanted, token, report, start)

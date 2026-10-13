@@ -74,8 +74,17 @@ def layout_for(channels: int, atmos: bool = False) -> StemLayout:
 
 def surround_stems(speakers: SpeakerLayout) -> tuple[StemKind, ...]:
     """What a discrete master of `speakers` splits into: every pair it has, then the folds."""
-    kinds = [StemKind.SURROUND, StemKind.CENTER, StemKind.LFE, StemKind.FRONT]
-    kinds.append(StemKind.FRONT_NO_CENTER)
+    kinds = [
+        StemKind.FRONT,
+        StemKind.CENTER,
+    ]
+    if speakers.has("Ls", "Rs"):
+        kinds.append(StemKind.SURROUND)
+    kinds += [
+        StemKind.LFE,
+        StemKind.INSTRUMENTAL,
+        StemKind.FRONT_NO_CENTER,
+    ]
     if speakers.has("Lb", "Rb"):
         kinds.append(StemKind.BACK)
     if speakers.has("Lw", "Rw"):
@@ -84,8 +93,8 @@ def surround_stems(speakers: SpeakerLayout) -> tuple[StemKind, ...]:
         kinds.append(StemKind.HEIGHT)
         if speakers.has("Tfl", "Tfr", "Tbl", "Tbr"):
             kinds += [StemKind.HEIGHT_FRONT, StemKind.HEIGHT_REAR]
-            if speakers.has("Tsl", "Tsr"):
-                kinds.append(StemKind.HEIGHT_SIDE)
+        if speakers.has("Tsl", "Tsr"):
+            kinds.append(StemKind.HEIGHT_SIDE)
     kinds += [StemKind.DOWNMIX, StemKind.LOW, StemKind.HIGH]
     return tuple(kinds)
 
@@ -113,7 +122,7 @@ STEM_NAMES = {
     "height": "顶部声道缩混",
     "height_front": "顶部前置声道",
     "height_rear": "顶部后置声道",
-    "height_side": "顶部中置声道",
+    "height_side": "顶部侧置声道",
     "downmix": "立体声下混",
     "low": "低频段",
     "mid_band": "中频段",
@@ -124,17 +133,17 @@ STEM_NAMES = {
 }
 
 STEM_HINTS = {
-    "surround": "左/右环绕声道，含后环绕与分摊的中置成分",
+    "surround": "左/右离散环绕声道 (Ls / Rs)",
     "back": "左/右后环绕声道 (Lb / Rb)",
     "wide": "左/右前宽声道 (Lw / Rw)",
     "center": "中置独立声道",
     "lfe": "超低音声道 (Low-Frequency Effects)",
     "front": "左/右前置主声道",
-    "front_no_center": "左/右前置声道（频谱抵消中置成分）",
+    "front_no_center": "左/右前置声道（相干抵消中置成分）",
     "height": "全部顶部声道的立体声缩混",
     "height_front": "左/右顶部前置声道 (Tfl / Tfr)",
     "height_rear": "左/右顶部后置声道 (Tbl / Tbr)",
-    "height_side": "左/右顶部中置声道 (Tsl / Tsr)",
+    "height_side": "左/右顶部侧置声道 (Tsl / Tsr)",
     "downmix": "全声道立体声下混 (Stereo Downmix)",
     "low": "分频点以下频段信号",
     "mid_band": "分频点至 4 kHz 频段信号",
