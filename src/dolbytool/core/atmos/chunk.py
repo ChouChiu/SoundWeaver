@@ -10,6 +10,8 @@ sample for sample what one long run produces there.
 
 from __future__ import annotations
 
+import ctypes
+import platform
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -78,7 +80,6 @@ class _Chunk:
         self.analysis = Analysis(len(_JOC_INPUTS))
         self.joc = joc.JocDecoder()
         self.synthesis: Synthesis | None = None
-        self.matrices = np.empty(0)
         self.objects = np.zeros((0, 0))  # rebuilt samples not yet rendered
         self.skip = 0
         self.queue: list[tuple[int, Frame, np.ndarray]] = []  # (frame, metadata, LFE)
@@ -145,9 +146,7 @@ class _Chunk:
         lead = self.pcm.read(k * FRAME - max(0, start), dtype="float32", always_2d=True)
         self.analysis.history[:, history - lead.shape[0] :] = lead.T[_JOC_INPUTS]
         if k > 0:
-            previous = self.params(k - 1)
-            scratch = np.empty((previous.objects, joc.SLOTS_PER_FRAME, previous.channels, BANDS))
-            self.joc.matrices(previous, scratch)
+            self.joc.advance(self.params(k - 1))
         self.rebuild(self.params(k), self.read(k)[_JOC_INPUTS])
         self.objects = np.zeros((self.objects.shape[0], 0))
 
@@ -155,14 +154,12 @@ class _Chunk:
         if self.synthesis is None:
             self.synthesis = Synthesis(params.objects)
             self.objects = np.zeros((params.objects, 0))
-            self.matrices = np.empty((params.objects, joc.SLOTS_PER_FRAME, params.channels, BANDS))
         elif params.objects != self.objects.shape[0]:
             raise AtmosError("全景声对象数中途改变，暂不支持")
         q = self.analysis(downmix)
         if params.dmx_config in _PHASE_SHIFTED:
             q[_SURROUNDS] *= _UNSHIFT
-        self.joc.matrices(params, self.matrices)
-        rebuilt = self.synthesis(joc.apply(self.matrices, q) * params.clipgain)
+        rebuilt = self.synthesis(self.joc.reconstruct(params, q) * params.clipgain)
         rebuilt, self.skip = rebuilt[:, self.skip :], 0
         self.objects = np.concatenate([self.objects, rebuilt], axis=1)
         while self.queue and self.objects.shape[1] >= FRAME:
@@ -192,6 +189,23 @@ class _Chunk:
             data, clipped = pcm24(adm_block(f, job.adm_channels))
             self.adm.write(data)
             self.clipped += clipped
+
+
+# glibc's mallopt parameters
+_M_TRIM_THRESHOLD, _M_MMAP_THRESHOLD = -1, -3
+
+
+def init_worker() -> None:
+    """Keep freed arrays in the worker's heap.
+
+    Every frame allocates and frees arrays of a few hundred kB; glibc maps the
+    larger ones afresh and hands freed memory straight back, so a fresh worker
+    took a page fault per 4 kB touched, a tenth of its time spent in the kernel.
+    """
+    if platform.libc_ver()[0] == "glibc":
+        libc = ctypes.CDLL(None)
+        libc.mallopt(_M_MMAP_THRESHOLD, 256 << 20)
+        libc.mallopt(_M_TRIM_THRESHOLD, 1 << 30)
 
 
 def decode_chunk(job: ChunkJob) -> ChunkResult:

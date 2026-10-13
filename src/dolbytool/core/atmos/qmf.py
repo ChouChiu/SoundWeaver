@@ -1,4 +1,9 @@
-"""The 64-band complex QMF bank of TS 103 420 clause 7, vectorised over time slots."""
+"""The 64-band complex QMF bank of TS 103 420 clause 7, vectorised over time slots.
+
+Complex products are done as real matrix products: a complex array is read as
+interleaved real and imaginary parts (`view(np.float64)`), so each transform
+is a single BLAS call over every channel and slot at once.
+"""
 
 from __future__ import annotations
 
@@ -11,6 +16,8 @@ BANDS = 64
 LENGTH = 640
 # Analysis followed by synthesis delays the signal by this many samples.
 DELAY = LENGTH - BANDS + 1
+# synthesis weights the last ten slots, each by a 64-sample phase of the prototype
+_TAPS = LENGTH // BANDS
 
 _j = np.arange(2 * BANDS)
 _k = np.arange(BANDS)
@@ -24,6 +31,20 @@ _SYNTHESIS = (
     / BANDS
 )
 
+# u (128 reals) -> Q, its output columns alternating real and imaginary parts
+_ANALYSIS_REAL = np.empty((2 * BANDS, 2 * BANDS))
+_ANALYSIS_REAL[:, 0::2], _ANALYSIS_REAL[:, 1::2] = _ANALYSIS.T.real, _ANALYSIS.T.imag
+# Q read as 128 interleaved reals -> v
+_SYNTHESIS_REAL = np.empty((2 * BANDS, 2 * BANDS))
+_SYNTHESIS_REAL[0::2], _SYNTHESIS_REAL[1::2] = _SYNTHESIS.T.real, -_SYNTHESIS.T.imag
+# The analysis window reads x[64 t : 64 t + 640] backwards; the reversed prototype absorbs that.
+_WINDOW_REVERSED = QWIN[::-1].copy()
+# pcm[t] = sum over k of V[t - k][half k % 2] * QWIN[64 k : 64 k + 64], split by the half
+# read; the window of slots t .. t + 9 has slot t - k at position 9 - k
+_PHASES = QWIN.reshape(_TAPS, BANDS)
+_UPPER_PHASES = _PHASES[_TAPS - 1 :: -2].copy()  # k = 9, 7, 5, 3, 1
+_LOWER_PHASES = _PHASES[_TAPS - 2 :: -2].copy()  # k = 8, 6, 4, 2, 0
+
 
 class Analysis:
     """Real samples in, complex (slots, 64) subband samples out; keeps its history."""
@@ -35,11 +56,11 @@ class Analysis:
         """pcm: (channels, 64 * slots) -> (channels, slots, 64)."""
         x = np.concatenate([self.history, pcm], axis=1)
         self.history = x[:, -(LENGTH - BANDS) :]
-        # Window t holds x[64 t : 64 t + 640]; the state buffer is that window reversed.
-        windows = sliding_window_view(x, LENGTH, axis=1)[:, ::BANDS, ::-1]
-        z = windows * QWIN
-        u = z.reshape(*z.shape[:2], LENGTH // (2 * BANDS), 2 * BANDS).sum(axis=2)
-        return u @ _ANALYSIS.T
+        z = sliding_window_view(x, LENGTH, axis=1)[:, ::BANDS] * _WINDOW_REVERSED
+        channels, slots = z.shape[:2]
+        # the folded state vector, reversed back into the spec's order
+        u = z.reshape(channels * slots, LENGTH // (2 * BANDS), 2 * BANDS).sum(axis=1)[:, ::-1]
+        return (u @ _ANALYSIS_REAL).view(np.complex128).reshape(channels, slots, BANDS)
 
 
 class Synthesis:
@@ -47,21 +68,15 @@ class Synthesis:
 
     def __init__(self, channels: int):
         # the last nine slots' 128-sample vectors, oldest first
-        self.history = np.zeros((channels, LENGTH // BANDS - 1, 2 * BANDS))
+        self.history = np.zeros((channels, _TAPS - 1, 2 * BANDS))
 
     def __call__(self, q: np.ndarray) -> np.ndarray:
         """q: (channels, slots, 64) -> (channels, 64 * slots)."""
-        v = (q @ _SYNTHESIS.T).real  # (channels, slots, 128)
-        slots = v.shape[1]
-        full = np.concatenate([self.history, v], axis=1)
-        self.history = full[:, -(LENGTH // BANDS - 1) :]
-        out = np.zeros((v.shape[0], slots, BANDS))
-        base = LENGTH // BANDS - 1
-        for j in range(LENGTH // (2 * BANDS)):
-            # pcm[t] += V[t-2j][:64] * QWIN[128j:128j+64] + V[t-2j-1][64:] * QWIN[128j+64:128j+128]
-            even = full[:, base - 2 * j : base - 2 * j + slots, :BANDS]
-            odd = full[:, base - 2 * j - 1 : base - 2 * j - 1 + slots, BANDS:]
-            out += (
-                even * QWIN[128 * j : 128 * j + BANDS] + odd * QWIN[128 * j + BANDS : 128 * (j + 1)]
-            )
-        return out.reshape(v.shape[0], -1)
+        channels, slots = q.shape[:2]
+        v = np.ascontiguousarray(q).view(np.float64).reshape(-1, 2 * BANDS) @ _SYNTHESIS_REAL
+        full = np.concatenate([self.history, v.reshape(channels, slots, 2 * BANDS)], axis=1)
+        self.history = full[:, slots:]
+        windows = sliding_window_view(full, _TAPS, axis=1).reshape(channels, slots, 2, BANDS, _TAPS)
+        out = np.einsum("ctnm,mn->ctn", windows[:, :, 1, :, 0::2], _UPPER_PHASES)
+        out += np.einsum("ctnm,mn->ctn", windows[:, :, 0, :, 1::2], _LOWER_PHASES)
+        return out.reshape(channels, -1)

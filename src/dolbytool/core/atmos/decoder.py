@@ -20,6 +20,7 @@ import os
 import pickle
 import tempfile
 from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
 from itertools import pairwise
@@ -37,7 +38,15 @@ from dolbytool.core.speakers import DEFAULT_ATMOS, SpeakerLayout
 
 from .adm import AdmFile
 from .bitstream import BitstreamError
-from .chunk import CORE_CHANNELS, FRAME, AtmosError, ChunkJob, ChunkResult, decode_chunk
+from .chunk import (
+    CORE_CHANNELS,
+    FRAME,
+    AtmosError,
+    ChunkJob,
+    ChunkResult,
+    decode_chunk,
+    init_worker,
+)
 from .eac3 import INDEPENDENT, syncframes
 from .emdf import JOC_PAYLOAD, OAMD_PAYLOAD, object_payloads
 from .oamd import OamdDecoder
@@ -249,7 +258,7 @@ class _Decode:
     @contextmanager
     def _pool(self) -> Iterator[multiprocessing.pool.Pool]:
         # spawn: the caller may be a thread of a Qt application, which must not fork
-        pool = multiprocessing.get_context("spawn").Pool(self.workers)
+        pool = multiprocessing.get_context("spawn").Pool(self.workers, init_worker)
         try:
             yield pool
             pool.close()
@@ -300,16 +309,24 @@ def _prepare(source: Path, token: CancellationToken) -> Iterator[tuple[list, Pat
     with tempfile.TemporaryDirectory(dir=work_root()) as scratch:
         work = Path(scratch)
         stream, core, reference = work / "stream.ec3", work / "core.wav", work / "reference.wav"
-        run_ffmpeg(
-            ["-i", str(source), "-map", "0:a:0", "-c", "copy", "-f", "eac3", str(stream)], token
-        )
-        run_ffmpeg(["-f", "eac3", "-i", str(stream), "-c:a", "pcm_f32le", str(core)], token)
-        # The front left channel as the container presents it, to find its timeline by.
-        run_ffmpeg(
-            ["-i", str(source), "-map", "0:a:0", "-af", "channelmap=map=FL:channel_layout=mono",
-             "-c:a", "pcm_f32le", str(reference)],
-            token,
-        )  # fmt: skip
+
+        def decode_core() -> None:
+            run_ffmpeg(
+                ["-i", str(source), "-map", "0:a:0", "-c", "copy", "-f", "eac3", str(stream)], token
+            )
+            run_ffmpeg(["-f", "eac3", "-i", str(stream), "-c:a", "pcm_f32le", str(core)], token)
+
+        # The front left channel as the container presents it, to find its timeline by;
+        # decoded alongside the core, each a full pass over the file.
+        with ThreadPoolExecutor(1) as side:
+            front = side.submit(
+                run_ffmpeg,
+                ["-i", str(source), "-map", "0:a:0", "-af", "channelmap=map=FL:channel_layout=mono",
+                 "-c:a", "pcm_f32le", str(reference)],
+                token,
+            )  # fmt: skip
+            decode_core()
+            front.result()
         try:
             frames = list(syncframes(stream.read_bytes()))
         except BitstreamError as error:
@@ -347,9 +364,10 @@ def _container_offset(pcm: sf.SoundFile, ref: sf.SoundFile) -> int:
     pcm.seek(probe_start)
     span = pcm.read(reach + _MATCH_FRAMES, dtype="float32", always_2d=True)[:, 0]
     windows = np.lib.stride_tricks.sliding_window_view(span, probe.size)
-    exact = np.flatnonzero((windows == probe).all(axis=1))
-    if exact.size:
-        return int(exact[0])
+    # the offsets whose first sample matches, checked in full
+    for offset in np.flatnonzero(windows[:, 0] == probe[0]):
+        if np.array_equal(windows[offset], probe):
+            return int(offset)
     # Not bit-identical after all: fall back on the best correlation.
     offset = int(np.argmax(windows @ probe))
     logger.warning("atmos: no exact timeline match, correlating (offset %d)", offset)

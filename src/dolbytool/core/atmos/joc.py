@@ -135,52 +135,74 @@ def dequantise(p: ObjectParams) -> np.ndarray:
     return dq[:, :, BAND_MAPS[p.bands]]
 
 
+_RAMP = np.arange(1, SLOTS_PER_FRAME + 1)
+
+
 class JocDecoder:
     """Holds joc_mix_mtx_prev across frames."""
 
     def __init__(self) -> None:
         self.prev: np.ndarray | None = None  # (objects, channels, 64)
 
-    def matrices(self, frame: JocFrame, out: np.ndarray) -> None:
-        """Pseudocode 6: the interpolated matrix into `out`, (objects, slots, channels, 64)."""
-        shape = (frame.objects, frame.channels, BANDS)
-        if self.prev is None or self.prev.shape != shape:
-            self.prev = np.zeros(shape)
-        n = SLOTS_PER_FRAME
-        ramp = np.arange(1, n + 1)[:, None, None]
-        # the common case, one smooth data point, goes through as one array
+    def reconstruct(self, frame: JocFrame, downmix: np.ndarray) -> np.ndarray:
+        """Pseudocodes 6 and 7: downmix (channels, slots, 64) -> objects (objects, slots, 64).
+
+        An object with one smooth data point, the common case, glides linearly
+        from the previous matrix to the new one, so its output is prev . x plus
+        a ramp times (new - prev) . x: two matrix products per subband instead
+        of a matrix per slot.
+        """
+        prev = self._prev(frame)
+        out = np.zeros((frame.objects, SLOTS_PER_FRAME, BANDS), dtype=np.complex128)
         smooth: list[int] = []
         targets: list[np.ndarray] = []
         for obj, p in enumerate(frame.params):
             if p is None:
                 # No side information: the object is silent this frame.
-                out[obj] = 0.0
-                self.prev[obj] = 0.0
+                prev[obj] = 0.0
                 continue
             dq = dequantise(p)
-            prev = self.prev[obj]
             if not p.steep and len(dq) == 1:
                 smooth.append(obj)
                 targets.append(dq[0])
                 continue
-            if not p.steep:
-                half = n // 2
-                first = prev + ramp[:half] * (dq[0] - prev) / half
-                second = dq[0] + (ramp[half:] - half) * (dq[1] - dq[0]) / (n - half)
-                out[obj] = np.concatenate([first, second])
-            else:
-                out[obj] = prev
-                out[obj, p.offsets[0] :] = dq[0]
-                if len(dq) > 1:
-                    out[obj, p.offsets[1] :] = dq[1]
-            self.prev[obj] = dq[-1]
+            out[obj] = np.einsum("tcb,ctb->tb", _interpolated(p, dq, prev[obj]), downmix)
+            prev[obj] = dq[-1]
         if smooth:
-            prev = self.prev[smooth][:, None]
-            target = np.stack(targets)
-            out[smooth] = prev + ramp * (target[:, None] - prev) / n
-            self.prev[smooth] = target
+            # (subbands, 2 objects, channels) @ (subbands, channels, slots as real pairs)
+            start, target = prev[smooth], np.stack(targets)
+            weights = np.concatenate([start, target - start]).transpose(2, 0, 1)
+            x = np.ascontiguousarray(downmix.transpose(2, 0, 1)).view(np.float64)
+            y = (weights @ x).view(np.complex128)
+            n = len(smooth)
+            out[smooth] = (y[:, :n] + y[:, n:] * (_RAMP / SLOTS_PER_FRAME)).transpose(1, 2, 0)
+            prev[smooth] = target
+        return out
+
+    def advance(self, frame: JocFrame) -> None:
+        """Move joc_mix_mtx_prev past `frame` without rebuilding anything."""
+        prev = self._prev(frame)
+        for obj, p in enumerate(frame.params):
+            prev[obj] = 0.0 if p is None else dequantise(p)[-1]
+
+    def _prev(self, frame: JocFrame) -> np.ndarray:
+        shape = (frame.objects, frame.channels, BANDS)
+        if self.prev is None or self.prev.shape != shape:
+            self.prev = np.zeros(shape)
+        return self.prev
 
 
-def apply(matrices: np.ndarray, downmix: np.ndarray) -> np.ndarray:
-    """Pseudocode 7: downmix (channels, slots, 64) complex -> objects (objects, slots, 64)."""
-    return np.einsum("otcb,ctb->otb", matrices, downmix)
+def _interpolated(p: ObjectParams, dq: np.ndarray, prev: np.ndarray) -> np.ndarray:
+    """Pseudocode 6 for a steep or two-point object: its matrix per slot, (slots, channels, 64)."""
+    n = SLOTS_PER_FRAME
+    ramp = _RAMP[:, None, None]
+    if not p.steep:
+        half = n // 2
+        first = prev + ramp[:half] * (dq[0] - prev) / half
+        second = dq[0] + (ramp[half:] - half) * (dq[1] - dq[0]) / (n - half)
+        return np.concatenate([first, second])
+    out = np.repeat(prev[None], n, axis=0)
+    out[p.offsets[0] :] = dq[0]
+    if len(dq) > 1:
+        out[p.offsets[1] :] = dq[1]
+    return out
