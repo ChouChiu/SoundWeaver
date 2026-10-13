@@ -185,8 +185,11 @@ class _Decode:
                                 meta.program,
                                 meta.object_count,
                             )
-                    if adm is not None and meta.object_count != adm.channels:
-                        raise AtmosError("全景声对象数中途改变，ADM 无法容纳")
+                    if adm is not None and (
+                        meta.object_count != adm.objects
+                        or meta.program.bed_labels != adm.program.bed_labels
+                    ):
+                        raise AtmosError("全景声对象布局中途改变，ADM 无法容纳")
                     if starts_chunk:
                         snapshots.append((oamd_state, renderer.state() if k else None))
                     tracer.metadata(k, meta)
@@ -252,7 +255,7 @@ class _Decode:
             layout=self.layout,
             speakers=self.speakers.backing_path if self.speakers is not None else None,
             adm=scratch / f"adm-{index}.pcm" if adm is not None else None,
-            adm_channels=adm.channels if adm is not None else 0,
+            adm_sources=adm.sources if adm is not None else (),
         )
 
     @contextmanager

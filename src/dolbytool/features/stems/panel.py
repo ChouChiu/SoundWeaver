@@ -19,8 +19,8 @@ COLUMNS = 3
 ADM_TEXT = "导出 ADM BWF（含空间对象三维轨迹）"
 ADM_TIP = (
     "仅适用于杜比全景声源：将各动态对象与声床分轨导出为 24-bit 多声道 BWF WAV，\n"
-    "内嵌 ITU-R BS.2076-2 axml 与 chna 元数据，记录空间三维轨迹与平移增益，\n"
-    "兼容标准 ADM 查看器、杜比渲染器及专业 DAW"
+    "按杜比全景声母带 ADM 规范 (Dolby Atmos Master ADM Profile) 内嵌 axml 与 chna 元数据，\n"
+    "记录空间三维轨迹，可导入杜比渲染器、ADM 查看器及专业 DAW"
 )
 LAYOUT_TIP = (
     "杜比全景声源渲染到的扬声器布局，决定可导出的分轨与声场视频的分轨暗化；\n"

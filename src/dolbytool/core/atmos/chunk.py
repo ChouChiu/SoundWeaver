@@ -65,7 +65,7 @@ class ChunkJob:
     layout: SpeakerLayout  # what the speaker feeds and the trace's shares are in
     speakers: Path | None  # planar float32 (speakers, container samples) buffer to fill
     adm: Path | None  # where this stretch's ADM PCM goes
-    adm_channels: int
+    adm_sources: tuple[int | None, ...]  # the OAMD object on each ADM track; None is silence
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,7 +186,7 @@ class _Chunk:
                 f, job.layout.index["LFE"]
             )
         if self.adm is not None:
-            data, clipped = pcm24(adm_block(f, job.adm_channels))
+            data, clipped = pcm24(adm_block(f, job.adm_sources))
             self.adm.write(data)
             self.clipped += clipped
 
