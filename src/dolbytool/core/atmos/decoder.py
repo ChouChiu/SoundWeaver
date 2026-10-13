@@ -269,11 +269,13 @@ class _Decode:
 
 _TRACE_SUFFIX = ".trace.pickle"
 _KEEP_TRACES = 16
+# bumped whenever the shares a layout gets change, so older traces go unread
+_TRACE_VERSION = 2
 
 
 def _trace_path(source: Path, layout: SpeakerLayout) -> Path:
     # the shares are the layout's, so each layout keeps a trace of its own
-    return cache_dir() / f"{content_key(source)}.{layout.name}{_TRACE_SUFFIX}"
+    return cache_dir() / f"{content_key(source)}.{layout.name}.v{_TRACE_VERSION}{_TRACE_SUFFIX}"
 
 
 def _cached_trace(source: Path, layout: SpeakerLayout) -> ObjectTrace | None:

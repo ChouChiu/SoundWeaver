@@ -140,7 +140,7 @@ class Tracer:
                 continue
             keys = self.keys.setdefault(index, [])
             for u in meta.updates[index]:
-                x, y, z = u.render.position
+                x, y, z = u.render.warped(meta.trim).position
                 if not u.render.elevation:
                     z = 0.0
                 active = u.active and u.gain_db != -math.inf

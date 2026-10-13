@@ -23,7 +23,7 @@ from dolbytool.core.speakers import SpeakerLayout
 from . import joc
 from .adm import adm_block, pcm24
 from .bitstream import BitstreamError
-from .oamd import Frame, OamdDecoder, ObjectState
+from .oamd import Frame, OamdDecoder, OamdState
 from .qmf import BANDS, DELAY, LENGTH, Analysis, Synthesis
 from .render import Renderer, RendererState, joc_objects
 from .sinks import RenderedFrame, container_span, speaker_feeds
@@ -58,7 +58,7 @@ class ChunkJob:
     joc_from: int  # syncframe of joc[0]
     joc: tuple[bytes, ...]  # JOC payloads from joc_from through stop (or the last frame)
     oamd: tuple[bytes, ...]  # OAMD payloads of [start, stop)
-    oamd_state: list[ObjectState]
+    oamd_state: OamdState
     gains: RendererState | None  # None at the start of the stream
     first: int  # the container's span of the stream's timeline
     last: int

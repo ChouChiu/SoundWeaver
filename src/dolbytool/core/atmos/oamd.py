@@ -26,6 +26,18 @@ RAMP_DURATIONS = (32, 64, 128, 256, 320, 480, 1000, 1001, 1024, 1600, 1601, 1602
 DISTANCE_FACTORS = (1.1, 1.3, 1.6, 2.0, 2.5, 3.2, 4.0, 5.0, 6.3, 7.9, 10.0, 12.6, 15.8, 20.0, 25.1, 50.1)  # fmt: skip
 
 OBJECT_ELEMENT = 1
+TRIM_ELEMENT = 2
+# global_trim_mode (table 33)
+_DEFAULT_TRIM, _DISABLE_TRIM, _CUSTOM_TRIM = 0, 1, 2
+# trim_centre (table 35), and trim_surround and trim_height (tables 36, 37), in dB
+_CENTRE_TRIMS = (6, 3, 1.5, 0.75, -0.75, -1.5, -3, -4.5, -6, -7.5, -9, -10.5, -12, -13.5, -16, -36)
+_TRIMS = (None, None, None, None, *_CENTRE_TRIMS[4:])  # 0 to 3 reserved
+NUM_TRIM_CONFIGS = 9
+# Which trim configuration a layout without heights takes.  The standard
+# leaves the order of the nine to the renderer; rendering the objects of four
+# masters to 5.1 against their 5.1 core matches only with 1 as 5.1, whose
+# flags differ between them; 0 and 2 follow in the usual 2.0, 5.1, 7.1 order.
+TRIM_CONFIGS = {"2.0": 0, "5.1": 1, "7.1": 2}
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +57,77 @@ class Render:
     @property
     def position(self) -> tuple[float, float, float]:
         return (min(1.0, self.x_bits / 62), min(1.0, self.y_bits / 62), self.z_bits / 15)
+
+    def warped(self, trim: Trim) -> Render:
+        """The position the renderer takes: warp_mode 1 doubles y (table 32)."""
+        return replace(self, y_bits=min(62.0, 2 * self.y_bits)) if trim.warp else self
+
+
+@dataclass(frozen=True, slots=True)
+class Levels:
+    """The trims of one trim configuration, in dB; the defaults are Dolby's automatic trim."""
+
+    centre: float = 0.0
+    surround: float = -3.0
+    height: float = -3.0
+
+
+DEFAULT_TRIM = Levels()
+
+
+@dataclass(frozen=True, slots=True)
+class Trim:
+    """The trim_element (clause 5.6.5): how to render to a layout with fewer speakers.
+
+    The balance controls are read past but not applied.
+    """
+
+    warp: bool = False  # warp_mode 0b01
+    # per trim configuration, None where trimming is disabled
+    configs: tuple[Levels | None, ...] = (DEFAULT_TRIM,) * NUM_TRIM_CONFIGS
+    # OAMD indices of the objects trimming leaves alone
+    exempt: frozenset[int] = frozenset()
+
+    def levels(self, layout: str, obj: int) -> Levels | None:
+        """The trims of object `obj` rendered to `layout`, None if it is not trimmed."""
+        config = TRIM_CONFIGS.get(layout)
+        return None if config is None or obj in self.exempt else self.configs[config]
+
+
+def _trim_element(bits: BitReader, objects: int) -> Trim:
+    warp = bits.read(2) == 0b01
+    bits.skip(2)  # reserved
+    mode = bits.read(2)
+    if mode == _CUSTOM_TRIM:
+        configs = tuple(_trim_config(bits) for _ in range(NUM_TRIM_CONFIGS))
+    elif mode in (_DEFAULT_TRIM, _DISABLE_TRIM):
+        configs = (None if mode == _DISABLE_TRIM else DEFAULT_TRIM,) * NUM_TRIM_CONFIGS
+    else:
+        raise BitstreamError("reserved global_trim_mode")
+    exempt = frozenset()
+    if bits.flag():  # b_disable_trim_per_obj
+        exempt = frozenset(obj for obj in range(objects) if bits.flag())
+    return Trim(warp, configs, exempt)
+
+
+def _trim_config(bits: BitReader) -> Levels | None:
+    if bits.flag():  # b_default_trim
+        return DEFAULT_TRIM
+    if bits.flag():  # b_disable_trim
+        return None
+    present = bits.read(5)  # trim_balance_presence[4..0]
+    levels: dict[str, float] = {}
+    for flag, name, table in (
+        (0b10000, "centre", _CENTRE_TRIMS),
+        (0b01000, "surround", _TRIMS),
+        (0b00100, "height", _TRIMS),
+    ):
+        if present & flag and (db := table[bits.read(4)]) is not None:
+            levels[name] = db
+    for flag in (0b00010, 0b00001):  # the balances: a direction bit and an amount
+        if present & flag:
+            bits.skip(5)
+    return replace(DEFAULT_TRIM, **levels)
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +160,7 @@ class Frame:
     object_count: int
     program: Program
     updates: list[list[Update]]  # per object, in time order
+    trim: Trim = Trim()
 
 
 @dataclass(slots=True)
@@ -124,14 +208,21 @@ def _program(bits: BitReader) -> Program:
     return Program(tuple(labels), isf, dynamic)
 
 
+OamdState = tuple[list[ObjectState], Trim]
+
+
 class OamdDecoder:
-    """Carries the state that differential and reused values refer back to."""
+    """Carries the state that differential and reused values refer back to.
 
-    def __init__(self, state: list[ObjectState] | None = None) -> None:
-        self.state: list[ObjectState] = state if state is not None else []
+    The trim settings hold until a trim_element changes them.
+    """
 
-    def snapshot(self) -> list[ObjectState]:
-        return [replace(s) for s in self.state]
+    def __init__(self, state: OamdState | None = None) -> None:
+        self.state: list[ObjectState] = state[0] if state is not None else []
+        self.trim = state[1] if state is not None else Trim()
+
+    def snapshot(self) -> OamdState:
+        return [replace(s) for s in self.state], self.trim
 
     def decode(self, payload: bytes) -> Frame:
         bits = BitReader(payload)
@@ -161,9 +252,12 @@ class OamdDecoder:
             bits.skip(1)  # b_discard_unknown_element
             if kind == OBJECT_ELEMENT:
                 self._object_element(bits, frame)
-                if bits.pos > end:
-                    raise BitstreamError("object_element overran its size")
+            elif kind == TRIM_ELEMENT:
+                self.trim = _trim_element(bits, count)
+            if bits.pos > end:
+                raise BitstreamError("oa_element overran its size")
             bits.pos = end
+        frame.trim = self.trim
         return frame
 
     def _object_element(self, bits: BitReader, frame: Frame) -> None:

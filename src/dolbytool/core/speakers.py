@@ -69,6 +69,11 @@ class SpeakerLayout:
                     out[name] = (i / span if span else 0.5, y, z)
         return out
 
+    @cached_property
+    def surrounds(self) -> tuple[int, ...]:
+        """Channels of the floor speakers behind the front row: what a surround trim lowers."""
+        return tuple(self.index[name] for y, names in self.floor if y > 0 for name in names)
+
     @property
     def heights(self) -> tuple[str, ...]:
         return tuple(name for _, names in self.top for name in names)
