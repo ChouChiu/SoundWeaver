@@ -80,6 +80,8 @@ _FIRST_OBJECT_ID = 0x100B
 _INTERPOLATION = "0.005208"
 # Section 2.5.2: a glide is sampled into blocks less than this far apart.
 _SAMPLE_PERIOD = 0.02
+# Events closer than a timecode's last digit are one event: the later one wins.
+_SAME_TIME = 1e-5
 
 
 def _assignment(label: str, seven: bool, backs: bool) -> str | None:
@@ -214,20 +216,22 @@ def _events(keys: list[Key], duration: float) -> list[tuple[float, tuple[float, 
             here = target
             continue
         start = here
+        here = _lerp(start, target, min(1.0, (end - t) / ramp))
         steps = int(ramp / _SAMPLE_PERIOD) + 1
         for k in range(1, steps + 1):
             at = t + ramp * k / steps
-            if at >= end:
+            if at > end + _SAME_TIME:
+                # cut short by the next key: hold where the glide got to
+                timed.append((end, here))
                 break
             timed.append((at, _lerp(start, target, k / steps)))
-        here = _lerp(start, target, min(1.0, (end - t) / ramp))
 
     events: list[tuple[float, tuple[float, float, float]]] = []
     for t, position in timed:
         t = max(0.0, t)
         if t >= duration:
             break
-        if events and t <= events[-1][0]:
+        if events and t <= events[-1][0] + _SAME_TIME:
             events.pop()
         if not events or events[-1][1] != position:
             events.append((t, position))
