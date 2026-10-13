@@ -258,6 +258,7 @@ def _front_transfer(
     bins = N_FFT // 2 + 1
     cross = np.zeros((2, bins), dtype=np.complex128)
     auto_centre = np.zeros(bins)
+    auto_front = np.zeros((2, bins))
     for block in block_plan(source.frames, source.sample_rate):
         token.raise_if_cancelled()
         centre = stft(
@@ -272,14 +273,22 @@ def _front_transfer(
                 N_FFT,
                 HOP,
             )
+            auto_front[row] += np.sum(np.abs(spectrum) ** 2, axis=0)
             cross[row] += np.sum(spectrum * np.conj(centre), axis=0)
-    transfer = cross / (auto_centre + TRANSFER_FLOOR * auto_centre.max() + _EPSILON)
+
+    raw_transfer = cross / (auto_centre + TRANSFER_FLOOR * auto_centre.max() + _EPSILON)
+    # Bounded magnitude (<= -3 dB) and coherence gating:
+    # A center bleed into front can never exceed unity or inject uncorrelated arrangement energy.
+    coherence = np.clip(np.abs(cross) ** 2 / (auto_front * auto_centre + _EPSILON), 0.0, 1.0)
+    mag = np.clip(np.abs(raw_transfer), 0.0, 0.70710678)
+    transfer = mag * np.exp(1j * np.angle(raw_transfer)) * coherence
     logger.info(
         "centre leaks into the front pair at up to %.3f, %.4f on average",
         float(np.abs(transfer).max()),
         float(np.abs(transfer).mean()),
     )
     return transfer
+
 
 
 def cancel_centre_from_front(

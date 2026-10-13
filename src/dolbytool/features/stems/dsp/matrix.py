@@ -200,6 +200,17 @@ def downmix_into(
     _fold_into(destination, source, source.samples[FRONT_CENTER], sides, token, lfe_lag, front=True)
 
 
+def downmix_instrumental_into(
+    destination: AudioData,
+    source: AudioData,
+    sides: Sides,
+    token: CancellationToken,
+    lfe_lag: int = 0,
+) -> None:
+    """Fold a surround master to stereo instrumental (BS.775 without the centre lead vocal)."""
+    _fold_into(destination, source, None, sides, token, lfe_lag, front=True)
+
+
 def surround_into(
     destination: AudioData,
     source: AudioData,
@@ -226,7 +237,7 @@ def surround_into(
 def _fold_into(
     destination: AudioData,
     source: AudioData,
-    centre: np.ndarray,
+    centre: np.ndarray | None,
     sides: Sides,
     token: CancellationToken,
     lfe_lag: int,
@@ -239,9 +250,9 @@ def _fold_into(
         token.raise_if_cancelled()
         end = min(start + BLOCK_FRAMES, destination.frames)
         block = source.samples[:, start:end]
-        shared = DOWNMIX_COEFFICIENT * centre[start:end] + LFE_DOWNMIX_COEFFICIENT * _shifted(
-            lfe, start, end, lfe_lag
-        )
+        shared = LFE_DOWNMIX_COEFFICIENT * _shifted(lfe, start, end, lfe_lag)
+        if centre is not None:
+            shared = shared + DOWNMIX_COEFFICIENT * centre[start:end]
         left = shared + DOWNMIX_COEFFICIENT * block[left_side].sum(axis=0)
         right = shared + DOWNMIX_COEFFICIENT * block[right_side].sum(axis=0)
         if front:
@@ -249,3 +260,4 @@ def _fold_into(
             right += block[FRONT_RIGHT]
         destination.samples[0, start:end] = left
         destination.samples[1, start:end] = right
+

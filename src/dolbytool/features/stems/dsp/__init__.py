@@ -4,6 +4,7 @@ from .crossover import difference, lowpass
 from .matrix import (
     copy_channels_into,
     downmix_into,
+    downmix_instrumental_into,
     fit_group,
     height_into,
     lfe_lag,
@@ -22,6 +23,7 @@ __all__ = [
     "copy_channels_into",
     "difference",
     "downmix_into",
+    "downmix_instrumental_into",
     "fit_group",
     "height_into",
     "lfe_lag",
