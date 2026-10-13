@@ -10,6 +10,7 @@ panels to plan, with an output folder of its own.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
 from dataclasses import replace
 from pathlib import Path
@@ -55,6 +56,8 @@ from dolbytool.features.source.service import Inspection, folder_cover, inspect
 from dolbytool.ui import fluent, widgets
 from dolbytool.ui.background import Each
 
+logger = logging.getLogger(__name__)
+
 _LYRICS, _STATUS = 2, 3
 _SETTLE_MS = 400
 ALBUM_TIP = (
@@ -65,7 +68,6 @@ ALBUM_TIP = (
 
 class BatchPanel(widgets.Card):
     changed = Signal()
-    log = Signal(str)
 
     def __init__(self, settings: QSettings, parent: QWidget | None = None) -> None:
         super().__init__("批量处理", parent)
@@ -315,7 +317,7 @@ class BatchPanel(widgets.Card):
         message = f"已导入 {len(new)} 份歌词，{len(new) - len(left)} 份已分配"
         if left:
             message += f"；未能匹配：{'、'.join(left)}，可选中音轨后用「指定歌词」手动指定"
-        self.log.emit(message)
+        logger.info(message)
         self._sync()
         return len(new)
 
@@ -373,7 +375,7 @@ class BatchPanel(widgets.Card):
             self.settings.setValue("last_dir", str(self.tracks[-1].audio.parent))
             if (album or any(p.is_dir() for p in paths)) and not self.is_album:
                 self.album.setChecked(True)
-            self.log.emit(f"已加入 {added} 首音轨，共 {len(self.tracks)} 首")
+            logger.info("已加入 %d 首音轨，共 %d 首", added, len(self.tracks))
         self._sync()
         return added
 
@@ -401,7 +403,7 @@ class BatchPanel(widgets.Card):
             result = Inspection(audio, error=str(result) or type(result).__name__)
         error = result.error
         if error:
-            self.log.emit(f"无法读取 {audio.name}：{error}")
+            logger.warning("无法读取 %s：%s", audio.name, error)
             # ffmpeg says where it failed first and why last
             error = error.strip().splitlines()[-1].removeprefix(f"{audio}: ")
         self.tracks[index] = replace(

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-import logging
 import sys
 from pathlib import Path
 
 
 def main() -> int:
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    from dolbytool.core.logs import setup_logging
+
+    setup_logging()
     from PySide6.QtCore import QLibraryInfo, QLocale, QTranslator
     from PySide6.QtGui import QIcon
     from PySide6.QtWidgets import QApplication
@@ -23,7 +24,9 @@ def main() -> int:
     app.setWindowIcon(QIcon.fromTheme("video-x-generic"))
 
     from dolbytool.ui import fluent
+    from dolbytool.ui.logs import InterruptHandler, route_qt_messages
 
+    route_qt_messages()
     fluent.apply_theme(app)
 
     # The interface is Chinese; make Qt's own dialogs and context menus match.
@@ -47,6 +50,7 @@ def main() -> int:
         if len(args) > 1:
             window.set_cover(args[1])
     window.show()
+    interrupt = InterruptHandler(app, window.close_without_asking)  # noqa: F841 - lives with the loop
     return app.exec()
 
 

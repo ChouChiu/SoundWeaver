@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from PySide6.QtCore import QSettings, QSize
 from PySide6.QtGui import QColor, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout
@@ -17,6 +19,8 @@ from dolbytool.features.gradient.service import GradientSpec, gradient_step, gra
 from dolbytool.ui import fluent, widgets
 from dolbytool.ui.background import Latest
 from dolbytool.ui.feature import FeaturePanel
+
+logger = logging.getLogger(__name__)
 
 # The reference pair from the original command, until a cover supplies its own.
 DEFAULT_TOP = "#343b3d"
@@ -106,7 +110,7 @@ class GradientPanel(FeaturePanel):
         if isinstance(result, Exception):
             # Pillow and ffmpeg raise many kinds of error for a broken picture
             self.swatch_hint.setText("封面无法读取")
-            self.log.emit(f"封面取色失败：{result}")
+            logger.warning("封面取色失败：%s", result)
             return
         swatches = result
         self.swatch_hint.hide()

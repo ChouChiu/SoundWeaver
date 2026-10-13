@@ -37,7 +37,6 @@ class Worker(QThread):
     step_progress = Signal(int, int, str)
     # step index, outcome, note or error, seconds taken
     step_finished = Signal(int, str, str, float)
-    log = Signal(str)
     # the outcome of the whole run: done, failed (some step) or cancelled
     finished_with = Signal(str)
 
@@ -73,7 +72,7 @@ class Worker(QThread):
             self.step_finished.emit(index, Outcome.SKIPPED, "", 0.0)
             return
         self.step_started.emit(index)
-        self.log.emit(f"开始 {step.title}")
+        logger.info("开始 %s", step.title)
         started = time.monotonic()
 
         def report(value: int, message: str) -> None:
@@ -83,16 +82,15 @@ class Worker(QThread):
         try:
             note = step.run(self.token, report) or ""
         except ProcessingCancelled:
-            self.log.emit(f"已取消 {step.title}")
+            logger.info("已取消 %s", step.title)
             self.step_finished.emit(index, Outcome.CANCELLED, "", time.monotonic() - started)
             return
         except Exception as error:  # surface every failure in the log, keep the app alive
-            logger.exception("step failed: %s", step.title)
             self._failed = True
             message = str(error) or type(error).__name__
-            self.log.emit(f"失败 {step.title}：{message}")
+            logger.exception("失败 %s：%s", step.title, message)
             self.step_finished.emit(index, Outcome.FAILED, message, time.monotonic() - started)
             return
         seconds = time.monotonic() - started
-        self.log.emit(f"完成 {step.title}（{seconds:.1f} 秒）" + (f"：{note}" if note else ""))
+        logger.info("完成 %s（%.1f 秒）%s", step.title, seconds, f"：{note}" if note else "")
         self.step_finished.emit(index, Outcome.DONE, note, seconds)

@@ -9,6 +9,7 @@ task list shows how they go.
 
 from __future__ import annotations
 
+import logging
 import os
 from collections import Counter
 from collections.abc import Iterable
@@ -62,9 +63,12 @@ from dolbytool.features.source.panel import SourcePanel
 from dolbytool.features.source.service import kind_of
 from dolbytool.ui import fluent, widgets
 from dolbytool.ui.feature import FeaturePanel
+from dolbytool.ui.logs import LogPanelHandler
 from dolbytool.ui.outputs import OutputList
 from dolbytool.ui.tasks import TaskView
 from dolbytool.ui.worker import Outcome, Worker
+
+logger = logging.getLogger(__name__)
 
 APP_TITLE = "杜比视频素材工具"
 SINGLE, BATCH = 0, 1
@@ -146,6 +150,7 @@ class MainWindow(QMainWindow):
         self.setAcceptDrops(True)
         self.settings = QSettings()
         self.worker: Worker | None = None
+        self._ask_on_close = True
         self._restoring = True
         self._missing_tools = ffmpeg.missing_tools()
 
@@ -154,11 +159,9 @@ class MainWindow(QMainWindow):
         self.panels = output_panels(self.settings)
         for inputs in (self.source, self.batch):
             inputs.changed.connect(self._sources_changed)
-            inputs.log.connect(self._log)
         for panel in self.panels:
             panel.changed.connect(self._update_ready)
             panel.tracks_changed.connect(self._tracks_changed)
-            panel.log.connect(self._log)
 
         self._build_actions()
         self.setCentralWidget(self._build_body())
@@ -324,6 +327,10 @@ class MainWindow(QMainWindow):
         self.log.setReadOnly(True)
         self.log.setPlaceholderText("运行日志")
         self.log.setMaximumBlockCount(5000)
+        # every log record from now on, from any thread, also lands here
+        self._log_handler = LogPanelHandler()
+        self._log_handler.lines.line.connect(self.log.appendPlainText)
+        logging.getLogger().addHandler(self._log_handler)
         self.splitter = QSplitter(Qt.Orientation.Vertical)
         self.splitter.addWidget(widgets.section("任务", self.tasks))
         self.splitter.addWidget(widgets.section("日志", self.log))
@@ -723,16 +730,15 @@ class MainWindow(QMainWindow):
             fluent.tell(self, "无法开始", f"无法创建输出目录：{error}")
             return
         self._save_settings()
-        self._log(f"—— 开始执行 {len(steps)} 项任务，输出目录：{self._output_label(dirs)}")
+        logger.info("—— 开始执行 %d 项任务，输出目录：%s", len(steps), self._output_label(dirs))
         for note in notes:
-            self._log(note)
+            logger.info(note)
         self.tasks.set_steps(steps)
         self._go(ROUTE_TASKS)
         self.worker = Worker(steps, self)
         self.worker.step_started.connect(self.tasks.started)
         self.worker.step_progress.connect(self._on_progress)
         self.worker.step_finished.connect(self._on_step_finished)
-        self.worker.log.connect(self._log)
         self.worker.finished_with.connect(self._on_finished)
         self._set_running(True)
         self.worker.start()
@@ -817,7 +823,7 @@ class MainWindow(QMainWindow):
             Outcome.FAILED: f"处理完成（{len(failures)} 项失败）",
         }[Outcome(outcome)]
         self._show_status(message)
-        self._log(f"—— {message}")
+        logger.info("—— %s", message)
         QApplication.alert(self)
         if outcome == Outcome.DONE:
             self._notify_done(message)
@@ -872,9 +878,6 @@ class MainWindow(QMainWindow):
         if out and out.is_dir():
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(out)))
 
-    def _log(self, text: str) -> None:
-        self.log.appendPlainText(text)
-
     def _about(self) -> None:
         fluent.tell(
             self,
@@ -927,9 +930,14 @@ class MainWindow(QMainWindow):
         route = self.settings.value("route", ROUTE_INPUTS, type=str)
         self._go(route if route in self._routes else ROUTE_INPUTS)
 
+    def close_without_asking(self) -> None:
+        """Close, cancelling a run without the confirmation (Ctrl+C in the terminal)."""
+        self._ask_on_close = False
+        self.close()
+
     def closeEvent(self, event: QCloseEvent) -> None:
         if self.worker:
-            if not fluent.ask(
+            if self._ask_on_close and not fluent.ask(
                 self, "任务运行中", "后台任务尚未完成，确定要取消任务并退出吗？", accept="退出"
             ):
                 event.ignore()
@@ -941,4 +949,5 @@ class MainWindow(QMainWindow):
         for panel in self.panels:
             panel.shutdown()
         self._save_settings()
+        logging.getLogger().removeHandler(self._log_handler)
         super().closeEvent(event)

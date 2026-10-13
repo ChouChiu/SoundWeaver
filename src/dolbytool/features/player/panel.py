@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -40,6 +41,8 @@ from dolbytool.ui import fluent, widgets
 from dolbytool.ui.feature import FeaturePanel
 from dolbytool.ui.fonts import CREDITS_TIP, FontList
 from dolbytool.ui.video_preview import VideoPreview
+
+logger = logging.getLogger(__name__)
 
 ATMOS_TAG = "Dolby Atmos"
 
@@ -500,7 +503,7 @@ class PlayerPanel(FeaturePanel):
         if path is None:
             self.preview_status.setText(f"预览失败：{error}" if error else "已取消")
             if error:
-                self.log.emit(f"播放器预览失败：{error}")
+                logger.error("播放器预览失败：%s", error)
             return
         self.preview_status.setText("")
         if self._dialog is None:

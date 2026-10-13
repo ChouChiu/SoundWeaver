@@ -26,7 +26,6 @@ class FeaturePanel(QWidget):
     changed = Signal()
     # a setting of this panel changed which tracks every project has
     tracks_changed = Signal()
-    log = Signal(str)
 
     title = ""
     icon = ""

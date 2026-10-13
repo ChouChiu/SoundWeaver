@@ -8,6 +8,7 @@ for the output panels.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -24,6 +25,8 @@ from dolbytool.core.speakers import SpeakerLayout, atmos_layout
 from dolbytool.features.source.service import Inspection, inspect, kind_of
 from dolbytool.ui import widgets
 from dolbytool.ui.background import Latest
+
+logger = logging.getLogger(__name__)
 
 AUDIO_FILTER = (
     "音频文件 (*.m4a *.mp4 *.mka *.mkv *.ec3 *.eac3 *.ac3 *.thd *.wav *.flac);;所有文件 (*)"
@@ -74,7 +77,6 @@ def _thumbnail(cover: Path, side: int) -> tuple[QImage, bool]:
 
 class SourcePanel(widgets.Card):
     changed = Signal()
-    log = Signal(str)
 
     def __init__(self, settings: QSettings, parent: QWidget | None = None) -> None:
         super().__init__("源文件", parent)
@@ -293,7 +295,7 @@ class SourcePanel(widgets.Card):
         if found != current:
             edit.setText(str(found) if found else "")
             if found:
-                self.log.emit(f"已自动使用{what}：{found.name}")
+                logger.info("已自动使用%s：%s", what, found.name)
         return found
 
     def _show_cover(self) -> None:
@@ -317,7 +319,7 @@ class SourcePanel(widgets.Card):
         if image.isNull():
             self.cover_preview.setText("无法读取")
             if isinstance(result, Exception):
-                self.log.emit(f"封面无法读取：{result}")
+                logger.warning("封面无法读取：%s", result)
             return
         self.cover_preview.setPixmap(QPixmap.fromImage(image))
         kind = "动态封面（播放器视频中循环播放）" if moving else "封面"
