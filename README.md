@@ -2,7 +2,6 @@
 
 SoundWeaver 是一个多声道与杜比全景声（Dolby Atmos）制作工具。支持从 E-AC-3 JOC 提取多声道分轨与 ADM BWF 母带，并一键生成 Apple Music 风格动态歌词、完整播放器、滚动波形以及 3D 空间声场视频。
 
----
 
 ## 快速上手
 
@@ -25,7 +24,6 @@ uv run soundweaver
 
 > **提示**：首次生成视频时，程序会自动下载配套的 `chrome-headless-shell`（约 100 MB，保存在 `~/.cache/dolbytool/chrome`）。
 
----
 
 ## 主要功能
 
@@ -52,7 +50,6 @@ uv run soundweaver
 - **整张专辑无缝连播**：可将整张专辑渲染为一个连续的长视频，音频无损拼接，切歌时封面、歌词与背景流体平滑过渡。
 - **动态封面支持**：支持将无声循环视频（`.mp4` / `.mov` 等）作为 Apple Music 动态封面，自动抽帧并在各并行分段中时间轴精确循环。
 
----
 
 ## 常用操作与快捷键
 
@@ -65,7 +62,6 @@ uv run soundweaver
 | **导入专辑** | `Ctrl + Shift + M` | 导入整个专辑目录并自动开启专辑模式 |
 | **打开产物** | 双击已完成任务 | 在任务与日志面板双击即可用系统默认程序打开对应输出文件 |
 
----
 
 ## 性能与渲染机制
 
@@ -78,7 +74,6 @@ uv run soundweaver
 
 > **调试模式**：运行前加入环境变量 `DOLBYTOOL_DEBUG=1 uv run soundweaver` 即可在终端输出浏览器切片耗时与 WebGL 详细诊断日志。
 
----
 
 ## 开源许可
 
