@@ -197,7 +197,8 @@ def downmix_into(
     where a bound from the channel peaks would hold the whole group down for a
     coincidence that never happens.
     """
-    _fold_into(destination, source, source.samples[FRONT_CENTER], sides, token, lfe_lag, front=True)
+    centre = source.samples[FRONT_CENTER] if source.channels > FRONT_CENTER else None
+    _fold_into(destination, source, centre, sides, token, lfe_lag, front=True)
 
 
 def downmix_instrumental_into(
@@ -245,12 +246,17 @@ def _fold_into(
     front: bool,
 ) -> None:
     left_side, right_side = list(sides[0]), list(sides[1])
-    lfe = source.samples[LOW_FREQUENCY]
+    has_lfe = source.channels > LOW_FREQUENCY
+    lfe = source.samples[LOW_FREQUENCY] if has_lfe else None
     for start in range(0, destination.frames, BLOCK_FRAMES):
         token.raise_if_cancelled()
         end = min(start + BLOCK_FRAMES, destination.frames)
         block = source.samples[:, start:end]
-        shared = LFE_DOWNMIX_COEFFICIENT * _shifted(lfe, start, end, lfe_lag)
+        shared = (
+            LFE_DOWNMIX_COEFFICIENT * _shifted(lfe, start, end, lfe_lag)
+            if lfe is not None
+            else 0.0
+        )
         if centre is not None:
             shared = shared + DOWNMIX_COEFFICIENT * centre[start:end]
         left = shared + DOWNMIX_COEFFICIENT * block[left_side].sum(axis=0)

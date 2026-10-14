@@ -74,17 +74,16 @@ def layout_for(channels: int, atmos: bool = False) -> StemLayout:
 
 def surround_stems(speakers: SpeakerLayout) -> tuple[StemKind, ...]:
     """What a discrete master of `speakers` splits into: every pair it has, then the folds."""
-    kinds = [
-        StemKind.FRONT,
-        StemKind.CENTER,
-    ]
+    kinds = [StemKind.FRONT]
+    if speakers.has("C"):
+        kinds.append(StemKind.CENTER)
     if speakers.has("Ls", "Rs"):
         kinds.append(StemKind.SURROUND)
-    kinds += [
-        StemKind.LFE,
-        StemKind.INSTRUMENTAL,
-        StemKind.FRONT_NO_CENTER,
-    ]
+    if speakers.has("LFE"):
+        kinds.append(StemKind.LFE)
+    kinds.append(StemKind.INSTRUMENTAL)
+    if speakers.has("C"):
+        kinds.append(StemKind.FRONT_NO_CENTER)
     if speakers.has("Lb", "Rb"):
         kinds.append(StemKind.BACK)
     if speakers.has("Lw", "Rw"):
@@ -102,7 +101,7 @@ def surround_stems(speakers: SpeakerLayout) -> tuple[StemKind, ...]:
 def layout_stems(layout: StemLayout, speakers: SpeakerLayout | None) -> tuple[StemKind, ...]:
     if layout is StemLayout.MONO:
         return _MONO_STEMS
-    if layout is StemLayout.STEREO or speakers is None:
+    if layout is StemLayout.STEREO or speakers is None or len(speakers.channels) < SURROUND_CHANNELS:
         return _STEREO_STEMS
     return surround_stems(speakers)
 

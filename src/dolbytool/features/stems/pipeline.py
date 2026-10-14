@@ -126,7 +126,11 @@ def _surround(
         return create_pcm_audio(channels, frames, rate, depth)
 
     bands = (StemKind.DOWNMIX, StemKind.LOW, StemKind.HIGH)
-    lag = lfe_lag(source, token) if out.any(StemKind.INSTRUMENTAL, *bands) else 0
+    lag = (
+        lfe_lag(source, token)
+        if speakers.has("LFE") and out.any(StemKind.INSTRUMENTAL, *bands)
+        else 0
+    )
 
     def copy(kind: StemKind, channels: tuple[int, ...]) -> None:
         if kind in out:
@@ -136,10 +140,12 @@ def _surround(
                 out.write(kind, audio)
 
     copy(StemKind.FRONT, (FRONT_LEFT, FRONT_RIGHT))
-    copy(StemKind.CENTER, (FRONT_CENTER,))
+    if speakers.has("C"):
+        copy(StemKind.CENTER, (FRONT_CENTER,))
     if speakers.has("Ls"):
         copy(StemKind.SURROUND, pair("Ls"))
-    copy(StemKind.LFE, (LOW_FREQUENCY,))
+    if speakers.has("LFE"):
+        copy(StemKind.LFE, (LOW_FREQUENCY,))
     if speakers.has("Lb"):
         copy(StemKind.BACK, pair("Lb"))
     if speakers.has("Lw"):
@@ -152,7 +158,7 @@ def _surround(
             fit_group((instrumental,), token)
             out.write(StemKind.INSTRUMENTAL, instrumental)
 
-    if StemKind.FRONT_NO_CENTER in out:
+    if StemKind.FRONT_NO_CENTER in out and speakers.has("C"):
         with buffer(2) as cleaned:
             cancel_centre_from_front(
                 source, cleaned, (FRONT_LEFT, FRONT_RIGHT), FRONT_CENTER, token,
