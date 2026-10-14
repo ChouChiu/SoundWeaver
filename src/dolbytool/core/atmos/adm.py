@@ -163,7 +163,7 @@ def _cartesian(x: float, y: float, z: float) -> tuple[float, float, float]:
 
 
 def _timecode(seconds: float) -> str:
-    seconds = max(0.0, seconds)
+    seconds = max(0.0, round(seconds, 5))
     h, rest = divmod(seconds, 3600)
     m, s = divmod(rest, 60)
     return f"{int(h):02d}:{int(m):02d}:{s:08.5f}"
@@ -191,7 +191,7 @@ def adm_block(f: RenderedFrame, sources: tuple[int | None, ...]) -> np.ndarray:
 def pcm24(block: np.ndarray) -> tuple[bytes, int]:
     """(channels, samples) as interleaved little-endian 24-bit PCM, and how many samples clipped."""
     scaled = np.round(block.T * _FULL_SCALE)
-    over = np.abs(scaled) > _FULL_SCALE - 1
+    over = (scaled > _FULL_SCALE - 1) | (scaled < -_FULL_SCALE)
     clipped = int(over.sum())
     if clipped:
         np.clip(scaled, -_FULL_SCALE, _FULL_SCALE - 1, out=scaled)

@@ -315,12 +315,6 @@ def _prepare(source: Path, token: CancellationToken) -> Iterator[tuple[list, Pat
         work = Path(scratch)
         stream, core, reference = work / "stream.ec3", work / "core.wav", work / "reference.wav"
 
-        def decode_core() -> None:
-            run_ffmpeg(
-                ["-i", str(source), "-map", "0:a:0", "-c", "copy", "-f", "eac3", str(stream)], token
-            )
-            run_ffmpeg(["-f", "eac3", "-i", str(stream), "-c:a", "pcm_f32le", str(core)], token)
-
         # The front left channel as the container presents it, to find its timeline by;
         # decoded alongside the core, each a full pass over the file.
         with ThreadPoolExecutor(1) as side:
@@ -330,17 +324,33 @@ def _prepare(source: Path, token: CancellationToken) -> Iterator[tuple[list, Pat
                  "-c:a", "pcm_f32le", str(reference)],
                 token,
             )  # fmt: skip
-            decode_core()
+            run_ffmpeg(
+                ["-i", str(source), "-map", "0:a:0", "-c", "copy", "-f", "eac3", str(stream)], token
+            )
+            try:
+                all_frames = list(syncframes(stream.read_bytes()))
+            except BitstreamError as error:
+                raise AtmosError(f"E-AC-3 码流无法切帧：{error}") from error
+            if not all_frames:
+                raise AtmosError("全景声码流中没有音频帧")
+
+            # Atmos JOC and OAMD metadata are carried in independent substream 0.
+            # If dependent substreams (e.g. 7.1) or secondary substreams are present,
+            # filter to independent substream 0 so FFmpeg decodes the 5.1 core for JOC reconstruction.
+            frames = [f for f in all_frames if f.stream_type == INDEPENDENT and f.substream == 0]
+            if not frames:
+                raise AtmosError("全景声码流中没有独立主子流 (substream 0)")
+            if len(frames) != len(all_frames):
+                logger.info(
+                    "atmos: filtered %d frames (dependent/secondary substreams) -> %d independent substream 0 frames",
+                    len(all_frames),
+                    len(frames),
+                )
+                stream.write_bytes(b"".join(f.data for f in frames))
+
+            run_ffmpeg(["-f", "eac3", "-i", str(stream), "-c:a", "pcm_f32le", str(core)], token)
             front.result()
-        try:
-            frames = list(syncframes(stream.read_bytes()))
-        except BitstreamError as error:
-            raise AtmosError(f"E-AC-3 码流无法切帧：{error}") from error
         stream.unlink()
-        if not frames:
-            raise AtmosError("全景声码流中没有音频帧")
-        if any(f.stream_type != INDEPENDENT for f in frames):
-            raise AtmosError("暂不支持带从属子流的全景声（7.1 及以上的声床）")
         with sf.SoundFile(core) as pcm, sf.SoundFile(reference) as ref:
             if pcm.channels != CORE_CHANNELS or pcm.frames != len(frames) * FRAME:
                 raise AtmosError(f"核心解码与码流对不上：{pcm.channels} 声道，{pcm.frames} 采样")
@@ -368,6 +378,8 @@ def _container_offset(pcm: sf.SoundFile, ref: sf.SoundFile) -> int:
     reach = _MAX_LEAD_FRAMES * FRAME
     pcm.seek(probe_start)
     span = pcm.read(reach + _MATCH_FRAMES, dtype="float32", always_2d=True)[:, 0]
+    if span.size < probe.size:
+        return 0
     windows = np.lib.stride_tricks.sliding_window_view(span, probe.size)
     # the offsets whose first sample matches, checked in full
     for offset in np.flatnonzero(windows[:, 0] == probe[0]):

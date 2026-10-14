@@ -33,7 +33,7 @@ class StemsPanel(FeaturePanel):
     description_key = "stems.description"
     _title = "分轨"
     icon = "view-media-equalizer"
-    _description = "按声道布局分离导出 WAV 分轨；杜比全景声源可渲染为 5.1 至 9.1.6 等布局，支持导出标准 ADM BWF"
+    _description = "按声道布局分离导出 WAV 分轨；杜比全景声源可渲染为 2.0 至 9.1.6 等多种布局，支持导出标准 ADM BWF"
     enabled_key = "do_stems"
 
     def __init__(self, settings: QSettings, parent=None) -> None:

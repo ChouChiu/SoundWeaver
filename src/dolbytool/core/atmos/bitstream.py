@@ -88,7 +88,7 @@ class Huffman:
 
     __slots__ = ("_table", "_tree", "_width")
 
-    def __init__(self, tree: tuple[tuple[int, int], ...], width: int = 8) -> None:
+    def __init__(self, tree: tuple[tuple[int, int], ...], width: int = 11) -> None:
         self._tree, self._width = tree, width
         self._table = [self._walk(prefix) for prefix in range(1 << width)]
 

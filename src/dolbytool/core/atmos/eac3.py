@@ -21,13 +21,24 @@ class Syncframe:
 
 def syncframes(stream: bytes) -> Iterator[Syncframe]:
     pos = 0
+    sync_bytes = SYNCWORD.to_bytes(2, "big")
     while pos + 6 <= len(stream):
         if (stream[pos] << 8 | stream[pos + 1]) != SYNCWORD:
-            raise BitstreamError(f"E-AC-3 sync lost at byte {pos}")
+            # Trailing zero-padding from containers (MP4/M4A) at EOF
+            if not stream[pos:].strip(b"\x00"):
+                break
+            # Resynchronize by locating the next valid syncword
+            next_pos = stream.find(sync_bytes, pos + 1)
+            if next_pos == -1 or next_pos + 6 > len(stream):
+                break
+            pos = next_pos
         bits = BitReader(stream, (pos + 2) * 8, (pos + 6) * 8)
         stream_type = bits.read(2)
         substream = bits.read(3)
         size = (bits.read(11) + 1) * 2  # frmsiz counts 16-bit words
+        if pos + size > len(stream):
+            # Guard against truncated syncframe at the end of stream
+            break
         fscod = bits.read(2)
         blocks = 6 if fscod == 3 else (1, 2, 3, 6)[bits.read(2)]
         yield Syncframe(stream_type, substream, blocks, stream[pos : pos + size])

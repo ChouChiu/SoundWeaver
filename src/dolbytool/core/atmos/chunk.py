@@ -35,11 +35,15 @@ CORE_CHANNELS = 6
 _JOC_INPUTS = [0, 1, 2, 4, 5]
 _SURROUNDS = slice(3, 5)
 _LFE = 3
-# joc_dmx_config_idx values this decoder handles (table 47): a 5.X downmix,
-# plain or with the surrounds shifted 90 degrees before encoding.
-FIVE_CHANNEL_CONFIGS = (0, 3)
+# joc_dmx_config_idx values per ETSI TS 103 420 Table 47:
+# 0: 5-channel downmix (no phase shift)
+# 1: 7-channel downmix (no phase shift)
+# 2: 7-channel downmix with Lb/Rb 90-degree phase shift
+# 3: 5-channel downmix with Ls/Rs 90-degree phase shift
+# 4: 7-channel downmix with Ls/Rs and Lb/Rb 90-degree phase shift
+SUPPORTED_CONFIGS = (0, 1, 2, 3, 4)
 _PHASE_SHIFTED = (3, 4)
-# The encoder delays Ls and Rs by 90 degrees; a panned source shows up in L
+# The encoder delays surround channels by 90 degrees; a panned source shows up in L
 # and Ls a quarter cycle apart, and multiplying the surround subbands by -j
 # brings it back in phase before the real-valued JOC matrix combines them.
 _UNSHIFT = -1j
@@ -101,7 +105,7 @@ class _Chunk:
             params = joc.parse(self.job.joc[k - self.job.joc_from])
         except BitstreamError as error:
             raise AtmosError(f"第 {k} 帧的全景声元数据无法解析：{error}") from error
-        if params.dmx_config not in FIVE_CHANNEL_CONFIGS:
+        if params.dmx_config not in SUPPORTED_CONFIGS:
             raise AtmosError(
                 f"暂不支持这种全景声下混配置（joc_dmx_config_idx={params.dmx_config}）"
             )
@@ -159,6 +163,8 @@ class _Chunk:
         q = self.analysis(downmix)
         if params.dmx_config in _PHASE_SHIFTED:
             q[_SURROUNDS] *= _UNSHIFT
+        if params.dmx_config in (2, 4) and q.shape[0] >= 7:
+            q[5:7] *= _UNSHIFT
         rebuilt = self.synthesis(self.joc.reconstruct(params, q) * params.clipgain)
         rebuilt, self.skip = rebuilt[:, self.skip :], 0
         self.objects = np.concatenate([self.objects, rebuilt], axis=1)
@@ -183,7 +189,7 @@ class _Chunk:
         if self.speakers is not None:
             at = k * FRAME + f.span.start - job.first
             self.speakers[:, at : at + f.span.stop - f.span.start] = speaker_feeds(
-                f, job.layout.index["LFE"]
+                f, job.layout.index.get("LFE")
             )
         if self.adm is not None:
             data, clipped = pcm24(adm_block(f, job.adm_sources))

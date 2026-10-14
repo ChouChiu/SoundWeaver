@@ -257,7 +257,7 @@
   "label.preview_start": "Start:",
   "label.preview_length": "Duration:",
   "stems.title": "Stem Split",
-  "stems.description": "Split and export audio stems by channel layout; Dolby Atmos can be rendered up to 9.1.6 or exported as ADM BWF.",
+  "stems.description": "Split and export audio stems by channel layout; Dolby Atmos can be rendered from 2.0 up to 9.1.6 or exported as ADM BWF.",
   "stems.adm_text": "Export ADM BWF (with 3D object trajectories)",
   "stems.adm_tip": "Atmos only: exports bed and dynamic objects into 24-bit multichannel BWF WAV\nwith embedded axml and chna metadata conforming to Dolby Atmos Master ADM Profile.\nCompatible with Dolby Atmos Renderer, ADM viewers, and professional DAWs.",
   "stems.layout_tip": "Speaker layout to render Dolby Atmos into, determining available stems\nand dimming in sound field videos. ADM BWF is unaffected.",

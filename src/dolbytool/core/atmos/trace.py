@@ -105,7 +105,7 @@ def measure(f: RenderedFrame) -> Measure:
     pick = slice(rows[0], rows[-1] + 1) if len(rows) == rows[-1] - rows[0] + 1 else rows
     essence, gains = f.essence[pick], f.gains[pick]
     peaks = np.max(np.abs(essence * f.envelope[pick]), axis=1)
-    energy = np.einsum("ot,ots,ots->os", np.square(essence), gains, gains)
+    energy = np.einsum("ot,ots->os", np.square(essence), np.square(gains))
     totals = energy.sum(axis=1)
     out: Measure = []
     for index, peak, row, total in zip(indices, peaks, energy, totals, strict=True):

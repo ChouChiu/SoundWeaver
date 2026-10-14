@@ -257,7 +257,7 @@
   "label.preview_start": "起点：",
   "label.preview_length": "时长：",
   "stems.title": "分轨",
-  "stems.description": "按声道布局分离导出 WAV 分轨；杜比全景声源可渲染为 5.1 至 9.1.6 等布局，支持导出标准 ADM BWF",
+  "stems.description": "按声道布局分离导出 WAV 分轨；杜比全景声源可渲染为 2.0 至 9.1.6 等多种布局，支持导出标准 ADM BWF",
   "stems.adm_text": "导出 ADM BWF（含空间对象三维轨迹）",
   "stems.adm_tip": "仅适用于杜比全景声源：将各动态对象与声床分轨导出为 24-bit 多声道 BWF WAV，\n按杜比全景声母带 ADM 规范 (Dolby Atmos Master ADM Profile) 内嵌 axml 与 chna 元数据，\n记录空间三维轨迹，可导入杜比渲染器、ADM 查看器及专业 DAW",
   "stems.layout_tip": "杜比全景声源渲染到的扬声器布局，决定可导出的分轨与声场视频的分轨暗化；\n床声道在没有对应扬声器的布局中按其位置摆放，ADM BWF 不受影响",

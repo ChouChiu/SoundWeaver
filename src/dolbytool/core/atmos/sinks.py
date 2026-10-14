@@ -28,8 +28,18 @@ def container_span(index: int, samples: int, first: int, last: int) -> slice:
     return slice(lo - a, max(lo, hi) - a)
 
 
-def speaker_feeds(f: RenderedFrame, lfe: int) -> np.ndarray:
+def speaker_feeds(f: RenderedFrame, lfe: int | None = None) -> np.ndarray:
     """The render of the frame's span, (speakers, samples) as float32; `lfe` is the LFE's channel."""
+    span = f.span
+    if span.stop - span.start < f.essence.shape[1]:
+        gains = f.gains[:, span, :]
+        essence = f.essence[:, span]
+        speakers = np.einsum("ots,ot->ts", gains, essence)
+        if lfe is not None and 0 <= lfe < speakers.shape[1]:
+            speakers[:, lfe] = f.lfe[span]
+        return speakers.T.astype(np.float32)
+
     speakers = np.einsum("ots,ot->ts", f.gains, f.essence)
-    speakers[:, lfe] = f.lfe
-    return speakers[f.span].T.astype(np.float32)
+    if lfe is not None and 0 <= lfe < speakers.shape[1]:
+        speakers[:, lfe] = f.lfe
+    return speakers[span].T.astype(np.float32)

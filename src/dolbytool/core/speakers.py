@@ -34,6 +34,7 @@ BED_POSITIONS = {
 # With back surrounds in the bed, Ls and Rs are the side pair.
 SIDE_POSITIONS = {"Ls": (0.0, 0.5, 0.0), "Rs": (1.0, 0.5, 0.0)}
 
+_STEREO: Row = (0.0, ("L", "R"))
 _FRONT: Row = (0.0, ("L", "C", "R"))
 _SURROUND: Row = (1.0, ("Ls", "Rs"))
 _SIDE: Row = (0.5, ("Ls", "Rs"))
@@ -94,6 +95,7 @@ class SpeakerLayout:
 
 
 LAYOUTS = (
+    SpeakerLayout("2.0", ("L", "R"), (_STEREO,)),
     SpeakerLayout("5.1", ("L", "R", "C", "LFE", "Ls", "Rs"), (_FRONT, _SURROUND)),
     SpeakerLayout(
         "5.1.2", ("L", "R", "C", "LFE", "Ls", "Rs", "Tsl", "Tsr"),
@@ -103,6 +105,11 @@ LAYOUTS = (
         "5.1.4", ("L", "R", "C", "LFE", "Ls", "Rs", "Tfl", "Tfr", "Tbl", "Tbr"),
         (_FRONT, _SURROUND), (_TOP_FRONT, _TOP_BACK),
     ),
+    SpeakerLayout(
+        "5.1.6",
+        ("L", "R", "C", "LFE", "Ls", "Rs", "Tfl", "Tfr", "Tbl", "Tbr", "Tsl", "Tsr"),
+        (_FRONT, _SURROUND), (_TOP_FRONT, _TOP_MIDDLE, _TOP_BACK),
+    ),
     SpeakerLayout("7.1", ("L", "R", "C", "LFE", "Lb", "Rb", "Ls", "Rs"), (_FRONT, _SIDE, _BACK)),
     SpeakerLayout(
         "7.1.2", ("L", "R", "C", "LFE", "Lb", "Rb", "Ls", "Rs", "Tsl", "Tsr"),
@@ -111,6 +118,17 @@ LAYOUTS = (
     SpeakerLayout(
         "7.1.4", ("L", "R", "C", "LFE", "Lb", "Rb", "Ls", "Rs", "Tfl", "Tfr", "Tbl", "Tbr"),
         (_FRONT, _SIDE, _BACK), (_TOP_FRONT, _TOP_BACK),
+    ),
+    SpeakerLayout(
+        "7.1.6",
+        ("L", "R", "C", "LFE", "Lb", "Rb", "Ls", "Rs",
+         "Tfl", "Tfr", "Tbl", "Tbr", "Tsl", "Tsr"),
+        (_FRONT, _SIDE, _BACK), (_TOP_FRONT, _TOP_MIDDLE, _TOP_BACK),
+    ),
+    SpeakerLayout(
+        "9.1.2",
+        ("L", "R", "C", "LFE", "Lb", "Rb", "Lw", "Rw", "Ls", "Rs", "Tsl", "Tsr"),
+        (_FRONT, _WIDE, _SIDE, _BACK), (_TOP_MIDDLE,),
     ),
     SpeakerLayout(
         "9.1.4",
@@ -131,10 +149,11 @@ DEFAULT_ATMOS = BY_NAME["5.1.4"]
 
 # ffmpeg layout names whose channel order matches one of the layouts above
 _FFMPEG = {
+    "stereo": "2.0", "2.0": "2.0",
     "5.1": "5.1", "5.1(side)": "5.1",
-    "5.1.2": "5.1.2", "5.1.2(back)": "5.1.2", "5.1.4": "5.1.4",
-    "7.1": "7.1", "7.1.2": "7.1.2", "7.1.4": "7.1.4",
-    "9.1.4": "9.1.4", "9.1.6": "9.1.6",
+    "5.1.2": "5.1.2", "5.1.2(back)": "5.1.2", "5.1.4": "5.1.4", "5.1.6": "5.1.6",
+    "7.1": "7.1", "7.1.2": "7.1.2", "7.1.4": "7.1.4", "7.1.6": "7.1.6",
+    "9.1.2": "9.1.2", "9.1.4": "9.1.4", "9.1.6": "9.1.6",
 }  # fmt: skip
 
 
