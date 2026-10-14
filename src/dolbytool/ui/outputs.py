@@ -8,6 +8,7 @@ from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import QAbstractItemView, QGridLayout, QListWidgetItem, QWidget
 from qfluentwidgets import CaptionLabel, IconWidget, ListWidget, StrongBodyLabel, SwitchButton
 
+from dolbytool.core.i18n import t
 from dolbytool.ui import fluent
 from dolbytool.ui.feature import FeaturePanel
 
@@ -19,7 +20,7 @@ class _Row(QWidget):
         self.check.setOnText("")
         self.check.setOffText("")
         self.check.label.hide()
-        self.check.setToolTip(f"启用/禁用 {panel.title}")
+        self.check.setToolTip(t("switch.enable_disable", name=panel.title))
         self.check.checkedChanged.connect(panel.set_enabled)
         icon = IconWidget(fluent.icon(panel.icon))
         icon.setFixedSize(20, 20)
@@ -52,7 +53,8 @@ class _Row(QWidget):
 
     def set_status(self, text: str, problem: bool) -> None:
         self.status.setText(text)
-        self.status.setToolTip(text)
+        # only show a tooltip if text is long enough to wrap/truncate
+        self.status.setToolTip(text if len(text) > 20 else "")
         fluent.secondary(self.status, problem)
 
 

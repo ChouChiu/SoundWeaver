@@ -86,9 +86,11 @@ class PreviewJob(QThread):
 
 
 class PlayerPanel(FeaturePanel):
-    title = "播放器视频"
+    title_key = "player.title"
+    description_key = "player.description"
+    _title = "播放器视频"
     icon = "media-playback-start"
-    description = (
+    _description = (
         "基于 AMLL Prebuilt Player 渲染完整播放器页面：封面、曲目信息、进度条、播放控件、"
         "流动背景与逐字滚动歌词，横屏 / 竖屏自动切换布局，可混入音频"
     )
@@ -98,134 +100,148 @@ class PlayerPanel(FeaturePanel):
 
     def __init__(self, settings: QSettings, parent=None) -> None:
         super().__init__(settings, parent)
+        from dolbytool.core.i18n import t
+
         d = PlayerSpec()
 
         # ---- frame and encoding
         self.width_spin = self.spin("pl_w", 64, MAX_FRAME_SIDE, d.width, " px", step=2)
         self.height_spin = self.spin("pl_h", 64, MAX_FRAME_SIDE, d.height, " px", step=2)
-        self.height_spin.setToolTip("高度大于宽度时自动使用竖屏（移动端）布局")
+        self.height_spin.setToolTip(t("player.height_tip"))
         self.fps = self.spin("pl_fps", 10, 240, d.fps, " fps")
-        self.fps.setToolTip(
-            "高帧率下逐字扫光与滚动更顺滑，适合高刷新率屏幕观看；渲染耗时随帧率成正比增加\n"
-            "上传平台多数只支持到 60 fps，部分支持 120 fps"
-        )
-        self.codec = self.combo("pl_codec", CODECS, d.codec)
-        self.codec.setToolTip(
-            "硬件编码器不可用时将自动回退至 libx264 软件编码；透明背景必须使用 VP9"
-        )
+        self.fps.setToolTip(t("player.fps_tip"))
+        codecs_labels = {
+            "libx264": t("option.encoder.libx264"),
+            "h264_nvenc": t("option.encoder.nvenc_h264"),
+            "hevc_nvenc": t("option.encoder.nvenc_hevc"),
+            "vp9": t("option.encoder.vp9"),
+        }
+        self.codec = self.combo("pl_codec", codecs_labels, d.codec)
+        self.codec.setToolTip(t("player.codec_tip"))
         self.quality = self.spin("pl_quality", 0, 63, d.quality)
-        self.quality.setToolTip(
-            "数值越小画质越高、文件越大；软件编码为 CRF（0 为无损），NVENC 为 CQ（最小 1）\n"
-            "NVENC 19 与无损相比约 54 dB，肉眼已难分辨；更清晰优先关闭“快速截图”"
-        )
+        self.quality.setToolTip(t("player.quality_tip"))
         self.codec.currentIndexChanged.connect(self._codec_changed)
-        self.audio_mode = self.combo("pl_audio", AUDIO_MODES, d.audio_mode)
-        self.audio_mode.setToolTip(
-            "将所选音轨混入视频；MKV 原样复制任何音频（含全景声与 PCM 分轨），\n"
-            "WebM 只能容纳 Opus，选择复制时也会转码为 Opus"
-        )
+        audio_modes_labels = {
+            "encode": t("option.audio_mode.encode"),
+            "copy": t("option.audio_mode.copy"),
+            "none": t("option.audio_mode.none"),
+        }
+        self.audio_mode = self.combo("pl_audio", audio_modes_labels, d.audio_mode)
+        self.audio_mode.setToolTip(t("player.audio_mode_tip"))
         self.audio_mode.currentIndexChanged.connect(self._sync_enabled)
         # the stem to mix in, by kind, so every track of a batch takes the same one
         self._audio_key = ORIGINAL
         self.audio_track = fluent.ComboBox()
 
-        self.audio_track.setToolTip(
-            "混入视频的音轨：源音频或任一分轨\n"
-            "分轨尚未导出时会自动补上分轨任务；批量与专辑中每首都取同一种分轨"
-        )
+        self.audio_track.setToolTip(t("player.audio_track_tip"))
         self.audio_track.activated.connect(self._audio_track_picked)
         self.fast_capture = self.check(
-            "pl_fast_capture", "快速截图", d.fast_capture,
-            "浏览器取帧改用 JPEG 而非无损 PNG，渲染约快 1.5 倍，细节略软；透明背景不受影响",
+            "pl_fast_capture", t("player.fast_capture"), d.fast_capture,
+            t("player.fast_capture_tip"),
         )  # fmt: skip
         self.supersample = self.check(
-            "pl_supersample", "超采样", d.supersample,
-            "按两倍尺寸绘制再缩小到输出尺寸，文字与图标边缘更平滑；渲染约慢 2 到 3 倍",
+            "pl_supersample", t("player.supersample"), d.supersample,
+            t("player.supersample_tip"),
         )  # fmt: skip
-        self.album_mode = self.combo("pl_album_mode", ALBUM_MODES, "tracks")
-        self.album_mode.setToolTip(
-            "专辑模式下的输出方式\n"
-            "整张专辑连续播放：像歌单一样按专辑顺序从头播到尾，生成「<专辑名>_player」，\n"
-            "切歌时曲目信息、进度与歌词随之切换，背景与动态封面连续流动"
-        )
+        album_modes_labels = {
+            "tracks": t("option.album_mode.tracks"),
+            "queue": t("option.album_mode.queue"),
+            "both": t("option.album_mode.both"),
+        }
+        self.album_mode = self.combo("pl_album_mode", album_modes_labels, "tracks")
+        self.album_mode.setToolTip(t("player.album_mode_tip"))
         self.ui_scale = self.spin("pl_ui_scale", 0, 800, d.ui_scale, " %", step=25)
-        self.ui_scale.setSpecialValueText("自动")
-        self.ui_scale.setToolTip(
-            "页面整体缩放（设备像素比）\n"
-            "自动：横屏按 1080p 窗口排版，竖屏按约 400 px 宽的手机排版，再放大到输出尺寸\n"
-            "数值越大，界面与歌词越大"
-        )
+        self.ui_scale.setSpecialValueText(t("action.confirm") if False else "自动")
+        self.ui_scale.setToolTip(t("player.ui_scale_tip"))
 
         # ---- background
-        self.background = self.combo("pl_bg", BACKGROUNDS, d.background)
+        bg_labels = {
+            "mesh": t("option.bg.mesh"),
+            "isolation": t("option.bg.isolation"),
+            "solid": t("option.bg.solid"),
+            "none": t("option.bg.none"),
+        }
+        self.background = self.combo("pl_bg", bg_labels, d.background)
         self.background.currentIndexChanged.connect(self._sync_enabled)
         self.flow = self.spin("pl_flow", 0, 1000, d.flow_speed, " %", step=10)
-        self.flow.setToolTip("背景流动速度，100% 为 AMLL 默认值")
+        self.flow.setToolTip(t("player.flow_tip"))
         self.render_scale = self.spin("pl_bg_scale", 5, 200, d.render_scale, " %", step=5)
-        self.render_scale.setToolTip("背景画布相对画面的渲染分辨率；背景本身很模糊，50% 已足够")
-        self.bg_color = self.color("pl_color", d.color, "选择背景颜色")
+        self.render_scale.setToolTip(t("player.render_scale_tip"))
+        self.bg_color = self.color("pl_color", d.color, t("player.pick_bg_color"))
         self.seed = self.spin("pl_seed", 0, 999999, d.seed)
-        self.seed.setToolTip("背景的随机形态由此种子决定，换一个数字可得到不同的流动图案")
-        self.light_wave = self.check("pl_light_wave", "明暗光波", d.light_wave, "仅 Isolation 背景")
+        self.seed.setToolTip(t("player.seed_tip"))
+        self.light_wave = self.check("pl_light_wave", t("player.light_wave"), d.light_wave, t("player.light_wave_tip"))
         self.beat = self.check(
             "pl_beat",
-            "随低频律动",
+            t("player.beat"),
             d.beat,
-            "仅 Mesh 背景：按源音频 50–120 Hz 的能量让背景随鼓点起伏",
+            t("player.beat_tip"),
         )
 
         # ---- lyrics
-        self.lyric_size = self.combo("pl_lyric_size", LYRIC_SIZES, d.lyric_size)
+        lyric_size_labels = {
+            "tiny": t("option.size.tiny"),
+            "extra-small": t("option.size.extra_small"),
+            "small": t("option.size.small"),
+            "medium": t("option.size.medium"),
+            "large": t("option.size.large"),
+            "extra-large": t("option.size.extra_large"),
+            "huge": t("option.size.huge"),
+        }
+        self.lyric_size = self.combo("pl_lyric_size", lyric_size_labels, d.lyric_size)
         self.font_weight = self.spin("pl_font_weight", 0, 1000, d.font_weight, step=100)
         self.font_weight.setSpecialValueText("默认")
         self.letter_spacing = self.spin("pl_letter_spacing", -50, 50, d.letter_spacing, " %em")
         self.word_fade = self.spin("pl_word_fade", 1, 500, d.word_fade, " %", step=5)
-        self.word_fade.setToolTip("逐字高亮边缘的柔和宽度（相对行高）")
-        self.blur = self.check("pl_blur", "非当前行模糊", d.blur)
-        self.scale = self.check("pl_scale", "非当前行缩小", d.scale)
-        self.spring = self.check("pl_spring", "弹簧滚动动画", d.spring)
-        self.translation = self.check("pl_translation", "显示翻译", d.translation)
-        self.romanization = self.check("pl_roman", "显示音译", d.romanization)
-        self.swap = self.check("pl_swap", "交换翻译与音译", d.swap_trans_roman)
-        self.bg_vocals = self.check("pl_bg_vocals", "显示和声", d.background_vocals)
+        self.word_fade.setToolTip(t("player.word_fade_tip"))
+        self.blur = self.check("pl_blur", t("player.blur"), d.blur)
+        self.scale = self.check("pl_scale", t("player.scale"), d.scale)
+        self.spring = self.check("pl_spring", t("player.spring"), d.spring)
+        self.translation = self.check("pl_translation", t("player.translation"), d.translation)
+        self.romanization = self.check("pl_roman", t("player.romanization"), d.romanization)
+        self.swap = self.check("pl_swap", t("player.swap"), d.swap_trans_roman)
+        self.bg_vocals = self.check("pl_bg_vocals", t("player.bg_vocals"), d.background_vocals)
         self.filter_credits = self.check(
             "pl_filter_credits",
-            "过滤标题与制作信息",
+            t("lyrics.filter_credits"),
             d.filter_credits,
-            CREDITS_TIP,
+            t("lyrics.credits_tip"),
         )
         self.balance = self.check(
-            "pl_balance", "均衡换行", d.balance, "长句需要折行时让各行长度接近，而不是第一行塞满"
+            "pl_balance", t("player.balance"), d.balance, t("player.balance_tip")
         )
         self.lyric_padding = self.spin("pl_lyric_padding", -1, 50, d.lyric_padding, " %")
-        self.lyric_padding.setSpecialValueText("AMLL 默认")
-        self.lyric_padding.setToolTip(
-            "横屏时歌词栏右侧留白（占栏宽）；AMLL 默认为 15%，过宽会让本可一行显示的歌词折行"
-        )
+        self.lyric_padding.setSpecialValueText("AMLL")
+        self.lyric_padding.setToolTip(t("player.lyric_padding_tip"))
 
         # ---- song info and controls
-        self.title_edit = self.edit("pl_title", "留空则使用音频标签或 TTML 元数据")
-        self.artist_edit = self.edit("pl_artist", "多位艺人用 / 分隔")
+        self.title_edit = self.edit("pl_title", t("player.title_placeholder"))
+        self.artist_edit = self.edit("pl_artist", t("player.artist_placeholder"))
         self.album_edit = self.edit("pl_album", "")
-        self.show_name = self.check("pl_show_name", "曲名", d.show_name)
-        self.show_artists = self.check("pl_show_artists", "艺人", d.show_artists)
-        self.show_album = self.check("pl_show_album", "专辑", d.show_album)
-        self.controls = self.combo("pl_controls", CONTROLS, d.controls)
-        self.controls.setToolTip("音频频谱需要源音频")
-        self.show_volume = self.check("pl_show_volume", "音量条", d.show_volume)
+        self.show_name = self.check("pl_show_name", t("player.show_name"), d.show_name)
+        self.show_artists = self.check("pl_show_artists", t("player.show_artists"), d.show_artists)
+        self.show_album = self.check("pl_show_album", t("player.show_album"), d.show_album)
+        controls_labels = {
+            "controls": t("option.controls.controls"),
+            "fft": t("option.controls.fft"),
+            "none": t("option.controls.none"),
+        }
+        self.controls = self.combo("pl_controls", controls_labels, d.controls)
+        self.controls.setToolTip(t("player.controls_tip"))
+        self.show_volume = self.check("pl_show_volume", t("player.show_volume"), d.show_volume)
         self.volume = self.spin("pl_volume", 0, 100, d.volume, " %", step=5)
         self.show_volume.toggled.connect(self._sync_enabled)
         self.bottom = self.check(
-            "pl_bottom", "底部按钮", d.bottom_controls, "歌词 / 隔空播放 / 播放列表按钮"
+            "pl_bottom", t("player.bottom_buttons"), d.bottom_controls, t("player.bottom_buttons_tip")
         )
-        self.remaining = self.check("pl_remaining", "显示剩余时间", d.show_remaining)
+        self.remaining = self.check("pl_remaining", t("player.show_remaining"), d.show_remaining)
         self.instrumental = self.edit(
-            "pl_instrumental", "留空则只显示居中的封面（AMLL 无歌词布局）", d.instrumental_text
+            "pl_instrumental", t("player.instrumental_placeholder"), t("player.instrumental_default_text")
         )
-        self.instrumental.setToolTip("没有歌词的音轨（纯音乐）在歌词区显示的一行文字")
-        self.quality_tag = self.edit("pl_quality_tag", "留空：全景声显示 Dolby Atmos，其余不显示")
+        self.instrumental.setToolTip(t("player.instrumental_tip"))
+        self.quality_tag = self.edit("pl_quality_tag", t("player.quality_tag_placeholder"))
         self.quality_tag.setMinimumWidth(320)
-        self.show_tag = self.check("pl_show_tag", "音质标签", True)
+        self.show_tag = self.check("pl_show_tag", t("player.show_tag"), True)
         self.show_tag.toggled.connect(self._sync_enabled)
 
         self.fonts = FontList()
@@ -236,13 +252,13 @@ class PlayerPanel(FeaturePanel):
         self._dialog: VideoPreview | None = None
         # not part of the output: saved, but no reason to re-plan the run
         self.preview_start = self.seconds(
-            "pl_preview_start", 30.0, 0.0, 3600.0, tip="从歌曲的第几秒开始预览", replan=False
+            "pl_preview_start", 30.0, 0.0, 3600.0, tip=t("player.preview_start_tip"), replan=False
         )
         self.preview_length = self.seconds(
-            "pl_preview_length", 8.0, 1.0, 60.0, tip="预览片段长度", replan=False
+            "pl_preview_length", 8.0, 1.0, 60.0, tip=t("player.preview_length_tip"), replan=False
         )
-        self.preview_button = PrimaryPushButton(fluent.icon("media-playback-start"), "渲染预览")
-        self.preview_button.setToolTip("按当前参数以一半分辨率、30 fps 渲染一小段并播放")
+        self.preview_button = PrimaryPushButton(fluent.icon("media-playback-start"), t("action.render_preview"))
+        self.preview_button.setToolTip(t("player.preview_button_tip"))
         self.preview_button.clicked.connect(self._preview)
         self.preview_progress = ProgressBar()
         self.preview_progress.setFixedWidth(140)
@@ -253,45 +269,45 @@ class PlayerPanel(FeaturePanel):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(
             widgets.section(
-                "预览",
+                t("section.preview"),
                 widgets.hbox(
-                    "起点：", self.preview_start, 12, "时长：", self.preview_length, 12,
+                    t("label.preview_start"), self.preview_start, 12, t("label.preview_length"), self.preview_length, 12,
                     self.preview_button, self.preview_progress, self.preview_status,
                 ),
             )
         )  # fmt: skip
         layout.addWidget(
             widgets.section(
-                "画面与编码",
+                t("section.frame_encoding"),
                 widgets.two_column_grid([
-                    ("尺寸：", widgets.size_row(self.width_spin, self.height_spin), "帧率：", self.fps),
-                    ("编码器：", self.codec, "画质：", self.quality),
-                    ("音频：", widgets.hbox(self.audio_mode, self.audio_track), "界面缩放：", self.ui_scale),
-                    ("速度：", widgets.hbox(self.fast_capture, self.supersample), None, None),
-                    ("专辑模式：", self.album_mode, None, None),
+                    (t("label.size"), widgets.size_row(self.width_spin, self.height_spin), t("label.fps"), self.fps),
+                    (t("label.encoder"), self.codec, t("label.quality"), self.quality),
+                    (t("label.audio"), widgets.hbox(self.audio_mode, self.audio_track), t("label.ui_scale"), self.ui_scale),
+                    (t("label.speed"), widgets.hbox(self.fast_capture, self.supersample), None, None),
+                    (t("label.album_mode_label"), self.album_mode, None, None),
                 ]),
             )
         )  # fmt: skip
         layout.addWidget(
             widgets.section(
-                "背景",
+                t("section.background"),
                 widgets.two_column_grid([
-                    ("渲染器：", self.background, "颜色：", self.bg_color),
-                    ("流动速度：", self.flow, "渲染比例：", self.render_scale),
-                    ("随机种子：", self.seed, None, widgets.hbox(self.beat, self.light_wave)),
+                    (t("label.renderer"), self.background, t("label.color"), self.bg_color),
+                    (t("label.flow_speed"), self.flow, t("label.render_scale"), self.render_scale),
+                    (t("label.random_seed"), self.seed, None, widgets.hbox(self.beat, self.light_wave)),
                 ]),
             )
         )  # fmt: skip
         layout.addWidget(
             widgets.section(
-                "歌词",
+                t("section.lyrics"),
                 widgets.two_column_grid([
-                    ("字号：", self.lyric_size, "字重：", self.font_weight),
-                    ("字间距：", self.letter_spacing, "渐变宽度：", self.word_fade),
-                    ("右侧留白：", self.lyric_padding, None, widgets.hbox(self.balance)),
-                    ("纯音乐：", self.instrumental, None, None),
-                    ("效果：", widgets.hbox(self.blur, self.scale, self.spring), None, None),
-                    ("内容：", widgets.hbox(self.translation, self.romanization, self.swap, self.bg_vocals,
+                    (t("label.font_size"), self.lyric_size, t("label.font_weight"), self.font_weight),
+                    (t("label.letter_spacing"), self.letter_spacing, t("label.word_fade"), self.word_fade),
+                    (t("label.right_padding"), self.lyric_padding, None, widgets.hbox(self.balance)),
+                    (t("label.instrumental"), self.instrumental, None, None),
+                    (t("label.effects"), widgets.hbox(self.blur, self.scale, self.spring), None, None),
+                    (t("label.content"), widgets.hbox(self.translation, self.romanization, self.swap, self.bg_vocals,
                                          self.filter_credits),
                      None, None),
                 ]),
@@ -299,20 +315,20 @@ class PlayerPanel(FeaturePanel):
         )  # fmt: skip
         layout.addWidget(
             widgets.section(
-                "曲目信息与控件",
+                t("section.track_info_controls"),
                 widgets.two_column_grid([
-                    ("曲名：", self.title_edit, None, None),
-                    ("艺人：", self.artist_edit, None, None),
-                    ("专辑：", self.album_edit, None, None),
-                    ("显示：", widgets.hbox(self.show_name, self.show_artists, self.show_album, self.remaining),
+                    (t("label.track_title"), self.title_edit, None, None),
+                    (t("label.artist"), self.artist_edit, None, None),
+                    (t("label.album"), self.album_edit, None, None),
+                    (t("label.display"), widgets.hbox(self.show_name, self.show_artists, self.show_album, self.remaining),
                      None, None),
-                    ("控件：", self.controls, "音量：", widgets.hbox(self.show_volume, self.volume)),
-                    ("标签：", widgets.hbox(self.show_tag, self.quality_tag, stretch=False), None,
+                    (t("label.controls"), self.controls, t("label.volume"), widgets.hbox(self.show_volume, self.volume)),
+                    (t("label.tags"), widgets.hbox(self.show_tag, self.quality_tag, stretch=False), None,
                      widgets.hbox(self.bottom)),
                 ]),
             )
         )  # fmt: skip
-        layout.addWidget(widgets.section("字体回退顺序", self.fonts))
+        layout.addWidget(widgets.section(t("section.fonts_fallback"), self.fonts))
         layout.addStretch(1)
         self._sync_enabled()
 
@@ -340,21 +356,23 @@ class PlayerPanel(FeaturePanel):
     # ---- the audio mixed in ------------------------------------------------------------
 
     def _fill_audio_tracks(self, project: Project) -> None:
+        from dolbytool.core.i18n import t
+
         self.audio_track.clear()
         for track in project.tracks:
             # the file is named on the inputs page; here it would only crowd the row
-            text = "源音频" if track.is_original else track.label
+            text = t("audio.original") if track.is_original else track.label
             self.audio_track.addItem(text, track.key)
             self.audio_track.setItemData(
                 self.audio_track.count() - 1, track.hint, Qt.ItemDataRole.ToolTipRole
             )
         if not project.tracks:
-            self.audio_track.addItem("源音频", ORIGINAL)
+            self.audio_track.addItem(t("audio.original"), ORIGINAL)
         index = self.audio_track.findData(self._audio_key)
         if index < 0:
             # kept for the tracks that have it; this one falls back to its source
             self.audio_track.addItem(
-                f"{stem_label(self._audio_key)}（此音频没有，改用源音频）", self._audio_key
+                t("player.stem_not_found_fallback", label=stem_label(self._audio_key)), self._audio_key
             )
             index = self.audio_track.count() - 1
         self.audio_track.setCurrentIndex(index)
@@ -454,11 +472,13 @@ class PlayerPanel(FeaturePanel):
     # ---- preview -----------------------------------------------------------------------
 
     def _preview(self) -> None:
+        from dolbytool.core.i18n import t
+
         if self._job is not None:
             self._job.token.cancel()
             return
         project = self._project
-        problem = self.problem(PlanContext(project)) if project else "请先选择输入文件"
+        problem = self.problem(PlanContext(project)) if project else t("player.prompt_pick_input")
         if problem:
             self.preview_status.setText(problem)
             return
@@ -485,10 +505,10 @@ class PlayerPanel(FeaturePanel):
         self._job.progress.connect(self._preview_progress)
         self._job.done.connect(self._preview_done)
         self.preview_button.setIcon(fluent.icon("process-stop"))
-        self.preview_button.setText("取消")
+        self.preview_button.setText(t("action.cancel"))
         self.preview_progress.setValue(0)
         self.preview_progress.show()
-        self.preview_status.setText("准备中")
+        self.preview_status.setText(t("status.preparing"))
         self._job.start()
 
     def _preview_progress(self, value: int, message: str) -> None:
@@ -496,12 +516,14 @@ class PlayerPanel(FeaturePanel):
         self.preview_status.setText(message)
 
     def _preview_done(self, path: Path | None, error: str) -> None:
+        from dolbytool.core.i18n import t
+
         self._job = None
         self.preview_button.setIcon(fluent.icon("media-playback-start"))
-        self.preview_button.setText("渲染预览")
+        self.preview_button.setText(t("action.render_preview"))
         self.preview_progress.hide()
         if path is None:
-            self.preview_status.setText(f"预览失败：{error}" if error else "已取消")
+            self.preview_status.setText(t("player.preview_failed", error=error) if error else t("status.cancelled"))
             if error:
                 logger.error("播放器预览失败：%s", error)
             return
@@ -517,28 +539,32 @@ class PlayerPanel(FeaturePanel):
             self._job.wait(15000)
 
     def problem(self, ctx: PlanContext) -> str | None:
+        from dolbytool.core.i18n import t
+
         too_big = frame_problem(self.width_spin.value(), self.height_spin.value())
         if too_big:
             return too_big
         project = ctx.project
         ttml = project.ttml
         if ttml and not ttml.is_file():
-            return "指定的歌词文件不存在"
+            return t("lyrics.ttml_not_found")
         # an instrumental runs for as long as its audio
         if not ttml and project.info is None:
-            return "请选择 TTML 逐字歌词文件，纯音乐需要可读取的源音频"
+            return t("player.prompt_pick_lyrics_or_audio")
         if self.background.currentData() == "none" and self.codec.currentData() != "vp9":
-            return "透明背景需要 VP9 编码器（唯一支持 Alpha 通道的选项）"
+            return t("player.vp9_alpha_required")
         needs_audio = (
             self.controls.currentData() == "fft" or self.audio_mode.currentData() != "none"
         )
         if needs_audio and project.info is None:
-            return "音频频谱与混入音频需要可读取的源音频"
+            return t("player.spectrum_audio_required")
         return renderer_problem("player.mjs")
 
     def summary(self, ctx: PlanContext) -> str | None:
-        size = f"播放器视频 {self.width_spin.value()}×{self.height_spin.value()}"
-        return size if ctx.project.ttml else f"{size}（无歌词，按纯音乐只显示封面）"
+        from dolbytool.core.i18n import t
+
+        size = t("player.summary_size", width=self.width_spin.value(), height=self.height_spin.value())
+        return size if ctx.project.ttml else t("player.summary_no_lyrics", size=size)
 
     def plan(self, ctx: PlanContext) -> list[Step]:
         project = ctx.project

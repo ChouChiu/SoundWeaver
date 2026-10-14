@@ -17,54 +17,63 @@ DEFAULT_TRACKS = ("surround",)
 
 
 class WaveformPanel(FeaturePanel):
-    title = "波形视频"
+    title_key = "waveform.title"
+    description_key = "waveform.description"
+    _title = "波形视频"
     icon = "view-media-visualization"
-    description = "为所选音轨生成水平滚动波形视频 (MP4)，若所选分轨未生成将自动追加前置分轨任务"
+    _description = "为所选音轨生成水平滚动波形视频 (MP4)，若所选分轨未生成将自动追加前置分轨任务"
     enabled_key = "do_waveform"
 
     def __init__(self, settings: QSettings, parent=None) -> None:
         super().__init__(settings, parent)
+        from dolbytool.core.i18n import t
+
         self.tracks = widgets.TrackList()
         self.tracks.changed.connect(self.changed)
 
         d = WaveformSpec()
-        self.pps = self.spin("pps", 10, 1000, d.pps, " 像素/秒")
+        self.pps = self.spin("pps", 10, 1000, d.pps, t("waveform.pps_suffix"))
         self.fps = self.spin("fps", 10, 120, d.fps, " fps")
         self.screen_w = self.spin("screen_w", 64, MAX_FRAME_SIDE, d.screen_width, " px", step=2)
         self.screen_h = self.spin("screen_h", 32, MAX_FRAME_SIDE, d.height, " px", step=2)
         # "wave2/" keys: the dark look replaced the old white-background defaults
-        self.wave_color = self.color("wave2/wave_color", d.wave_color, "选择波形颜色")
-        self.background = self.color("wave2/background", d.background, "选择背景颜色")
-        self.playhead = self.color("wave2/playhead", d.playhead, "选择播放头颜色")
+        self.wave_color = self.color("wave2/wave_color", d.wave_color, t("waveform.pick_wave_color"))
+        self.background = self.color("wave2/background", d.background, t("waveform.pick_bg_color"))
+        self.playhead = self.color("wave2/playhead", d.playhead, t("waveform.pick_playhead_color"))
         self.unplayed = self.spin(
             "unplayed", 0, 100, round(d.unplayed_level * 100), " %",
-            tip="播放头右侧未播放波形保留的不透明度（100% 为不暗化）",
+            tip=t("waveform.unplayed_tip"),
         )  # fmt: skip
+        encoder_labels = {
+            "h264_nvenc": t("option.encoder.nvenc_h264"),
+            "hevc_nvenc": t("option.encoder.nvenc_hevc"),
+            "libx264": t("option.encoder.libx264"),
+        }
         self.encoder = self.combo(
             "encoder",
-            ENCODER_LABELS,
+            encoder_labels,
             DEFAULT_ENCODER,
-            "硬件编码器不可用时将自动回退至 libx264 软件编码",
+            t("waveform.encoder_tip"),
         )
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(widgets.section("音轨", self.tracks))
+        layout.addWidget(widgets.section(t("section.tracks"), self.tracks))
         layout.addWidget(
             widgets.section(
-                "画面",
+                t("section.video"),
                 widgets.two_column_grid([
-                    ("尺寸：", widgets.size_row(self.screen_w, self.screen_h), "帧率：", self.fps),
-                    ("滚动速度：", self.pps, "编码器：", self.encoder),
+                    (t("label.size"), widgets.size_row(self.screen_w, self.screen_h), t("label.fps"), self.fps),
+                    (t("label.scroll_speed"), self.pps, t("label.encoder"), self.encoder),
                 ]),
             )
         )  # fmt: skip
         layout.addWidget(
             widgets.section(
-                "色彩与样式",
+                t("section.color_style"),
                 widgets.two_column_grid([
-                    ("背景：", self.background, "波形：", self.wave_color),
-                    ("播放头：", self.playhead, "未播不透明度：", self.unplayed),
+                    (t("label.background"), self.background, t("label.waveform"), self.wave_color),
+                    (t("label.playhead"), self.playhead, t("label.unplayed_opacity"), self.unplayed),
                 ]),
             )
         )  # fmt: skip
@@ -94,13 +103,15 @@ class WaveformPanel(FeaturePanel):
     # ---- hooks -----------------------------------------------------------------------
 
     def refresh(self, project: Project) -> None:
+        from dolbytool.core.i18n import t
+
         checked = self.tracks.keys()
         items = []
         for track in project.tracks:
             if track.is_original:
-                text = "源音频"
+                text = t("audio.original")
             else:
-                text = track.label + ("" if track.exists else "（待生成）")
+                text = track.label + ("" if track.exists else t("waveform.pending_suffix"))
             items.append(
                 widgets.TrackItem(
                     track.key, text, f"{track.hint}\n{track.path}",
@@ -118,16 +129,20 @@ class WaveformPanel(FeaturePanel):
         return {t.key for t in self._selected(project) if not t.is_original and not t.exists}
 
     def problem(self, ctx: PlanContext) -> str | None:
+        from dolbytool.core.i18n import t
+
         too_big = frame_problem(self.screen_w.value(), self.screen_h.value())
         if too_big:
             return too_big
         if ctx.project.info is not None and not self._selected(ctx.project, ctx.batch):
-            return "请至少勾选一条需要生成波形的音轨"
+            return t("waveform.prompt_pick_track")
         return None
 
     def summary(self, ctx: PlanContext) -> str | None:
+        from dolbytool.core.i18n import t
+
         count = len(self._selected(ctx.project, ctx.batch))
-        return f"{count} 个波形视频" if count else None
+        return t("waveform.summary", count=count) if count else None
 
     def plan(self, ctx: PlanContext) -> list[Step]:
         out = ctx.project.output_dir

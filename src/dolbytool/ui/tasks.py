@@ -9,6 +9,7 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QHeaderView, QTreeWidgetItem, QVBoxLayout, QWidget
 from qfluentwidgets import ProgressBar
 
+from dolbytool.core.i18n import t
 from dolbytool.core.task import Step
 from dolbytool.ui import fluent, widgets
 from dolbytool.ui.worker import Outcome
@@ -21,12 +22,15 @@ _ICONS = {
     Outcome.CANCELLED: "process-stop",
     Outcome.SKIPPED: "media-skip-forward",
 }
-_STATES = {
-    Outcome.DONE: "已完成",
-    Outcome.FAILED: "失败",
-    Outcome.CANCELLED: "已取消",
-    Outcome.SKIPPED: "已跳过",
-}
+
+
+def _state_text(outcome: Outcome) -> str:
+    return {
+        Outcome.DONE: t("status.done"),
+        Outcome.FAILED: t("status.failed"),
+        Outcome.CANCELLED: t("status.cancelled"),
+        Outcome.SKIPPED: t("status.skipped"),
+    }[outcome]
 
 
 def _bar_cell(bar: ProgressBar) -> QWidget:
@@ -42,9 +46,9 @@ class TaskView(widgets.HintTree):
     """One row per step; a finished row opens its output on double click."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__("尚未运行任务：在「素材」页选好输入与输出后点击「开始」", parent)
+        super().__init__(t("tasks.hint_empty"), parent)
         self.setColumnCount(3)
-        self.setHeaderLabels(["任务", "进度", "状态"])
+        self.setHeaderLabels([t("tasks.col_task"), t("tasks.col_progress"), t("tasks.col_status")])
         self.setRootIsDecorated(False)
         self.setUniformRowHeights(True)
         header = self.header()
@@ -64,7 +68,7 @@ class TaskView(widgets.HintTree):
         self._bars, self._values, self._errors = [], [0] * len(steps), {}
         self._targets = [step.targets for step in steps]
         for step in steps:
-            item = QTreeWidgetItem([step.title, "", "等待中"])
+            item = QTreeWidgetItem([step.title, "", t("status.waiting")])
             item.setIcon(0, fluent.qicon(_ICONS["queued"]))
             self.addTopLevelItem(item)
             bar = ProgressBar(useAni=False)
@@ -78,7 +82,7 @@ class TaskView(widgets.HintTree):
     def started(self, index: int) -> None:
         item = self.topLevelItem(index)
         item.setIcon(0, fluent.qicon(_ICONS["running"]))
-        item.setText(2, "运行中")
+        item.setText(2, t("status.running"))
         self.scrollToItem(item)
 
     def progress(self, index: int, value: int, message: str) -> None:
@@ -89,13 +93,13 @@ class TaskView(widgets.HintTree):
     def finished(self, index: int, outcome: str, note: str, seconds: float) -> None:
         item = self.topLevelItem(index)
         item.setIcon(0, fluent.qicon(_ICONS[outcome]))
-        state = _STATES[Outcome(outcome)]
+        state = _state_text(Outcome(outcome))
         if outcome == Outcome.DONE:
             self._values[index] = 100
             self._bars[index].setValue(100)
-            state += f"，耗时 {seconds:.1f} 秒"
+            state += t("status.elapsed_seconds", seconds=seconds)
             if self._targets[index]:
-                item.setToolTip(0, "双击在默认应用中打开输出文件")
+                item.setToolTip(0, t("status.double_click_to_open"))
         elif outcome != Outcome.SKIPPED:
             self._values[index] = 100
         if outcome == Outcome.FAILED:

@@ -27,12 +27,37 @@ class FeaturePanel(QWidget):
     # a setting of this panel changed which tracks every project has
     tracks_changed = Signal()
 
-    title = ""
+    title_key = ""
+    description_key = ""
+    _title = ""
+    _description = ""
     icon = ""
-    # one line under the title, saying what the output is
-    description = ""
     enabled_key = ""
     enabled_default = True
+
+    @property
+    def title(self) -> str:
+        if self.title_key:
+            from dolbytool.core.i18n import t
+
+            return t(self.title_key)
+        return self._title
+
+    @title.setter
+    def title(self, value: str) -> None:
+        self._title = value
+
+    @property
+    def description(self) -> str:
+        if self.description_key:
+            from dolbytool.core.i18n import t
+
+            return t(self.description_key)
+        return self._description
+
+    @description.setter
+    def description(self, value: str) -> None:
+        self._description = value
     # whether ticking this output requires a readable source audio
     needs_audio = True
     # made once per album from what the tracks share (the cover), not once per track

@@ -10,6 +10,7 @@ from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import QDialog, QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import PrimaryPushButton, PushButton
 
+from dolbytool.core.i18n import t
 from dolbytool.ui import fluent
 
 
@@ -18,7 +19,7 @@ class VideoPreview(QDialog):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("预览")
+        self.setWindowTitle(t("action.preview"))
         self.resize(1000, 620)
         self.video = QVideoWidget()
         self.audio = QAudioOutput(self)
@@ -29,7 +30,7 @@ class VideoPreview(QDialog):
         self.toggle = PrimaryPushButton()
         self.toggle.clicked.connect(self._toggle)
         self.player.playbackStateChanged.connect(self._sync)
-        close = PushButton(fluent.icon("window-close"), "关闭")
+        close = PushButton(fluent.icon("window-close"), t("action.close"))
         close.clicked.connect(self.close)
         buttons = QHBoxLayout()
         buttons.addWidget(self.toggle)
@@ -60,8 +61,9 @@ class VideoPreview(QDialog):
         self.toggle.setIcon(
             fluent.icon("media-playback-pause" if playing else "media-playback-start")
         )
-        self.toggle.setText("暂停" if playing else "播放")
+        self.toggle.setText(t("action.pause") if playing else t("action.play"))
 
     def closeEvent(self, event) -> None:
         self.player.stop()
         super().closeEvent(event)
+

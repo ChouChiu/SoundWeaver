@@ -65,16 +65,20 @@ def cover_spec(spec: GradientSpec, cover: Path) -> GradientSpec:
     return replace(spec, top=top, bottom=bottom)
 
 
+from dolbytool.core.i18n import t
+
+
 def gradient_step(spec: GradientSpec, target: Path, cover: Path | None = None) -> Step:
     """With `cover`, the colours are picked from it when the step runs."""
 
     def run(token: CancellationToken, report: Report) -> str:
         used = spec
         if cover is not None:
-            report(5, "提取封面主色调")
+            report(5, t("step.extract_dominant"))
             used = cover_spec(spec, cover)
         report(10, f"{used.top} → {used.bottom}")
         render_gradient(used, target, token)
         return target.name
 
-    return Step("渐变图", run, (target,))
+    return Step(t("step.gradient"), run, (target,))
+

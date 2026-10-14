@@ -79,7 +79,9 @@ class SourcePanel(widgets.Card):
     changed = Signal()
 
     def __init__(self, settings: QSettings, parent: QWidget | None = None) -> None:
-        super().__init__("源文件", parent)
+        from dolbytool.core.i18n import t
+
+        super().__init__(t("source.title"), parent)
         self.settings = settings
         self.info: AudioInfo | None = None
         self._error: str | None = None
@@ -96,26 +98,28 @@ class SourcePanel(widgets.Card):
         grid.setHorizontalSpacing(10)
         grid.setVerticalSpacing(8)
         self.cover_preview = _CoverPreview()
+        self.cover_preview.setText(t("source.no_cover"))
+        self.cover_preview.setToolTip(t("source.click_to_pick_cover"))
         self.cover_preview.clicked.connect(self.pick_cover)
         grid.addWidget(self.cover_preview, 0, 0, 5, 1, Qt.AlignmentFlag.AlignTop)
 
         self.audio_edit = self._row(
-            grid, 0, "音频(&U)", "拖入或选择 m4a / eac3 / wav / flac 等音频", self.pick_audio,
-            "选择音频（Ctrl+O）",
+            grid, 0, t("source.audio_label"), t("source.audio_placeholder"), self.pick_audio,
+            t("source.audio_tip"),
         )  # fmt: skip
         self.audio_info = widgets.hint_label()
         grid.addWidget(self.audio_info, 1, 2)
         self.audio_info.hide()
         self.cover_edit = self._row(
-            grid, 2, "封面(&C)", "自动使用内嵌封面或同文件夹的封面图", self.pick_cover,
-            "选择封面图片或动态封面（Ctrl+Shift+O）",
+            grid, 2, t("source.cover_label"), t("source.cover_placeholder"), self.pick_cover,
+            t("source.cover_tip"),
         )  # fmt: skip
         self.ttml_edit = self._row(
-            grid, 3, "歌词(&L)", "自动查找同名或同文件夹的 TTML 逐字歌词", self.pick_ttml,
-            "选择 TTML 歌词（Ctrl+L）",
+            grid, 3, t("source.ttml_label"), t("source.ttml_placeholder"), self.pick_ttml,
+            t("source.ttml_tip"),
         )  # fmt: skip
         self.out_edit = self._row(
-            grid, 4, "输出(&O)", OUTPUT_PLACEHOLDER, self.pick_output, "选择输出目录"
+            grid, 4, t("source.output_label"), t("source.output_placeholder"), self.pick_output, t("source.output_tip")
         )
         grid.setColumnStretch(2, 1)
         self.set_body(grid)
@@ -195,23 +199,31 @@ class SourcePanel(widgets.Card):
     # ---- picking ---------------------------------------------------------------------
 
     def pick_audio(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "打开音频", self.start_dir(), AUDIO_FILTER)
+        from dolbytool.core.i18n import t
+
+        path, _ = QFileDialog.getOpenFileName(self, t("source.dialog_open_audio"), self.start_dir(), t("source.filter_audio"))
         if path:
             self.set_audio(Path(path))
 
     def pick_cover(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "选择封面", self.start_dir(), IMAGE_FILTER)
+        from dolbytool.core.i18n import t
+
+        path, _ = QFileDialog.getOpenFileName(self, t("source.dialog_pick_cover"), self.start_dir(), t("source.filter_image"))
         if path:
             self.set_cover(Path(path))
 
     def pick_ttml(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "选择歌词", self.start_dir(), TTML_FILTER)
+        from dolbytool.core.i18n import t
+
+        path, _ = QFileDialog.getOpenFileName(self, t("source.dialog_pick_lyrics"), self.start_dir(), t("source.filter_ttml"))
         if path:
             self.set_ttml(Path(path))
 
     def pick_output(self) -> None:
+        from dolbytool.core.i18n import t
+
         start = str(self.output_dir() or self.start_dir())
-        path = QFileDialog.getExistingDirectory(self, "选择输出目录", start)
+        path = QFileDialog.getExistingDirectory(self, t("source.dialog_pick_output"), start)
         if path:
             self.out_edit.setText(path)
             self._flush()
@@ -245,9 +257,11 @@ class SourcePanel(widgets.Card):
         self._fields_changed()
 
     def _fields_changed(self) -> None:
+        from dolbytool.core.i18n import t
+
         audio = self.audio_path()
         self.out_edit.setPlaceholderText(
-            str(default_output_dir(audio)) if audio else OUTPUT_PLACEHOLDER
+            str(default_output_dir(audio)) if audio else t("source.output_placeholder")
         )
         stamp = file_stamp(audio) if audio and audio.is_file() else None
         if stamp != self._probed:
@@ -257,48 +271,58 @@ class SourcePanel(widgets.Card):
         self.changed.emit()
 
     def _read_audio(self, audio: Path | None) -> None:
+        from dolbytool.core.i18n import t
+
         self.info, self._error = None, None
         if audio is None:
             self._probe.cancel()
-            self._error = "文件不存在" if self.audio_path() else None
+            self._error = t("error.file_not_found") if self.audio_path() else None
             self._set_info(self._error or "")
             self._fill(None, None)
             return
         self.settings.setValue("last_dir", str(audio.parent))
-        self._set_info("正在读取…")
+        self._set_info(t("status.reading"))
         self._probe.run(lambda: inspect(audio), self._audio_read)
 
     def _audio_read(self, result: Inspection | Exception) -> None:
+        from dolbytool.core.i18n import t
+
         if isinstance(result, Exception):
             self._error = str(result) or type(result).__name__
-            self._set_info(f"无法读取：{self._error}")
+            self._set_info(t("error.cannot_read", error=self._error))
         else:
             self.info, self._error = result.info, result.error
             self._set_info(
-                self.info.describe(self.atmos_layout()) if self.info else f"无法读取：{self._error}"
+                self.info.describe(self.atmos_layout()) if self.info else t("error.cannot_read", error=self._error)
             )
             self._fill(result.cover, result.ttml)
         self._show_cover()
         self.changed.emit()
 
     def _fill(self, cover: Path | None, ttml: Path | None) -> None:
-        self._auto_cover = self._fill_field(self.cover_edit, self._auto_cover, cover, "封面")
-        self._auto_ttml = self._fill_field(self.ttml_edit, self._auto_ttml, ttml, "歌词")
+        from dolbytool.core.i18n import t
+
+        self._auto_cover = self._fill_field(self.cover_edit, self._auto_cover, cover, t("source.static_cover_tip"))
+        self._auto_ttml = self._fill_field(self.ttml_edit, self._auto_ttml, ttml, t("section.lyrics"))
 
     def _fill_field(
         self, edit: QLineEdit, auto: Path | None, found: Path | None, what: str
     ) -> Path | None:
         """Show `found` in `edit` unless the user set it themselves; returns what is filled in now."""
+        from dolbytool.core.i18n import t
+
         current = path_from_text(edit.text())
         if current is not None and current != auto:
             return auto
         if found != current:
             edit.setText(str(found) if found else "")
             if found:
-                logger.info("已自动使用%s：%s", what, found.name)
+                logger.info(t("source.auto_used_log", what=what, name=found.name))
         return found
 
     def _show_cover(self) -> None:
+        from dolbytool.core.i18n import t
+
         cover = self.cover_path()
         stamp = file_stamp(cover)
         if stamp == self._shown_cover:
@@ -307,20 +331,22 @@ class SourcePanel(widgets.Card):
         self.cover_preview.setPixmap(QPixmap())
         if cover is None or not cover.is_file():
             self._thumb.cancel()
-            self.cover_preview.setText("文件不存在" if cover else "无封面\n点击选择")
-            self.cover_preview.setToolTip("点击选择封面")
+            self.cover_preview.setText(t("error.file_not_found") if cover else t("source.no_cover"))
+            self.cover_preview.setToolTip(t("source.click_to_pick_cover"))
             return
-        self.cover_preview.setText("正在读取…")
+        self.cover_preview.setText(t("status.reading"))
         side = _COVER_SIDE - 4
         self._thumb.run(lambda: _thumbnail(cover, side), lambda r: self._cover_read(cover, r))
 
     def _cover_read(self, cover: Path, result: tuple[QImage, bool] | Exception) -> None:
+        from dolbytool.core.i18n import t
+
         image, moving = result if not isinstance(result, Exception) else (QImage(), False)
         if image.isNull():
-            self.cover_preview.setText("无法读取")
+            self.cover_preview.setText(t("error.cannot_read", error=""))
             if isinstance(result, Exception):
                 logger.warning("封面无法读取：%s", result)
             return
         self.cover_preview.setPixmap(QPixmap.fromImage(image))
-        kind = "动态封面（播放器视频中循环播放）" if moving else "封面"
-        self.cover_preview.setToolTip(f"{kind}\n{cover}\n点击更换")
+        kind = t("source.motion_cover_tip") if moving else t("source.static_cover_tip")
+        self.cover_preview.setToolTip(f"{kind}\n{cover}\n{t('source.click_to_change')}")

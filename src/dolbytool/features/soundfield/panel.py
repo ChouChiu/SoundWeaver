@@ -29,14 +29,18 @@ DEFAULT_TRACKS = ("original",)
 
 
 class SoundfieldPanel(FeaturePanel):
-    title = "声场视频"
+    title_key = "soundfield.title"
+    description_key = "soundfield.description"
+    _title = "声场视频"
     icon = "audio-speakers-symbolic"
-    description = "将全景声动态对象在 3D 空间内的运动轨迹与电平可视化，输出带 Alpha 透明通道的 WebM (VP9) 视频"
+    _description = "将全景声动态对象在 3D 空间内的运动轨迹与电平可视化，输出带 Alpha 透明通道的 WebM (VP9) 视频"
     enabled_key = "do_soundfield"
     enabled_default = False
 
     def __init__(self, settings: QSettings, parent=None) -> None:
         super().__init__(settings, parent)
+        from dolbytool.core.i18n import t
+
         self.tracks = widgets.TrackList()
         self.tracks.changed.connect(self.changed)
 
@@ -44,64 +48,69 @@ class SoundfieldPanel(FeaturePanel):
         self.width_spin = self.spin("sf_w", 64, MAX_FRAME_SIDE, d.width, " px", step=2)
         self.height_spin = self.spin("sf_h", 64, MAX_FRAME_SIDE, d.height, " px", step=2)
         self.fps = self.spin("sf_fps", 10, 120, d.fps, " fps")
-        self.view = self.combo("sf_view", VIEWS, d.view)
+        view_labels = {
+            "iso": t("option.view.iso"),
+            "top": t("option.view.top"),
+            "angle": t("option.view.angle"),
+        }
+        self.view = self.combo("sf_view", view_labels, d.view)
         self.head_edit, _button, head_row = widgets.browse_row(
-            "留空使用默认听者剪影", self._browse_head, "选择 3D 头模 (.glb)"
+            t("soundfield.head_placeholder"), self._browse_head, t("soundfield.pick_head_model")
         )
         self.persist_edit("sf_head", self.head_edit)
         self.object_scale = self.spin("sf_object_scale", 10, 1000, d.object_scale, " %")
-        self.object_scale.setToolTip("动态对象小球的显示比例（100% 为标准尺寸）")
+        self.object_scale.setToolTip(t("soundfield.object_scale_tip"))
         self.head_scale = self.spin("sf_head_scale", 10, 1000, d.head_scale, " %")
-        self.head_scale.setToolTip("听者模型显示比例（100% 时高度约为声场空间的 15%）")
+        self.head_scale.setToolTip(t("soundfield.head_scale_tip"))
         self.gate = self.spin("sf_gate", -120, 0, d.gate_db, " dBFS")
-        self.gate.setToolTip(
-            "对象电平低于该门限时平滑淡出隐藏；\n"
-            "在分轨模式下，若分配至该音轨扬声器的能量低于此门限则平滑暗化"
-        )
+        self.gate.setToolTip(t("soundfield.gate_tip"))
         self.fade = self.spin("sf_fade", 0, 2000, d.fade_ms, " ms", step=10)
-        self.fade.setToolTip("对象显隐与明暗切换的平滑过渡时长")
+        self.fade.setToolTip(t("soundfield.fade_tip"))
         self.dim = self.spin("sf_dim", 0, 100, d.dim, " %")
-        self.dim.setToolTip("分轨模式下，非本音轨声扬对象的保留不透明度（0% 为完全隐藏）")
+        self.dim.setToolTip(t("soundfield.dim_tip"))
         self.level_response = self.spin("sf_level", 0, 100, d.level_response, " %", step=10)
-        self.level_response.setToolTip(
-            "对象亮度、光晕与大小随其实时电平变化的程度（0% 为不随电平变化）"
-        )
+        self.level_response.setToolTip(t("soundfield.level_response_tip"))
         self.glow = self.spin("sf_glow", 0, 100, d.glow, " %", step=10)
-        self.glow.setToolTip("对象周围光晕的强度（0% 为关闭）")
+        self.glow.setToolTip(t("soundfield.glow_tip"))
         self.trail = self.seconds(
             "sf_trail_seconds", d.trail, 0.0, 10.0, 0.1,
-            "对象身后保留的运动轨迹时长（0 为关闭）；对象瞬移时轨迹会截断",
+            t("soundfield.trail_tip"),
         )  # fmt: skip
         self.zoom = self.spin("sf_zoom", 50, 300, d.zoom, " %", step=5)
-        self.zoom.setToolTip("相对于刚好容纳整个房间的机位距离，100% 为自动取景，越大越近")
-        self.color_mode = self.combo("sf_color_mode", COLOR_MODES, d.color_mode)
+        self.zoom.setToolTip(t("soundfield.zoom_tip"))
+        color_modes = {
+            "tint": t("option.color_mode.tint"),
+            "height": t("option.color_mode.height"),
+            "object": t("option.color_mode.object"),
+        }
+        self.color_mode = self.combo("sf_color_mode", color_modes, d.color_mode)
         self.drop = self.check(
-            "sf_drop", "落地投影", d.drop, "从对象向地面画一条虚线并在落点标出圆环，便于判断高度"
+            "sf_drop", t("soundfield.drop"), d.drop, t("soundfield.drop_tip")
         )
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(widgets.section("音轨", self.tracks))
+        layout.addWidget(widgets.section(t("section.tracks"), self.tracks))
         layout.addWidget(
             widgets.section(
-                "画面与视角",
+                t("section.frame_camera"),
                 widgets.two_column_grid([
-                    ("尺寸：", widgets.size_row(self.width_spin, self.height_spin), "帧率：", self.fps),
-                    ("视角：", self.view, None, None),
-                    ("头模：", head_row, None, None),
+                    (t("label.size"), widgets.size_row(self.width_spin, self.height_spin), t("label.fps"), self.fps),
+                    (t("label.view"), self.view, None, None),
+                    (t("label.head_model"), head_row, None, None),
                 ]),
             )
         )  # fmt: skip
         layout.addWidget(
             widgets.section(
-                "空间对象参数",
+                t("section.space_objects"),
                 widgets.two_column_grid([
-                    ("对象大小：", self.object_scale, "头模大小：", self.head_scale),
-                    ("静音门限：", self.gate, "淡入淡出：", self.fade),
-                    ("分轨外不透明度：", self.dim, "电平响应：", self.level_response),
-                    ("光晕：", self.glow, "轨迹长度：", self.trail),
-                    ("着色：", self.color_mode, "取景缩放：", self.zoom),
-                    ("辅助：", self.drop, None, None),
+                    (t("label.object_size"), self.object_scale, t("label.head_size"), self.head_scale),
+                    (t("label.mute_gate"), self.gate, t("label.fade"), self.fade),
+                    (t("label.outside_opacity"), self.dim, t("label.level_response"), self.level_response),
+                    (t("label.glow"), self.glow, t("label.trail_length"), self.trail),
+                    (t("label.coloring"), self.color_mode, t("label.framing_zoom"), self.zoom),
+                    (t("label.assist"), self.drop, None, None),
                 ]),
             )
         )  # fmt: skip
@@ -113,8 +122,10 @@ class SoundfieldPanel(FeaturePanel):
 
     def _browse_head(self) -> None:
         current = self._head()
+        from dolbytool.core.i18n import t
+
         start = str(current.parent) if current else str(Path.home())
-        path, _ = QFileDialog.getOpenFileName(self, "选择头模", start, GLB_FILTER)
+        path, _ = QFileDialog.getOpenFileName(self, t("soundfield.dialog_pick_head"), start, t("soundfield.filter_glb"))
         if path:
             self.head_edit.setText(path)
 
@@ -145,34 +156,40 @@ class SoundfieldPanel(FeaturePanel):
     # ---- hooks -----------------------------------------------------------------------
 
     def refresh(self, project: Project) -> None:
+        from dolbytool.core.i18n import t
+
         checked = self.tracks.keys()
         items = []
         for track in project.tracks:
             if track.key not in TRACK_SPEAKERS:
                 continue  # the LFE and the frequency bands have no place in the room
-            text = "源音频" if track.is_original else track.label
+            text = t("audio.original") if track.is_original else track.label
             speakers = " ".join(track_speakers(track.key, project.atmos_layout))
-            tip = f"{track.hint}\n非此音轨扬声器（{speakers}）分配范围内的对象将暗化呈现"
+            tip = t("soundfield.track_tip", hint=track.hint, speakers=speakers)
             items.append(widgets.TrackItem(track.key, text, tip))
         self.tracks.set_tracks(items, checked)
 
     def problem(self, ctx: PlanContext) -> str | None:
+        from dolbytool.core.i18n import t
+
         too_big = frame_problem(self.width_spin.value(), self.height_spin.value())
         if too_big:
             return too_big
         info = ctx.project.info
         if info is not None and not info.atmos:
-            return "当前输入非杜比全景声，无法生成声场视频"
+            return t("soundfield.not_atmos")
         if info is not None and not self._selected(ctx.project):
-            return "请至少勾选一条需要生成声场视频的音轨"
+            return t("soundfield.prompt_pick_track")
         head = self._head()
         if head and not head.is_file():
-            return "指定的 3D 头模文件不存在"
+            return t("soundfield.head_not_found")
         return renderer_problem("soundfield.mjs")
 
     def summary(self, ctx: PlanContext) -> str | None:
+        from dolbytool.core.i18n import t
+
         count = len(self._selected(ctx.project))
-        return f"{count} 个声场视频" if count else None
+        return t("soundfield.summary", count=count) if count else None
 
     def plan(self, ctx: PlanContext) -> list[Step]:
         project = ctx.project

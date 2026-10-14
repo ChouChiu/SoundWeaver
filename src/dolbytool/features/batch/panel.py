@@ -70,7 +70,9 @@ class BatchPanel(widgets.Card):
     changed = Signal()
 
     def __init__(self, settings: QSettings, parent: QWidget | None = None) -> None:
-        super().__init__("批量处理", parent)
+        from dolbytool.core.i18n import t
+
+        super().__init__(t("batch.title"), parent)
         self.settings = settings
         self.tracks: list[BatchTrack] = []
         # lyrics picked for one track, by its audio; None turns its lyrics off
@@ -84,10 +86,10 @@ class BatchPanel(widgets.Card):
         self._running = False
 
         self.list = widgets.HintTree(
-            "拖入音频文件或专辑文件夹，或点击下方「添加文件」「添加文件夹」"
+            t("batch.hint")
         )
         self.list.setColumnCount(4)
-        self.list.setHeaderLabels(["音轨", "信息", "歌词", "状态"])
+        self.list.setHeaderLabels([t("batch.col_track"), t("batch.col_info"), t("batch.col_lyrics"), t("batch.col_status")])
         self.list.setRootIsDecorated(False)
         self.list.setUniformRowHeights(True)
         self.list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -108,16 +110,14 @@ class BatchPanel(widgets.Card):
         remove.activated.connect(self.remove_selected)
 
         self._buttons: list[QWidget] = []
-        add_files = self._button("添加文件…", "list-add", self.pick_files)
-        add_folder = self._button("添加文件夹…", "folder-add", self.pick_folder)
-        import_lyrics = self._button("导入歌词…", "document-import", self.pick_lyrics)
-        import_lyrics.setToolTip(
-            "一次选择多个 .ttml，按文件名、音频标题与歌词内的曲名自动分配给对应音轨"
-        )
-        self.lyrics_btn = self._button("指定歌词…", "text-xml", self.pick_ttml)
-        self.remove_btn = self._button("移除", "list-remove", self.remove_selected)
-        self.remove_btn.setToolTip("移除选中的音轨（Delete）")
-        clear = self._button("清空", "edit-clear-all", self.clear, flat=True)
+        add_files = self._button(t("batch.add_files"), "list-add", self.pick_files)
+        add_folder = self._button(t("batch.add_folder"), "folder-add", self.pick_folder)
+        import_lyrics = self._button(t("batch.import_lyrics"), "document-import", self.pick_lyrics)
+        import_lyrics.setToolTip(t("batch.import_lyrics_tip"))
+        self.lyrics_btn = self._button(t("batch.set_lyrics"), "text-xml", self.pick_ttml)
+        self.remove_btn = self._button(t("batch.remove"), "list-remove", self.remove_selected)
+        self.remove_btn.setToolTip(t("batch.remove_tip"))
+        clear = self._button(t("batch.clear"), "edit-clear-all", self.clear, flat=True)
         buttons = QHBoxLayout()
         buttons.setSpacing(6)
         for button in (add_files, add_folder, import_lyrics, self.lyrics_btn, self.remove_btn):
@@ -125,15 +125,15 @@ class BatchPanel(widgets.Card):
         buttons.addStretch(1)
         buttons.addWidget(clear)
 
-        self.album = SwitchButton("专辑模式")
-        self.album.setOnText("专辑模式")
-        self.album.setToolTip(ALBUM_TIP)
+        self.album = SwitchButton(t("batch.album_mode"))
+        self.album.setOnText(t("batch.album_mode"))
+        self.album.setToolTip(t("batch.album_mode_tip"))
         self.album.checkedChanged.connect(lambda _on: self._sync())
         self.album_name = LineEdit()
         self.album_name.setClearButtonEnabled(True)
-        self.album_name.setPlaceholderText("留空则使用音频标签中的专辑名")
+        self.album_name.setPlaceholderText(t("batch.album_name_placeholder"))
         self.album_cover, cover_btn, cover_row = widgets.browse_row(
-            "图片或动态封面；留空则依次使用文件夹内的动态封面、封面图与内嵌封面", self.pick_cover
+            t("batch.album_cover_placeholder"), self.pick_cover
         )
         self.out_edit, out_btn, out_row = widgets.browse_row("", self.pick_output)
         self._buttons += [cover_btn, out_btn]
@@ -141,9 +141,9 @@ class BatchPanel(widgets.Card):
         self.form = QFormLayout()
         self.form.setVerticalSpacing(8)
         self.form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.form.addRow(BodyLabel("专辑名："), self.album_name)
-        self.form.addRow(BodyLabel("专辑封面："), cover_row)
-        self.form.addRow(BodyLabel("输出根目录："), out_row)
+        self.form.addRow(BodyLabel(t("batch.album_name")), self.album_name)
+        self.form.addRow(BodyLabel(t("batch.album_cover")), cover_row)
+        self.form.addRow(BodyLabel(t("batch.output_root")), out_row)
 
         layout = QVBoxLayout()
         layout.setSpacing(8)
@@ -178,7 +178,9 @@ class BatchPanel(widgets.Card):
         return self._probe.busy
 
     def album_title(self) -> str:
-        return self.album_name.text().strip() or album_name(self.tracks) or "专辑"
+        from dolbytool.core.i18n import t
+
+        return self.album_name.text().strip() or album_name(self.tracks) or t("batch.default_album_name")
 
     def output_root(self) -> Path | None:
         """Where the tracks' folders go; None leaves each track's next to it."""
@@ -266,47 +268,61 @@ class BatchPanel(widgets.Card):
     # ---- picking ---------------------------------------------------------------------
 
     def pick_files(self) -> None:
-        paths, _ = QFileDialog.getOpenFileNames(self, "添加音频", self.start_dir(), AUDIO_FILTER)
+        from dolbytool.core.i18n import t
+
+        paths, _ = QFileDialog.getOpenFileNames(self, t("batch.dialog_add_audio"), self.start_dir(), AUDIO_FILTER)
         self.add(Path(p) for p in paths)
 
     def pick_folder(self) -> None:
-        path = QFileDialog.getExistingDirectory(self, "添加文件夹（专辑）", self.start_dir())
+        from dolbytool.core.i18n import t
+
+        path = QFileDialog.getExistingDirectory(self, t("batch.dialog_add_folder"), self.start_dir())
         if path:
             self.add([Path(path)], album=True)
 
     def pick_cover(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "选择专辑封面", self.start_dir(), IMAGE_FILTER)
+        from dolbytool.core.i18n import t
+
+        path, _ = QFileDialog.getOpenFileName(self, t("batch.dialog_pick_album_cover"), self.start_dir(), IMAGE_FILTER)
         if path:
             self.album_cover.setText(path)
             self._flush()
 
     def pick_output(self) -> None:
+        from dolbytool.core.i18n import t
+
         start = str(self.output_root() or self.start_dir())
-        path = QFileDialog.getExistingDirectory(self, "选择输出根目录", start)
+        path = QFileDialog.getExistingDirectory(self, t("batch.dialog_pick_output_root"), start)
         if path:
             self.out_edit.setText(path)
             self._flush()
 
     def pick_ttml(self) -> None:
+        from dolbytool.core.i18n import t
+
         rows = self._selected_rows()
         if len(rows) != 1:
             return
         track = self.tracks[rows[0]]
         path, _ = QFileDialog.getOpenFileName(
-            self, f"为 {track.audio.name} 指定歌词", str(track.audio.parent), TTML_FILTER
+            self, t("batch.dialog_assign_lyrics_for", name=track.audio.name), str(track.audio.parent), TTML_FILTER
         )
         if path:
             self._ttml[track.audio] = Path(path)
             self._sync()
 
     def pick_lyrics(self) -> None:
+        from dolbytool.core.i18n import t
+
         paths, _ = QFileDialog.getOpenFileNames(
-            self, "导入歌词（自动分配到音轨）", self.start_dir(), TTML_FILTER
+            self, t("batch.dialog_import_lyrics"), self.start_dir(), TTML_FILTER
         )
         self.import_lyrics(Path(p) for p in paths)
 
     def import_lyrics(self, paths: Iterable[Path]) -> int:
         """Add lyric files, folders searched, for the tracks to be matched against."""
+        from dolbytool.core.i18n import t
+
         new = [p for p in lyric_match.lyric_files(paths) if p not in self._imported]
         if not new:
             return 0
@@ -314,9 +330,9 @@ class BatchPanel(widgets.Card):
         self._match()
         used = set(self._auto.values()) | {p for p in self._ttml.values() if p}
         left = [p.name for p in new if p not in used]
-        message = f"已导入 {len(new)} 份歌词，{len(new) - len(left)} 份已分配"
+        message = t("batch.lyrics_imported_summary", imported=len(new), matched=len(new) - len(left))
         if left:
-            message += f"；未能匹配：{'、'.join(left)}，可选中音轨后用「指定歌词」手动指定"
+            message += t("batch.lyrics_unmatched_note", names="、".join(left))
         logger.info(message)
         self._sync()
         return len(new)
@@ -332,16 +348,18 @@ class BatchPanel(widgets.Card):
         self._sync()
 
     def _context_menu(self, pos) -> None:
+        from dolbytool.core.i18n import t
+
         rows = self._selected_rows()
         if not rows or self._running:
             return
         menu = RoundMenu(parent=self)
-        pick = Action(fluent.icon("text-xml"), "指定歌词…", menu)
+        pick = Action(fluent.icon("text-xml"), t("batch.menu_set_lyrics"), menu)
         pick.setEnabled(len(rows) == 1)
         pick.triggered.connect(self.pick_ttml)
-        none = Action(fluent.icon("edit-clear"), "不使用歌词", menu)
+        none = Action(fluent.icon("edit-clear"), t("batch.menu_no_lyrics"), menu)
         none.triggered.connect(lambda: self._set_lyrics(rows, None, manual=True))
-        auto = Action(fluent.icon("view-refresh"), "恢复自动匹配", menu)
+        auto = Action(fluent.icon("view-refresh"), t("batch.menu_restore_auto"), menu)
         auto.setEnabled(any(self.tracks[r].audio in self._ttml for r in rows))
         auto.triggered.connect(lambda: self._set_lyrics(rows, None, manual=False))
         menu.addActions([pick, none, auto])
@@ -434,6 +452,8 @@ class BatchPanel(widgets.Card):
 
     def _sync(self) -> None:
         """Order the tracks, redraw the list and tell the window."""
+        from dolbytool.core.i18n import t
+
         # by audio, kept on each row: the rows may be stale after a removal or reorder
         selected = {i.data(0, Qt.ItemDataRole.UserRole) for i in self.list.selectedItems()}
         if self.is_album and not self._probe.busy:
@@ -441,20 +461,20 @@ class BatchPanel(widgets.Card):
         for row in (0, 1):
             self.form.setRowVisible(row, self.is_album)
         self.album_name.setPlaceholderText(
-            album_name(self.tracks) or "留空则使用音频标签中的专辑名"
+            album_name(self.tracks) or t("batch.album_name_placeholder")
         )
         root = self.output_root()
         self.out_edit.setPlaceholderText(
-            str(root) if root else "留空则保存到各音频旁的「<音频名>_stems」"
+            str(root) if root else t("batch.output_root_placeholder")
         )
         self.list.blockSignals(True)
         self.list.clear()
         for number, track in enumerate(self.tracks, 1):
             info = track.info
             if track.probing:
-                detail = "正在读取…"
+                detail = t("status.reading")
             elif info is None:
-                detail = f"无法读取：{track.error}"
+                detail = t("error.cannot_read", error=track.error)
             else:
                 detail = info.describe(self.atmos_layout())
             # the list numbers the tracks itself
@@ -462,12 +482,12 @@ class BatchPanel(widgets.Card):
             name = (info.title if info and info.title else "") or stem
             lyrics = self.lyrics_for(track)
             manual = track.audio in self._ttml
-            shown = lyrics.name if lyrics else ("不使用" if manual else "无")
+            shown = lyrics.name if lyrics else (t("batch.lyrics_disabled") if manual else t("batch.lyrics_none"))
             item = QTreeWidgetItem([f"{number:02d}. {name}", detail, shown, ""])
             item.setData(0, Qt.ItemDataRole.UserRole, track.audio)
             item.setToolTip(0, str(track.audio))
             item.setToolTip(1, detail)
-            how = "手动指定" if manual else "自动匹配" if lyrics else "未找到，可导入或手动指定"
+            how = t("batch.lyrics_manual") if manual else (t("batch.lyrics_auto") if lyrics else t("batch.lyrics_not_found"))
             item.setToolTip(_LYRICS, f"{lyrics or shown}\n（{how}）")
             if not lyrics:
                 item.setForeground(_LYRICS, fluent.dim())

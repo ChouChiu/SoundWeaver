@@ -74,14 +74,18 @@ def lyrics_target(output_dir: Path, name_source: Path) -> Path:
     return output_dir / f"{name_source.stem}_lyrics.webm"
 
 
+from dolbytool.core.i18n import t
+
+
 def lyrics_step(ttml: Path, target: Path, spec: SubtitleSpec, duration: float | None) -> Step:
     """`duration` follows the audio so the overlay lines up with the waveform video."""
 
     def run(token: CancellationToken, report: Report) -> str:
-        progress = Progress(report, "逐帧渲染与编码")
+        progress = Progress(report, t("step.frame_render_encode"))
         render_subtitle_video(
             ttml, target, spec, duration, token, progress.fraction, progress.status
         )
         return target.name
 
-    return Step("字幕视频", run, (target,))
+    return Step(t("step.lyrics_video"), run, (target,))
+

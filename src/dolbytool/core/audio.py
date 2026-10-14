@@ -43,13 +43,23 @@ class AudioInfo:
 
     def describe(self, render: SpeakerLayout | None = None) -> str:
         """One line about the file; `render` is what a Dolby Atmos track is rendered to."""
+        from dolbytool.core.i18n import t
+
+        layout_key = {
+            StemLayout.ATMOS: "audio.layout.atmos",
+            StemLayout.SURROUND: "audio.layout.surround",
+            StemLayout.STEREO: "audio.layout.stereo",
+            StemLayout.MONO: "audio.layout.mono",
+        }.get(self.layout, "")
+        layout_name = t(layout_key) if layout_key else LAYOUT_NAMES.get(self.layout, "")
+
         minutes, seconds = int(self.duration // 60), int(self.duration % 60)
         if self.atmos:
-            parts = [f"杜比全景声 ({render} 渲染)" if render else "杜比全景声"]
+            parts = [t("audio.describe.atmos_rendered", render=render) if render else t("audio.describe.atmos")]
         elif self.speakers is not None:
-            parts = [f"{self.channels} 声道 ({LAYOUT_NAMES[self.layout]} {self.speakers})"]
+            parts = [t("audio.describe.channels_layout_spk", channels=self.channels, layout=layout_name, speakers=self.speakers)]
         else:
-            parts = [f"{self.channels} 声道 ({LAYOUT_NAMES[self.layout]})"]
+            parts = [t("audio.describe.channels_layout", channels=self.channels, layout=layout_name)]
         parts.append(f"{minutes}:{seconds:02d}")
         if self.sample_rate:
             parts.append(f"{self.sample_rate / 1000:g} kHz")

@@ -35,6 +35,7 @@ from qfluentwidgets import (
     TreeWidget,
 )
 
+from dolbytool.core.i18n import t
 from dolbytool.ui import fluent
 
 
@@ -90,8 +91,8 @@ class ColorButton(PushButton):
 
     def _pick(self) -> None:
         dialog = ColorDialog(self._color, self._title, self.window())
-        dialog.yesButton.setText("确定")
-        dialog.cancelButton.setText("取消")
+        dialog.yesButton.setText(t("action.confirm"))
+        dialog.cancelButton.setText(t("action.cancel"))
         dialog.colorChanged.connect(self.setColor)
         dialog.exec()
 
@@ -107,13 +108,13 @@ def spin(low: int, high: int, value: int, suffix: str = "", step: int = 1) -> Co
 
 
 def browse_row(
-    placeholder: str, slot: Callable[[], None], tooltip: str = "浏览…"
+    placeholder: str, slot: Callable[[], None], tooltip: str = ""
 ) -> tuple[LineEdit, ToolButton, QHBoxLayout]:
     edit = LineEdit()
     edit.setPlaceholderText(placeholder)
     edit.setClearButtonEnabled(True)
     button = ToolButton(FluentIcon.FOLDER)
-    button.setToolTip(tooltip)
+    button.setToolTip(tooltip or t("action.browse"))
     button.clicked.connect(slot)
     row = QHBoxLayout()
     row.setSpacing(6)
@@ -289,7 +290,7 @@ class TrackList(QWidget):
         self.list.itemChanged.connect(lambda _item: self._remember())
         buttons = QHBoxLayout()
         buttons.setSpacing(4)
-        for text, state in (("全选", True), ("全不选", False)):
+        for text, state in ((t("action.select_all"), True), (t("action.deselect_all"), False)):
             button = HyperlinkButton()
             button.setText(text)
             button.clicked.connect(lambda _=False, on=state: self.check_all(on))
@@ -369,4 +370,7 @@ class TrackList(QWidget):
 
     def _count(self) -> None:
         total = self.list.count()
-        self.count_label.setText(f"已选 {len(self.checked())}/{total}" if total else "")
+        self.count_label.setText(
+            t("widgets.selected_count", selected=len(self.checked()), total=total) if total else ""
+        )
+

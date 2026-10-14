@@ -56,6 +56,9 @@ def split_stems(
     return list(clipped(peaks))
 
 
+from dolbytool.core.i18n import t
+
+
 def split_step(
     source: Path,
     output_dir: Path,
@@ -84,4 +87,5 @@ def split_step(
         return "、".join(names) + "".join(f"；{note}" for note in notes)
 
     targets = tuple(stem_path(source, output_dir, k) for k in kinds) + ((adm,) if adm else ())
-    return Step("分轨", run, targets)
+    return Step(t("step.stems_split"), run, targets)
+

@@ -157,6 +157,9 @@ def soundfield_target(output_dir: Path, track_path: Path) -> Path:
     return output_dir / f"{track_path.stem}_soundfield.webm"
 
 
+from dolbytool.core.i18n import t
+
+
 def soundfield_step(
     audio: Path,
     videos: list[SoundfieldVideo],
@@ -167,11 +170,11 @@ def soundfield_step(
     """`duration` follows the probed audio length, as the lyric video does."""
 
     def run(token: CancellationToken, report: Report) -> str:
-        progress = Progress(report, "解析全景声对象")
+        progress = Progress(report, t("step.decode_atmos_objects"))
 
         def on_fraction(fraction: float) -> None:
             if fraction >= TRACE_SHARE:
-                progress.message = "逐帧渲染与编码"
+                progress.message = t("step.frame_render_encode")
             progress.fraction(fraction)
 
         paths = render_soundfield_videos(
@@ -179,5 +182,6 @@ def soundfield_step(
         )
         return "、".join(p.name for p in paths)
 
-    title = "声场视频" if len(videos) == 1 else f"声场视频（{len(videos)} 条）"
+    title = t("step.soundfield_video") if len(videos) == 1 else t("step.soundfield_videos_count", count=len(videos))
     return Step(title, run, tuple(v.target for v in videos))
+

@@ -16,9 +16,11 @@ from dolbytool.ui.fonts import CREDITS_TIP, FontList
 
 
 class LyricsPanel(FeaturePanel):
-    title = "字幕视频"
+    title_key = "lyrics.title"
+    description_key = "lyrics.description"
+    _title = "字幕视频"
     icon = "view-media-lyrics"
-    description = (
+    _description = (
         "基于 AMLL 渲染 TTML 逐字动态歌词，输出带 Alpha 透明通道的单行居中 WebM (VP9) 视频"
     )
     enabled_key = "do_lyrics"
@@ -27,17 +29,19 @@ class LyricsPanel(FeaturePanel):
 
     def __init__(self, settings: QSettings, parent=None) -> None:
         super().__init__(settings, parent)
+        from dolbytool.core.i18n import t
+
         d = SubtitleSpec()
         self.width_spin = self.spin("lyr_w", 64, MAX_FRAME_SIDE, d.width, " px", step=2)
         self.height_spin = self.spin("lyr_h", 32, MAX_FRAME_SIDE, d.height, " px", step=2)
         self.fps = self.spin("lyr_fps", 10, 120, d.fps, " fps")
         self.font_size = self.spin("lyr_font_size", 8, 512, d.font_size, " px")
         self.fade = self.spin("lyr_fade", 0, 2000, d.fade_ms, " ms", step=50)
-        self.fade.setToolTip("歌词换行时新旧行的淡入淡出过渡时长")
+        self.fade.setToolTip(t("lyrics.fade_tip"))
         self.translation = self.spin("lyr_sub", 0, 100, d.translation_opacity, " %")
-        self.translation.setToolTip("翻译行文本的不透明度（0% 为隐藏）")
+        self.translation.setToolTip(t("lyrics.translation_tip"))
         self.filter_credits = self.check(
-            "lyrics_filter_credits", "过滤标题与制作信息", d.filter_credits, CREDITS_TIP
+            "lyrics_filter_credits", t("lyrics.filter_credits"), d.filter_credits, t("lyrics.credits_tip")
         )
         self.fonts = FontList()
 
@@ -45,23 +49,23 @@ class LyricsPanel(FeaturePanel):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(
             widgets.section(
-                "画面",
+                t("section.video"),
                 widgets.two_column_grid([
-                    ("尺寸：", widgets.size_row(self.width_spin, self.height_spin), "帧率：", self.fps),
+                    (t("label.size"), widgets.size_row(self.width_spin, self.height_spin), t("label.fps"), self.fps),
                 ]),
             )
         )  # fmt: skip
         layout.addWidget(
             widgets.section(
-                "排版与文字",
+                t("section.typography"),
                 widgets.two_column_grid([
-                    ("字号：", self.font_size, "淡入淡出：", self.fade),
-                    ("翻译不透明度：", self.translation, None, None),
-                    ("内容：", self.filter_credits, None, None),
+                    (t("label.font_size"), self.font_size, t("label.fade"), self.fade),
+                    (t("label.translation_opacity"), self.translation, None, None),
+                    (t("label.content"), self.filter_credits, None, None),
                 ]),
             )
         )  # fmt: skip
-        layout.addWidget(widgets.section("字体回退顺序", self.fonts))
+        layout.addWidget(widgets.section(t("section.fonts_fallback"), self.fonts))
         layout.addStretch(1)
 
     def spec(self) -> SubtitleSpec:
@@ -79,18 +83,22 @@ class LyricsPanel(FeaturePanel):
     # ---- hooks -----------------------------------------------------------------------
 
     def problem(self, ctx: PlanContext) -> str | None:
+        from dolbytool.core.i18n import t
+
         too_big = frame_problem(self.width_spin.value(), self.height_spin.value())
         if too_big:
             return too_big
         ttml = ctx.project.ttml
         if not ttml:
-            return "请选择 TTML 逐字歌词文件"
+            return t("lyrics.prompt_pick_ttml")
         if not ttml.is_file():
-            return "指定的歌词文件不存在"
+            return t("lyrics.ttml_not_found")
         return renderer_problem("render.mjs")
 
     def summary(self, ctx: PlanContext) -> str | None:
-        return f"字幕视频 {self.width_spin.value()}×{self.height_spin.value()}"
+        from dolbytool.core.i18n import t
+
+        return t("lyrics.summary", width=self.width_spin.value(), height=self.height_spin.value())
 
     def plan(self, ctx: PlanContext) -> list[Step]:
         project = ctx.project

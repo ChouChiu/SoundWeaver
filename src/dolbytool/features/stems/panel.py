@@ -29,13 +29,17 @@ LAYOUT_TIP = (
 
 
 class StemsPanel(FeaturePanel):
-    title = "分轨"
+    title_key = "stems.title"
+    description_key = "stems.description"
+    _title = "分轨"
     icon = "view-media-equalizer"
-    description = "按声道布局分离导出 WAV 分轨；杜比全景声源可渲染为 5.1 至 9.1.6 等布局，支持导出标准 ADM BWF"
+    _description = "按声道布局分离导出 WAV 分轨；杜比全景声源可渲染为 5.1 至 9.1.6 等布局，支持导出标准 ADM BWF"
     enabled_key = "do_stems"
 
     def __init__(self, settings: QSettings, parent=None) -> None:
         super().__init__(settings, parent)
+        from dolbytool.core.i18n import t
+
         self.checks: dict[str, CheckBox] = {}
         # unticked stems, including those of layouts not shown right now
         self._skip: set[str] = set()
@@ -43,7 +47,7 @@ class StemsPanel(FeaturePanel):
         self.grid.setHorizontalSpacing(18)
         self.grid.setVerticalSpacing(6)
         buttons = QHBoxLayout()
-        for text, state in (("全选", True), ("全不选", False)):
+        for text, state in ((t("action.select_all"), True), (t("action.deselect_all"), False)):
             button = HyperlinkButton()
             button.setText(text)
             button.clicked.connect(lambda _=False, on=state: self._check_all(on))
@@ -61,27 +65,27 @@ class StemsPanel(FeaturePanel):
         self.crossover.setSingleStep(10)
         self.crossover.setSuffix(" Hz")
         self.crossover.setValue(DEFAULT_CROSSOVER_HZ)
-        self.crossover.setToolTip("低频段与高频段的分频截止频率")
+        self.crossover.setToolTip(t("stems.crossover_tip"))
         self.remember("crossover", self.crossover)
-        self.adm = self.check("stem_adm", ADM_TEXT, False)
+        self.adm = self.check("stem_adm", t("stems.adm_text"), False)
         self.layout_box = fluent.ComboBox()
         for speakers in LAYOUTS:
             self.layout_box.addItem(speakers.name, speakers.name)
         self.layout_box.setCurrentIndex(self.layout_box.findData(DEFAULT_ATMOS.name))
-        self.layout_box.setToolTip(LAYOUT_TIP)
+        self.layout_box.setToolTip(t("stems.layout_tip"))
         self.layout_box.currentIndexChanged.connect(self._layout_picked)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(widgets.section("输出分轨", stems))
+        layout.addWidget(widgets.section(t("section.stems_output"), stems))
         layout.addWidget(
             widgets.section(
-                "设置",
+                t("section.settings"),
                 widgets.form(
                     [
-                        ("全景声渲染布局：", self.layout_box),
-                        ("分频点：", self.crossover),
-                        ("全景声元数据：", self.adm),
+                        (t("label.atmos_render_layout"), self.layout_box),
+                        (t("label.crossover"), self.crossover),
+                        (t("label.atmos_metadata"), self.adm),
                     ]
                 ),
             )
@@ -133,6 +137,8 @@ class StemsPanel(FeaturePanel):
             self.grid.removeWidget(box)
             box.deleteLater()
         self.checks = {}
+        from dolbytool.core.i18n import t
+
         atmos = project.info is not None and project.info.atmos
         self.adm.setEnabled(atmos)
         exists = bool(
@@ -140,44 +146,51 @@ class StemsPanel(FeaturePanel):
             and project.output_dir
             and adm_target(project.output_dir, project.audio).is_file()
         )
-        self.adm.setText(ADM_TEXT + ("（已有）" if exists else ""))
-        self.adm.setToolTip(ADM_TIP if atmos else "当前输入非杜比全景声，无法导出 ADM BWF")
+        adm_text = t("stems.adm_text") + (t("stems.existing_suffix") if exists else "")
+        self.adm.setText(adm_text)
+        self.adm.setToolTip(t("stems.adm_tip") if atmos else t("stems.adm_disabled_tip"))
         stems = project.stems
         for index, track in enumerate(stems):
-            box = CheckBox(track.label + ("（已有）" if track.exists else ""))
+            box = CheckBox(track.label + (t("stems.existing_suffix") if track.exists else ""))
             box.setChecked(track.key not in self._skip)
             box.setToolTip(f"{track.hint}\n{track.path}")
             box.toggled.connect(self._remember)
             self.grid.addWidget(box, index // COLUMNS, index % COLUMNS)
             self.checks[track.key] = box
         if not stems:
-            self.info.setText("载入音频后显示可用分轨")
+            self.info.setText(t("stems.hint_empty"))
             return
         done = sum(t.exists for t in stems)
         self.info.setText(
-            f"输出目录已存在 {done}/{len(stems)} 条分轨" if done else "输出目录尚未生成分轨"
+            t("stems.done_status", done=done, total=len(stems)) if done else t("stems.not_done_status")
         )
 
     def is_active(self, ctx: PlanContext) -> bool:
         return bool(self._kinds(ctx)) or self._adm(ctx)
 
     def problem(self, ctx: PlanContext) -> str | None:
+        from dolbytool.core.i18n import t
+
         if ctx.project.info is not None and not self._chosen(ctx.project) and not self._adm(ctx):
-            return "请至少勾选一条需要导出的分轨"
+            return t("stems.prompt_pick_one")
         return None
 
     def summary(self, ctx: PlanContext) -> str | None:
+        from dolbytool.core.i18n import t
+
         kinds = self._kinds(ctx)
-        parts = [f"{len(kinds)} 条分轨"] if kinds else []
+        parts = [t("stems.summary", count=len(kinds))] if kinds else []
         if self._adm(ctx):
             parts.append("ADM BWF")
         if not parts:
             return None
-        note = f"（{'、'.join(ctx.requested_by)}需要）" if self._implicit(ctx) else ""
+        note = t("stems.needed_by", by="、".join(ctx.requested_by)) if self._implicit(ctx) else ""
         return "、".join(parts) + note
 
     def notes(self, ctx: PlanContext) -> list[str]:
-        return ["所选音轨尚未分轨，将自动追加前置分轨任务"] if self._implicit(ctx) else []
+        from dolbytool.core.i18n import t
+
+        return [t("stems.implicit_note")] if self._implicit(ctx) else []
 
     def plan(self, ctx: PlanContext) -> list[Step]:
         project = ctx.project

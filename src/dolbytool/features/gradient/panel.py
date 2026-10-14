@@ -28,54 +28,58 @@ DEFAULT_BOTTOM = "#040509"
 
 
 class GradientPanel(FeaturePanel):
-    title = "渐变图"
+    title_key = "gradient.title"
+    description_key = "gradient.description"
+    _title = "渐变图"
     icon = "color-gradient"
-    description = "提取封面主色调并向下平滑压暗过渡，生成背景渐变图 (PNG)"
+    _description = "提取封面主色调并向下平滑压暗过渡，生成背景渐变图 (PNG)"
     enabled_key = "do_gradient"
     per_album = True
 
     def __init__(self, settings: QSettings, parent=None) -> None:
         super().__init__(settings, parent)
+        from dolbytool.core.i18n import t
+
         self._cover: FileStamp | None = None
         self._swatches = Latest(self)
 
         self.swatch_row = QHBoxLayout()
         self.swatch_row.setSpacing(2)
-        self.swatch_hint = widgets.hint_label("载入封面后自动提取主色调", wrap=False)
+        self.swatch_hint = widgets.hint_label(t("gradient.swatch_hint"), wrap=False)
         self.swatch_row.addWidget(self.swatch_hint)
         self.swatch_row.addStretch(1)
-        self.top_color = widgets.ColorButton(DEFAULT_TOP, "选择上部基色")
-        self.bottom_color = widgets.ColorButton(DEFAULT_BOTTOM, "选择下部基色")
+        self.top_color = widgets.ColorButton(DEFAULT_TOP, t("gradient.pick_top"))
+        self.bottom_color = widgets.ColorButton(DEFAULT_BOTTOM, t("gradient.pick_bottom"))
         colours = widgets.form([
-            ("封面色彩：", self.swatch_row),
-            ("上部基色：", self.top_color),
-            ("下部基色：", self.bottom_color),
+            (t("label.cover_colors"), self.swatch_row),
+            (t("label.top_base_color"), self.top_color),
+            (t("label.bottom_base_color"), self.bottom_color),
         ])  # fmt: skip
 
         self.width_spin = self.spin("grad_w", 16, MAX_FRAME_SIDE, 4000, " px")
         self.height_spin = self.spin("grad_h", 16, MAX_FRAME_SIDE, 4000, " px")
         self.start_spin = self.spin("grad_start", 0, 100, 30, " %")
         self.span_spin = self.spin("grad_span", 1, 100, 40, " %")
-        self.start_spin.setToolTip("渐变过渡起始纵向位置（占画面高度比例）")
-        self.span_spin.setToolTip("渐变过渡区间的跨度（占画面高度比例）")
+        self.start_spin.setToolTip(t("gradient.start_tip"))
+        self.span_spin.setToolTip(t("gradient.span_tip"))
         frame = widgets.form([
-            ("尺寸：", widgets.size_row(self.width_spin, self.height_spin)),
-            ("过渡起点：", self.start_spin),
-            ("过渡跨度：", self.span_spin),
+            (t("label.size"), widgets.size_row(self.width_spin, self.height_spin)),
+            (t("label.grad_start"), self.start_spin),
+            (t("label.grad_span"), self.span_spin),
         ])  # fmt: skip
 
-        self.preview = widgets.preview_label("渐变预览", side=150)
+        self.preview = widgets.preview_label(t("gradient.preview_title"), side=150)
         for button in (self.top_color, self.bottom_color):
             button.colorChanged.connect(self._update_preview)
         for box in (self.width_spin, self.height_spin, self.start_spin, self.span_spin):
             box.valueChanged.connect(self._update_preview)
 
         settings_column = QVBoxLayout()
-        settings_column.addWidget(widgets.section("颜色", colours))
-        settings_column.addWidget(widgets.section("画面", frame))
+        settings_column.addWidget(widgets.section(t("section.colors"), colours))
+        settings_column.addWidget(widgets.section(t("section.video"), frame))
         settings_column.addStretch(1)
         preview_column = QVBoxLayout()
-        preview_column.addWidget(widgets.section("预览", self.preview))
+        preview_column.addWidget(widgets.section(t("section.preview"), self.preview))
         preview_column.addStretch(1)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -174,15 +178,19 @@ class GradientPanel(FeaturePanel):
         return frame_problem(self.width_spin.value(), self.height_spin.value())
 
     def summary(self, ctx: PlanContext) -> str | None:
+        from dolbytool.core.i18n import t
+
         spec = self.spec()
-        return f"渐变图 {spec.width}×{spec.height}"
+        return t("gradient.summary", width=spec.width, height=spec.height)
 
     def confirm(self, ctx: PlanContext) -> bool:
+        from dolbytool.core.i18n import t
+
         cover = ctx.project.cover
         if cover and cover.is_file():
             return True
         return fluent.ask(
-            self, "未载入封面", "当前未选择封面图片，渐变图将直接使用预设基色生成，是否继续？"
+            self, t("status.cannot_start"), t("gradient.prompt_pick_cover"), accept=t("action.continue")
         )
 
     def plan(self, ctx: PlanContext) -> list[Step]:

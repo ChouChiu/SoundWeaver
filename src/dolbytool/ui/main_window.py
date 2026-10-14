@@ -54,6 +54,13 @@ from qfluentwidgets import (
 )
 
 from dolbytool.core import ffmpeg
+from dolbytool.core.i18n import (
+    LANGUAGE_NAMES,
+    SUPPORTED_LANGUAGES,
+    get_language,
+    set_language,
+    t,
+)
 from dolbytool.core.project import PlanContext, Project
 from dolbytool.core.task import Step
 from dolbytool.features.batch.panel import BatchPanel
@@ -65,16 +72,20 @@ from dolbytool.ui import fluent, widgets
 from dolbytool.ui.feature import FeaturePanel
 from dolbytool.ui.logs import LogPanelHandler
 from dolbytool.ui.outputs import OutputList
+from dolbytool.ui.settings import SettingsPage
 from dolbytool.ui.tasks import TaskView
 from dolbytool.ui.worker import Outcome, Worker
 
 logger = logging.getLogger(__name__)
 
-APP_TITLE = "杜比视频素材工具"
 SINGLE, BATCH = 0, 1
 MODES = ("single", "batch")
-ROUTE_INPUTS, ROUTE_OUTPUT, ROUTE_TASKS = "inputs", "output", "tasks"
+ROUTE_INPUTS, ROUTE_OUTPUT, ROUTE_TASKS, ROUTE_SETTINGS = "inputs", "output", "tasks", "settings"
 OUTPUTS_WIDTH = (280, 380)
+
+
+def app_title() -> str:
+    return t("app.title")
 
 
 class _PageHeader(QWidget):
@@ -85,8 +96,8 @@ class _PageHeader(QWidget):
         icon = IconWidget(fluent.icon(panel.icon))
         icon.setFixedSize(26, 26)
         self.check = SwitchButton()
-        self.check.setOnText("已启用")
-        self.check.setOffText("未启用")
+        self.check.setOnText(t("switch.enabled"))
+        self.check.setOffText(t("switch.disabled"))
         self.check.checkedChanged.connect(panel.set_enabled)
         self.status = widgets.hint_label()
         self.status.hide()
@@ -146,7 +157,7 @@ class BatchPlan:
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle(APP_TITLE)
+        self.setWindowTitle(app_title())
         self.setAcceptDrops(True)
         self.settings = QSettings()
         self.worker: Worker | None = None
@@ -183,25 +194,25 @@ class MainWindow(QMainWindow):
             self.addAction(act)
             return act
 
-        self.act_audio = action("打开音频", "document-open", self.source.pick_audio,
+        self.act_audio = action(t("action.open_audio"), "document-open", self.source.pick_audio,
                                 QKeySequence.StandardKey.Open)  # fmt: skip
-        self.act_batch_files = action("批量添加", "list-add", self._batch_files,
+        self.act_batch_files = action(t("action.batch_add"), "list-add", self._batch_files,
                                       QKeySequence("Ctrl+Shift+B"))  # fmt: skip
-        self.act_batch_folder = action("添加专辑文件夹", "folder-add", self._batch_folder,
+        self.act_batch_folder = action(t("action.add_album_folder"), "folder-add", self._batch_folder,
                                        QKeySequence("Ctrl+Shift+M"))  # fmt: skip
-        self.act_cover = action("选择封面", "insert-image", self.source.pick_cover,
+        self.act_cover = action(t("action.select_cover"), "insert-image", self.source.pick_cover,
                                 QKeySequence("Ctrl+Shift+O"))  # fmt: skip
-        self.act_ttml = action("选择歌词", "text-xml", self.source.pick_ttml,
+        self.act_ttml = action(t("action.select_lyrics"), "text-xml", self.source.pick_ttml,
                                 QKeySequence("Ctrl+L"))  # fmt: skip
-        self.act_open_dir = action("打开输出目录", "folder-open", self._open_output_dir,
+        self.act_open_dir = action(t("action.open_output_dir"), "folder-open", self._open_output_dir,
                                    QKeySequence("Ctrl+E"))  # fmt: skip
         self.act_quit = action(
-            "退出", "application-exit", self.close, QKeySequence.StandardKey.Quit
+            t("action.quit"), "application-exit", self.close, QKeySequence.StandardKey.Quit
         )
         self.act_start = action(
-            "开始", "media-playback-start", self._start, QKeySequence("Ctrl+Return")
+            t("action.start"), "media-playback-start", self._start, QKeySequence("Ctrl+Return")
         )
-        self.act_cancel = action("取消", "process-stop", self._cancel, QKeySequence("Escape"))
+        self.act_cancel = action(t("action.cancel"), "process-stop", self._cancel, QKeySequence("Escape"))
         self.act_cancel.setEnabled(False)
         self.input_actions = (
             self.act_audio, self.act_cover, self.act_ttml,
@@ -217,8 +228,8 @@ class MainWindow(QMainWindow):
         self.nav.setCollapsible(False)
         self._routes: dict[str, QWidget] = {}
 
-        self._add_route(ROUTE_INPUTS, "home", "素材", self._build_inputs_page())
-        self.nav.addItemHeader("输出设置")
+        self._add_route(ROUTE_INPUTS, "home", t("nav.materials"), self._build_inputs_page())
+        self.nav.addItemHeader(t("nav.outputs_header"))
         self.headers: list[_PageHeader] = []
         for index, panel in enumerate(self.panels):
             header = _PageHeader(panel)
@@ -226,12 +237,13 @@ class MainWindow(QMainWindow):
             page = _scroll_page(header, widgets.hint_label(panel.description), panel)
             self._add_route(f"{ROUTE_OUTPUT}{index}", panel.icon, panel.title, page)
         self._add_route(
-            ROUTE_TASKS, "view-list-details", "任务与日志", self._build_tasks_page(),
+            ROUTE_TASKS, "view-list-details", t("nav.tasks_logs"), self._build_tasks_page(),
             NavigationItemPosition.BOTTOM,
         )  # fmt: skip
-        self.nav.addItem(
-            "about", fluent.icon("help-about"), "关于", self._about,
-            selectable=False, position=NavigationItemPosition.BOTTOM,
+        self.settings_page = SettingsPage(self)
+        self._add_route(
+            ROUTE_SETTINGS, "preferences-system", t("nav.settings"), self.settings_page,
+            NavigationItemPosition.BOTTOM,
         )  # fmt: skip
 
         right = QWidget()
@@ -241,8 +253,8 @@ class MainWindow(QMainWindow):
         if self._missing_tools:
             right_layout.addWidget(
                 InfoBar.error(
-                    "缺少系统依赖",
-                    f"未检测到 {'、'.join(self._missing_tools)}，请确保已安装 FFmpeg 并将其加入系统 PATH 环境变量",
+                    t("status.missing_dependencies_title"),
+                    t("status.missing_dependencies_banner", tools="、".join(self._missing_tools)),
                     isClosable=False,
                     duration=-1,
                     position=InfoBarPosition.NONE,
@@ -273,8 +285,8 @@ class MainWindow(QMainWindow):
         self.mode_bar = SegmentedWidget()
         self.mode = QStackedWidget()
         for key, text, icon, page in (
-            (MODES[SINGLE], "单曲", "audio-x-generic", self.source),
-            (MODES[BATCH], "批量 / 专辑", "view-media-playlist", self.batch),
+            (MODES[SINGLE], t("inputs.single_mode"), "audio-x-generic", self.source),
+            (MODES[BATCH], t("inputs.batch_mode"), "view-media-playlist", self.batch),
         ):
             self.mode.addWidget(page)
             self.mode_bar.addItem(
@@ -286,7 +298,7 @@ class MainWindow(QMainWindow):
         self.outputs = OutputList(self.panels)
         self.outputs.selected.connect(self._show_page)
         self.outputs.itemClicked.connect(lambda item: self._show_page(self.outputs.row(item)))
-        outputs = widgets.section("输出（点击进入设置）", self.outputs)
+        outputs = widgets.section(t("inputs.outputs_section"), self.outputs)
 
         # as wide as it needs on a large window, narrower before the inputs get cramped
         outputs.setMinimumWidth(OUTPUTS_WIDTH[0])
@@ -303,10 +315,10 @@ class MainWindow(QMainWindow):
         body.addLayout(left, 3)
         body.addWidget(outputs, 1)
         title = QHBoxLayout()
-        title.addWidget(TitleLabel("素材"))
+        title.addWidget(TitleLabel(t("inputs.title")))
         title.addSpacing(12)
         title.addWidget(
-            widgets.hint_label("拖入音频、封面、歌词或整个专辑文件夹即可开始", wrap=False),
+            widgets.hint_label(t("inputs.hint"), wrap=False),
             0,
             Qt.AlignmentFlag.AlignBottom,
         )
@@ -325,21 +337,21 @@ class MainWindow(QMainWindow):
         self.tasks = TaskView()
         self.log = PlainTextEdit()
         self.log.setReadOnly(True)
-        self.log.setPlaceholderText("运行日志")
+        self.log.setPlaceholderText(t("tasks.log_placeholder"))
         self.log.setMaximumBlockCount(5000)
         # every log record from now on, from any thread, also lands here
         self._log_handler = LogPanelHandler()
         self._log_handler.lines.line.connect(self.log.appendPlainText)
         logging.getLogger().addHandler(self._log_handler)
         self.splitter = QSplitter(Qt.Orientation.Vertical)
-        self.splitter.addWidget(widgets.section("任务", self.tasks))
-        self.splitter.addWidget(widgets.section("日志", self.log))
+        self.splitter.addWidget(widgets.section(t("tasks.section_tasks"), self.tasks))
+        self.splitter.addWidget(widgets.section(t("tasks.section_logs"), self.log))
         self.splitter.setChildrenCollapsible(False)
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
-        layout.addWidget(TitleLabel("任务与日志"))
+        layout.addWidget(TitleLabel(t("tasks.title")))
         layout.addWidget(self.splitter, 1)
         return page
 
@@ -370,12 +382,12 @@ class MainWindow(QMainWindow):
         self.progress.setFixedWidth(220)
         self.progress.hide()
         row.addWidget(self.progress)
-        self.open_dir_btn = PushButton(fluent.icon("folder-open"), "打开输出目录")
+        self.open_dir_btn = PushButton(fluent.icon("folder-open"), t("action.open_output_dir"))
         self.open_dir_btn.clicked.connect(self._open_output_dir)
-        self.cancel_btn = PushButton(fluent.icon("process-stop"), "取消")
+        self.cancel_btn = PushButton(fluent.icon("process-stop"), t("action.cancel"))
         self.cancel_btn.clicked.connect(self._cancel)
         self.cancel_btn.hide()
-        self.start_btn = PrimaryPushButton(fluent.icon("media-playback-start"), "开始")
+        self.start_btn = PrimaryPushButton(fluent.icon("media-playback-start"), t("action.start"))
         self.start_btn.setToolTip("Ctrl+Enter")
         self.start_btn.setMinimumWidth(110)
         self.start_btn.clicked.connect(self._start)
@@ -469,11 +481,11 @@ class MainWindow(QMainWindow):
         project = ctx.project
         if panel.needs_audio:
             if project.audio is None:
-                return "请添加音频文件" if ctx.batch else "请选择音频文件"
+                return t("source.prompt_add_audio") if ctx.batch else t("source.prompt_pick_audio")
             if project.probing:
-                return "正在解析音频…"
+                return t("status.parsing_audio")
             if project.info is None:
-                return f"无法解析音频：{project.audio_error or '未知错误'}"
+                return t("error.audio_parse_failed", error=project.audio_error or t("error.unknown"))
         return panel.problem(ctx)
 
     def _problems(self, ctx: PlanContext) -> dict[int, str]:
@@ -487,20 +499,20 @@ class MainWindow(QMainWindow):
     @staticmethod
     def _dir_problem(out: Path | None) -> str | None:
         if out is None:
-            return "请指定有效的音频文件或输出目录"
+            return t("error.invalid_output_dir")
         if out.exists() and not out.is_dir():
-            return "指定的输出路径不是目录"
+            return t("error.output_not_dir")
         existing = next((p for p in (out, *out.parents) if p.exists()), None)
         if existing is None or not os.access(existing, os.W_OK):
-            return "输出目录无写入权限"
+            return t("error.output_no_write")
         return None
 
     def _blocker(self, ctx: PlanContext, problems: dict[int, str]) -> str | None:
         """Why Start cannot run right now, or None when it can."""
         if self._missing_tools:
-            return f"缺少系统依赖 {'、'.join(self._missing_tools)}"
+            return t("status.missing_dependencies_blocker", tools="、".join(self._missing_tools))
         if not any(panel.enabled for panel in self.panels):
-            return "请勾选至少一项输出内容"
+            return t("status.no_output_selected")
         if self._is_batch:
             return self._batch_blocker()
         if problems:
@@ -510,11 +522,11 @@ class MainWindow(QMainWindow):
 
     def _batch_blocker(self) -> str | None:
         if not self.batch.tracks:
-            return "请添加音频文件或专辑文件夹"
+            return t("batch.blocker_no_tracks")
         if self.batch.busy:
-            return "正在读取音轨信息…"
+            return t("batch.reading_track_info")
         if not self._batch_plan().steps:
-            return "没有可处理的音轨，请查看列表中的状态"
+            return t("batch.blocker_no_runnable")
         return None
 
     def _plan_track(
@@ -536,6 +548,7 @@ class MainWindow(QMainWindow):
     def _batch_plan(self) -> BatchPlan:
         plan = BatchPlan()
         album = self.batch.is_album
+        album_prefix = t("batch.album_prefix")
         album_project = self.batch.album_project() if album else None
         # what each panel planned for each track, for the steps that close the album
         made: dict[FeaturePanel, list[tuple[Project, list[Step]]]] = {}
@@ -546,10 +559,10 @@ class MainWindow(QMainWindow):
                 if not (panel.enabled and panel.per_album):
                     continue
                 if p := panel.problem(ctx):
-                    plan.skipped.append(f"专辑 · {panel.title}：{p}")
+                    plan.skipped.append(f"{album_prefix} · {panel.title}：{p}")
                     continue
                 steps = panel.plan(ctx)
-                plan.steps += [replace(s, title=f"专辑 · {s.title}") for s in steps]
+                plan.steps += [replace(s, title=f"{album_prefix} · {s.title}") for s in steps]
             if plan.steps and project.output_dir:
                 plan.output_dirs.append(project.output_dir)
                 plan.inputs |= set(project.inputs()) - {project.audio}
@@ -558,36 +571,38 @@ class MainWindow(QMainWindow):
             plan.inputs |= set(project.inputs())
             name = f"{number:02d} {without_number(project.audio.stem)}"
             if project.probing:
-                plan.status.append(("正在读取…", False))
+                plan.status.append((t("status.reading"), False))
                 continue
             if project.info is None:
-                plan.status.append((f"跳过：{project.audio_error or '无法读取'}", True))
+                plan.status.append(
+                    (t("batch.skipped_prefix", reason=project.audio_error or t("error.cannot_read_short")), True)
+                )
                 continue
             if dir_problem := self._dir_problem(project.output_dir):
-                plan.status.append((f"跳过：{dir_problem}", True))
+                plan.status.append((t("batch.skipped_prefix", reason=dir_problem), True))
                 continue
             by_panel, left_out = self._plan_track(project, album)
             for panel, panel_steps in by_panel.items():
                 made.setdefault(panel, []).append((project, panel_steps))
             steps = [step for panel_steps in by_panel.values() for step in panel_steps]
             for note in left_out:
-                plan.skipped.append(f"{name} 不生成 {note}")
+                plan.skipped.append(t("batch.will_not_generate", name=name, note=note))
             if not steps and album and not left_out:
                 # all it makes is part of what the album makes as a whole
                 plan.tracks += 1
-                plan.status.append(("并入专辑输出", False))
+                plan.status.append((t("batch.merged_into_album"), False))
                 continue
             if not steps:
-                reason = "；".join(left_out) or "没有需要生成的输出"
-                plan.status.append((f"跳过：{reason}", True))
+                reason = "；".join(left_out) or t("batch.no_outputs_to_generate")
+                plan.status.append((t("batch.skipped_prefix", reason=reason), True))
                 continue
             plan.steps += [replace(s, title=f"{name} · {s.title}") for s in steps]
             plan.tracks += 1
             assert project.output_dir is not None
             plan.output_dirs.append(project.output_dir)
-            text = f"{len(steps)} 项任务"
+            text = t("batch.tasks_count", count=len(steps))
             if left_out:
-                text += "，不生成 " + "、".join(left_out)
+                text += t("batch.not_generating_suffix", notes="、".join(left_out))
             plan.status.append((text, bool(left_out)))
         if album_project:
             ctx = self._context(album_project, batch=True)
@@ -621,8 +636,8 @@ class MainWindow(QMainWindow):
             if not missing:
                 continue
             ok = len(projects) - sum(missing.values())
-            why = "；".join(f"{n} 首{p}" for p, n in missing.items())
-            shares[index] = (f"{ok}/{len(projects)} 首可生成（{why}）", ok == 0)
+            why = "；".join(t("batch.shares_track_reason", count=n, reason=p) for p, n in missing.items())
+            shares[index] = (t("batch.shares_status", ok=ok, total=len(projects), why=why), ok == 0)
         return shares
 
     def _tracks_changed(self) -> None:
@@ -657,7 +672,7 @@ class MainWindow(QMainWindow):
             elif panel.is_active(ctx):
                 status = (panel.summary(ctx) or "", False)
             else:
-                status = ("未启用", False)
+                status = (t("switch.disabled"), False)
             self.outputs.set_status(index, *status)
             self.headers[index].sync(panel.enabled, *status)
         if self.worker:
@@ -673,13 +688,19 @@ class MainWindow(QMainWindow):
             self.summary.setText(blocker)
             return
         if plan is not None:
-            album = "专辑" if self.batch.is_album else "批量"
+            album = t("batch.album_prefix") if self.batch.is_album else t("batch.batch_prefix")
             self.summary.setText(
-                f"{album}：{plan.tracks}/{len(self.batch.tracks)} 首音轨，共 {len(plan.steps)} 项任务"
+                t(
+                    "batch.summary_label",
+                    mode=album,
+                    tracks=plan.tracks,
+                    total=len(self.batch.tracks),
+                    steps=len(plan.steps),
+                )
             )
             return
         parts = [s for panel in self._active(ctx) if (s := panel.summary(ctx))]
-        self.summary.setText("待生成：" + "、".join(parts))
+        self.summary.setText(t("inputs.to_generate", items="、".join(parts)))
 
     def _show_page(self, index: int) -> None:
         if index >= 0:
@@ -699,7 +720,7 @@ class MainWindow(QMainWindow):
         ctx = self._context()
         blocker = self._blocker(ctx, self._problems(ctx))
         if blocker:
-            fluent.tell(self, "无法开始", blocker)
+            fluent.tell(self, t("status.cannot_start"), blocker)
             return
         if self._is_batch:
             plan = self._batch_plan()
@@ -716,10 +737,10 @@ class MainWindow(QMainWindow):
             dirs = [ctx.project.output_dir]
             notes = [note for panel in active for note in panel.notes(ctx)]
         if not steps:
-            fluent.tell(self, "未选择有效任务", "当前配置未勾选任何需要生成的输出项")
+            fluent.tell(self, t("status.no_valid_tasks_title"), t("status.no_valid_tasks_body"))
             return
         if clash := self._clash(inputs, steps):
-            fluent.tell(self, "无法开始", clash)
+            fluent.tell(self, t("status.cannot_start"), clash)
             return
         if not self._confirm_overwrite([t for step in steps for t in step.targets]):
             return
@@ -727,7 +748,7 @@ class MainWindow(QMainWindow):
             for out in dirs:
                 out.mkdir(parents=True, exist_ok=True)
         except OSError as error:
-            fluent.tell(self, "无法开始", f"无法创建输出目录：{error}")
+            fluent.tell(self, t("status.cannot_start"), t("error.cannot_create_dir", error=error))
             return
         self._save_settings()
         logger.info("—— 开始执行 %d 项任务，输出目录：%s", len(steps), self._output_label(dirs))
@@ -748,11 +769,11 @@ class MainWindow(QMainWindow):
         left = len(self.batch.tracks) - plan.tracks
         if not left and not plan.skipped:
             return True
-        lines = [f"将处理 {plan.tracks} 首音轨，共 {len(plan.steps)} 项任务"]
+        lines = [t("batch.confirm_summary", tracks=plan.tracks, steps=len(plan.steps))]
         if left:
-            lines.append(f"{left} 首音轨无法处理，将被跳过")
+            lines.append(t("batch.confirm_skipped_tracks", count=left))
         if plan.skipped:
-            lines.append(f"{len(plan.skipped)} 项输出因条件不满足不会生成")
+            lines.append(t("batch.confirm_skipped_outputs", count=len(plan.skipped)))
         details = [
             f"{index:02d} {track.audio.name}：{text}"
             for index, (track, (text, problem)) in enumerate(
@@ -761,7 +782,11 @@ class MainWindow(QMainWindow):
             if problem
         ]
         return fluent.ask(
-            self, "确认批量处理", "\n".join(lines), "\n".join(details + plan.skipped), "继续"
+            self,
+            t("batch.confirm_title"),
+            "\n".join(lines),
+            "\n".join(details + plan.skipped),
+            t("action.continue"),
         )
 
     @staticmethod
@@ -770,9 +795,9 @@ class MainWindow(QMainWindow):
         targets = [t.resolve() for step in steps for t in step.targets]
         resolved = {p.resolve() for p in inputs}
         if hit := next((t for t in targets if t in resolved), None):
-            return f"输出文件与源输入文件重名（{hit.name}），请指定其他输出目录"
+            return t("error.clash_input", name=hit.name)
         if twice := [t for t, n in Counter(targets).items() if n > 1]:
-            return f"多个输出任务指向相同的文件（{twice[0].name}），请调整配置"
+            return t("error.clash_steps", name=twice[0].name)
         return None
 
     def _confirm_overwrite(self, targets: list[Path]) -> bool:
@@ -781,10 +806,10 @@ class MainWindow(QMainWindow):
             return True
         return fluent.ask(
             self,
-            "确认覆盖文件",
-            f"检测到 {len(existing)} 个目标文件已存在，是否确认覆盖？",
+            t("status.confirm_overwrite_title"),
+            t("status.confirm_overwrite_body", count=len(existing)),
             "\n".join(p.name for p in existing),
-            "覆盖",
+            t("action.overwrite"),
         )
 
     def _cancel(self) -> None:
@@ -792,13 +817,13 @@ class MainWindow(QMainWindow):
             self.worker.cancel()
             self.cancel_btn.setEnabled(False)
             self.act_cancel.setEnabled(False)
-            self._show_status("正在取消…")
+            self._show_status(t("action.cancelling"))
 
     def _on_progress(self, index: int, value: int, message: str) -> None:
         self.tasks.progress(index, value, message)
         overall = self.tasks.overall()
         self.progress.setValue(overall)
-        self.setWindowTitle(f"{overall}% · {APP_TITLE}")
+        self.setWindowTitle(f"{overall}% · {app_title()}")
         self._show_status(f"{self.tasks.topLevelItem(index).text(0)}：{message}")
 
     def _on_step_finished(self, index: int, outcome: str, note: str, seconds: float) -> None:
@@ -814,13 +839,13 @@ class MainWindow(QMainWindow):
             self.worker.deleteLater()
         self.worker = None
         self._set_running(False)
-        self.setWindowTitle(APP_TITLE)
+        self.setWindowTitle(app_title())
         self._sources_changed()
         failures = self.tasks.failures()
         message = {
-            Outcome.DONE: f"全部任务完成，保存在 {self._output_label()}",
-            Outcome.CANCELLED: "任务已取消",
-            Outcome.FAILED: f"处理完成（{len(failures)} 项失败）",
+            Outcome.DONE: t("status.all_completed", path=self._output_label()),
+            Outcome.CANCELLED: t("status.cancelled"),
+            Outcome.FAILED: t("status.completed_with_failures", count=len(failures)),
         }[Outcome(outcome)]
         self._show_status(message)
         logger.info("—— %s", message)
@@ -830,19 +855,19 @@ class MainWindow(QMainWindow):
         if failures:
             fluent.tell(
                 self,
-                "部分任务执行失败",
-                f"{message}，其余任务已完成，详细失败信息请查看下方列表与运行日志",
+                t("status.part_failed_title"),
+                t("status.part_failed_body", message=message),
                 "\n".join(failures),
             )
 
     def _notify_done(self, message: str) -> None:
         bar = InfoBar.success(
-            "处理完成", message, duration=8000, position=InfoBarPosition.TOP,
+            t("status.done"), message, duration=8000, position=InfoBarPosition.TOP,
             parent=self.centralWidget(),
         )  # fmt: skip
         out = self._output_dir()
         if out and out.is_dir():
-            button = PushButton(fluent.icon("folder-open"), "打开输出目录")
+            button = PushButton(fluent.icon("folder-open"), t("action.open_output_dir"))
             button.clicked.connect(self._open_output_dir)
             bar.addWidget(button)
 
@@ -869,7 +894,7 @@ class MainWindow(QMainWindow):
     def _output_label(self, dirs: list[Path] | None = None) -> str:
         """Where a run writes, in words."""
         if self._is_batch and not self.batch.output_root():
-            return "各音轨旁的输出目录"
+            return t("batch.each_output_dir")
         out = self._output_dir() if dirs is None or self._is_batch else dirs[0]
         return str(out)
 
@@ -878,13 +903,37 @@ class MainWindow(QMainWindow):
         if out and out.is_dir():
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(out)))
 
+    def _choose_language(self) -> None:
+        from qfluentwidgets import RoundMenu
+        menu = RoundMenu(parent=self)
+        for code, name in LANGUAGE_NAMES.items():
+            act = Action(name, self)
+            if code == get_language():
+                act.setCheckable(True)
+                act.setChecked(True)
+            act.triggered.connect(lambda _=False, c=code: self._set_language(c))
+            menu.addAction(act)
+        menu.exec(self.nav.mapToGlobal(self.nav.rect().bottomLeft()))
+
+    def _set_language(self, code: str) -> None:
+        if code == get_language():
+            return
+        set_language(code)
+        self.settings.setValue("language", code)
+        self.setWindowTitle(app_title())
+        self._sources_changed()
+        InfoBar.info(
+            t("action.language_changed_title"),
+            t("action.language_changed_tip"),
+            duration=6000,
+            parent=self.centralWidget(),
+        )
+
     def _about(self) -> None:
         fluent.tell(
             self,
-            f"关于 {APP_TITLE}",
-            "杜比全景声与多声道视频素材制作工具\n\n"
-            "支持分轨导出、ADM BWF、封面渐变图、滚动波形视频、动态字幕、3D 声场可视化与播放器视频\n\n"
-            "界面基于 PySide6-Fluent-Widgets，以 AGPL-3.0-or-later 协议开源",
+            t("app.about_title"),
+            t("app.description"),
         )
 
     # ---- drag and drop ---------------------------------------------------------------
@@ -898,13 +947,13 @@ class MainWindow(QMainWindow):
         audio = [p for p in paths if kind_of(p) == "audio"]
         if self._is_batch and all(kind_of(p) == "ttml" for p in paths):
             if not self.batch.import_lyrics(paths):
-                self._toast("这些歌词已经导入过了")
+                self._toast(t("status.lyrics_already_imported"))
         # a folder, several tracks, or anything dropped on the batch tab goes to the batch
         elif self._is_batch or any(p.is_dir() for p in paths) or len(audio) > 1:
             if not self.add_batch(paths):
-                self._toast("没有找到新的音频文件")
+                self._toast(t("status.no_new_audio"))
         elif not self.source.drop(paths):
-            self._toast("不支持的文件格式")
+            self._toast(t("status.unsupported_format"))
 
     # ---- settings --------------------------------------------------------------------
 
@@ -938,7 +987,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent) -> None:
         if self.worker:
             if self._ask_on_close and not fluent.ask(
-                self, "任务运行中", "后台任务尚未完成，确定要取消任务并退出吗？", accept="退出"
+                self, t("status.task_running_title"), t("status.task_running_prompt"), accept=t("action.quit")
             ):
                 event.ignore()
                 return

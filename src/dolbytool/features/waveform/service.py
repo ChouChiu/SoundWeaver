@@ -114,6 +114,9 @@ def waveform_target(output_dir: Path, source: Path) -> Path:
     return output_dir / f"{source.stem}.mp4"
 
 
+from dolbytool.core.i18n import t
+
+
 def waveform_step(track: Track, target: Path, spec: WaveformSpec) -> Step:
     def run(token: CancellationToken, report: Report) -> str:
         encoder, note = encoder_for(spec.encoder, spec.screen_width, spec.height)
@@ -121,9 +124,10 @@ def waveform_step(track: Track, target: Path, spec: WaveformSpec) -> Step:
             report(0, note)
         use = replace(spec, encoder=encoder)
         if not track.path.is_file():
-            raise FileNotFoundError(f"音轨文件不存在：{track.path}")
-        render_waveform_video(track.path, target, use, token, percent(report, "渲染与编码"))
+            raise FileNotFoundError(f"{t('error.file_not_found')}：{track.path}")
+        render_waveform_video(track.path, target, use, token, percent(report, t("step.render_and_encode")))
         return target.name
 
     # each video is light on the CPU, so several encode side by side
-    return Step(f"波形视频（{track.label}）", run, (target,), parallel=True)
+    return Step(t("step.waveform_video_track", label=track.label), run, (target,), parallel=True)
+

@@ -111,6 +111,22 @@ def stem_path(source: Path, output_dir: Path, kind: StemKind) -> Path:
     return output_dir / f"{source.stem}_{kind.value}.wav"
 
 
+def stem_label(kind: str) -> str:
+    from dolbytool.core.i18n import t
+
+    key = f"stem.{kind}"
+    res = t(key)
+    return res if res != key else STEM_NAMES.get(kind, kind)
+
+
+def stem_hint(kind: str) -> str:
+    from dolbytool.core.i18n import t
+
+    key = f"stem.hint.{kind}"
+    res = t(key)
+    return res if res != key else STEM_HINTS.get(kind, "")
+
+
 STEM_NAMES = {
     "surround": "环绕声道",
     "back": "后环绕声道",
@@ -153,10 +169,3 @@ STEM_HINTS = {
     "mid": "左右声道求和信号 (Mid)",
 }
 
-
-def stem_label(kind: str) -> str:
-    return STEM_NAMES.get(kind, kind)
-
-
-def stem_hint(kind: str) -> str:
-    return STEM_HINTS.get(kind, "")

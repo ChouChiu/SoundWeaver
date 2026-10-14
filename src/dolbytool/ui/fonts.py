@@ -27,12 +27,10 @@ from qfluentwidgets import (
 from qfluentwidgets.components.widgets.combo_box import ComboBoxMenu
 from qfluentwidgets.components.widgets.menu import MenuAnimationType
 
+from dolbytool.core.i18n import t
 from dolbytool.ui import fluent, widgets
 
-CREDITS_TIP = (
-    "去掉歌词开头的「歌名 - 艺人」标题行、翻译来源说明与作词作曲等制作信息，以及结尾的版权声明\n"
-    "只处理首尾连续的信息行，正文中带冒号的句子不受影响；不修改 TTML 文件"
-)
+CREDITS_TIP = t("lyrics.credits_tip")
 
 # what the completer matches on: every name of the family, not just the one shown
 _SEARCH_ROLE = Qt.ItemDataRole.UserRole + 1
@@ -123,11 +121,7 @@ class FontList(QWidget):
             "ListWidget { border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 6px;"
             " background: rgba(255, 255, 255, 0.03); }",
         )
-        self.list.setToolTip(
-            "字体按从上到下顺序回退：每个字符优先使用列表中首个支持该字形的字体。\n"
-            "如需中西文字体分流，建议将西文字体置于中文字体上方。\n"
-            "列表为空时使用系统默认无衬线字体。"
-        )
+        self.list.setToolTip(t("fonts.fallback_tip"))
         # type to filter: there can be hundreds of families
         names = font_names()
         # any name of a family finds it, in any case: 苹方, pingfang, PingFang SC
@@ -137,7 +131,7 @@ class FontList(QWidget):
         # a shown name always means itself, whichever family also lists it as an alias
         self._lookup.update({name.casefold(): name for name in names})
         self.pick = _FontPicker()
-        self.pick.setPlaceholderText("输入或选择字体，中英文名均可")
+        self.pick.setPlaceholderText(t("fonts.placeholder"))
         self.pick.addItems(list(names))
         self.pick.setMaxVisibleItems(12)
         model = QStandardItemModel(self.pick)
@@ -153,7 +147,7 @@ class FontList(QWidget):
         self.pick.setCompleter(completer)
         self.pick.setText(self._resolve(QFont().defaultFamily()) or "")
         self.pick.submitted.connect(self._add)
-        add = PushButton(fluent.icon("list-add"), "添加")
+        add = PushButton(fluent.icon("list-add"), t("action.add"))
         add.clicked.connect(self._add)
         buttons = QVBoxLayout()
         buttons.setSpacing(8)
@@ -162,19 +156,17 @@ class FontList(QWidget):
         pick_row.addWidget(add)
         buttons.addLayout(pick_row)
         moves = QHBoxLayout()
-        for icon, tip, step in (("go-up", "上移", -1), ("go-down", "下移", 1)):
+        for icon, tip, step in (("go-up", t("action.move_up"), -1), ("go-down", t("action.move_down"), 1)):
             button = ToolButton(fluent.icon(icon))
             button.setToolTip(tip)
             button.clicked.connect(lambda _=False, step=step: self._move(step))
             moves.addWidget(button)
-        remove = PushButton(fluent.icon("list-remove"), "移除")
+        remove = PushButton(fluent.icon("list-remove"), t("action.remove"))
         remove.clicked.connect(self._remove)
         moves.addWidget(remove)
         moves.addStretch(1)
         buttons.addLayout(moves)
-        self.empty = widgets.hint_label(
-            "列表为空时使用系统默认无衬线字体；每个字符按从上到下的顺序取首个含有该字形的字体"
-        )
+        self.empty = widgets.hint_label(t("fonts.fallback_hint"))
         buttons.addWidget(self.empty)
         buttons.addStretch(1)
         layout = QHBoxLayout(self)

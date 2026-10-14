@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from PySide6.QtCore import QPropertyAnimation, Qt
+from PySide6.QtCore import QPropertyAnimation, QSettings, Qt
 from PySide6.QtGui import QColor, QGuiApplication, QIcon, QPalette
 from PySide6.QtWidgets import QApplication, QWidget
 from qfluentwidgets import (
@@ -53,6 +53,7 @@ _ICONS: dict[str, FluentIcon] = {
     "view-refresh": FluentIcon.SYNC,
     "application-exit": FluentIcon.POWER_BUTTON,
     "help-about": FluentIcon.INFO,
+    "preferences-system": FluentIcon.SETTING,
     "media-playback-start": FluentIcon.PLAY,
     "media-playback-pause": FluentIcon.PAUSE,
     "process-stop": FluentIcon.CLOSE,
@@ -112,9 +113,33 @@ def _system_dark(app: QGuiApplication) -> bool:
     return app.palette().color(QPalette.ColorRole.Window).lightness() < 128
 
 
+THEME_AUTO = "auto"
+THEME_LIGHT = "light"
+THEME_DARK = "dark"
+
+
+def get_theme_mode() -> str:
+    return QSettings().value("theme_mode", THEME_AUTO, type=str)
+
+
 def _sync_theme(app: QApplication) -> None:
-    setTheme(Theme.DARK if _system_dark(app) else Theme.LIGHT, lazy=True)
-    setThemeColor(app.palette().color(QPalette.ColorRole.Highlight), lazy=True)
+    mode = get_theme_mode()
+    if mode == THEME_LIGHT:
+        theme = Theme.LIGHT
+    elif mode == THEME_DARK:
+        theme = Theme.DARK
+    else:
+        theme = Theme.DARK if _system_dark(app) else Theme.LIGHT
+    setTheme(theme, lazy=False)
+    setThemeColor(app.palette().color(QPalette.ColorRole.Highlight), lazy=False)
+
+
+def set_theme_mode(mode: str) -> None:
+    """Set the theme mode ('auto', 'light', 'dark') and apply immediately."""
+    QSettings().setValue("theme_mode", mode)
+    app = QApplication.instance()
+    if app:
+        _sync_theme(app)
 
 
 def apply_theme(app: QApplication) -> None:
@@ -160,6 +185,9 @@ def _fade_in_unshadowed(self: MaskDialogBase, event) -> None:
 MaskDialogBase.showEvent = _fade_in_unshadowed
 
 
+from dolbytool.core.i18n import t
+
+
 class MessageDialog(MessageBoxBase):
     """A Fluent message dialog, optionally with a read-only details box below the text."""
 
@@ -169,8 +197,8 @@ class MessageDialog(MessageBoxBase):
         title: str,
         text: str,
         details: str = "",
-        accept: str = "确定",
-        cancel: str | None = "取消",
+        accept: str | None = None,
+        cancel: str | None = None,
     ) -> None:
         super().__init__(parent.window())
         self.viewLayout.addWidget(SubtitleLabel(title, self.widget))
@@ -183,19 +211,20 @@ class MessageDialog(MessageBoxBase):
             box.setReadOnly(True)
             box.setMinimumHeight(120)
             box.setMaximumHeight(220)
-            self.viewLayout.addWidget(StrongBodyLabel("详细信息", self.widget))
+            self.viewLayout.addWidget(StrongBodyLabel(t("action.details"), self.widget))
             self.viewLayout.addWidget(box)
         self.widget.setMinimumWidth(420)
-        self.yesButton.setText(accept)
+        self.yesButton.setText(accept if accept is not None else t("action.confirm"))
         if cancel is None:
             self.cancelButton.hide()
         else:
             self.cancelButton.setText(cancel)
 
 
-def ask(parent: QWidget, title: str, text: str, details: str = "", accept: str = "确定") -> bool:
-    return bool(MessageDialog(parent, title, text, details, accept).exec())
+def ask(parent: QWidget, title: str, text: str, details: str = "", accept: str | None = None) -> bool:
+    return bool(MessageDialog(parent, title, text, details, accept, cancel=t("action.cancel")).exec())
 
 
 def tell(parent: QWidget, title: str, text: str, details: str = "") -> None:
-    MessageDialog(parent, title, text, details, "确定", cancel=None).exec()
+    MessageDialog(parent, title, text, details, t("action.confirm"), cancel=None).exec()
+

@@ -33,11 +33,15 @@ class Track:
 
     @property
     def label(self) -> str:
-        return "原音频" if self.is_original else stem_label(self.key)
+        from dolbytool.core.i18n import t
+
+        return t("audio.original") if self.is_original else stem_label(self.key)
 
     @property
     def hint(self) -> str:
-        return "直接使用源文件的音频" if self.is_original else stem_hint(self.key)
+        from dolbytool.core.i18n import t
+
+        return t("audio.original_hint") if self.is_original else stem_hint(self.key)
 
 
 def split_speakers(info: AudioInfo, atmos: SpeakerLayout) -> SpeakerLayout | None:

@@ -238,6 +238,9 @@ def _available(spec: PlayerSpec, report: Report) -> PlayerSpec:
     return spec
 
 
+from dolbytool.core.i18n import t
+
+
 def player_step(
     ttml: Path | None,
     cover: Path | None,
@@ -250,13 +253,13 @@ def player_step(
 
     def run(token: CancellationToken, report: Report) -> str:
         use = _available(spec, report)
-        progress = Progress(report, "逐帧渲染与编码")
+        progress = Progress(report, t("step.frame_render_encode"))
         render_player_video(
             ttml, cover, audio, target, use, duration, token, progress.fraction, progress.status
         )
         return target.name
 
-    return Step("播放器视频", run, (target,))
+    return Step(t("step.player_video"), run, (target,))
 
 
 @dataclass(frozen=True, slots=True)
@@ -304,7 +307,7 @@ def render_queue(
         playlist.write_text(json.dumps(entries, ensure_ascii=False), encoding="utf-8")
         audio = None
         if _needs_audio(spec):
-            on_status("拼接专辑音频")
+            on_status(t("step.concat_album_audio"))
             listing = Path(scratch) / "audio.txt"
             listing.write_text(
                 "".join("file '{}'\n".format(str(t.audio).replace("'", "'\\''")) for t in tracks),
@@ -327,8 +330,9 @@ def queue_step(
 ) -> Step:
     def run(token: CancellationToken, report: Report) -> str:
         use = _available(spec, report)
-        progress = Progress(report, "逐帧渲染与编码")
+        progress = Progress(report, t("step.frame_render_encode"))
         render_queue(tracks, cover, target, use, token, progress.fraction, progress.status)
-        return f"{target.name}（{len(tracks)} 首连续播放）"
+        return t("step.album_continuous_title", name=target.name, count=len(tracks))
 
-    return Step("整张专辑播放器视频", run, (target,))
+    return Step(t("step.album_player_video"), run, (target,))
+
