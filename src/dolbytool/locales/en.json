@@ -578,5 +578,15 @@
   "renderer.parallel_jobs": "Rendering {jobs} segments in parallel",
   "renderer.concat_segments": "Joining the segments",
   "renderer.analyse_audio": "Analysing the audio",
-  "renderer.mux_audio": "Adding the audio"
+  "renderer.mux_audio": "Adding the audio",
+  "renderer.error.no_lyric_lines": "The TTML has no lyric lines to show",
+  "renderer.error.no_lyric_lines_track": "The TTML of track {track} has no lyric lines to show",
+  "renderer.error.empty_playlist": "The playlist is empty",
+  "renderer.error.capture_failed": "Capturing frame {frame} failed",
+  "renderer.error.no_objects": "The Atmos stream has no dynamic objects",
+  "renderer.error.head_model": "Cannot read the head model: {message}",
+  "renderer.error.ffmpeg_spawn": "Cannot start ffmpeg: {message}",
+  "renderer.error.webgl_lost": "The flowing background lost its WebGL context (usually short of video memory): run fewer renders at once or lower the render scale",
+  "renderer.error.player_blank": "The player page drew nothing: check the TTML lyrics file",
+  "renderer.error.page_error": "The render page failed: {message}"
 }

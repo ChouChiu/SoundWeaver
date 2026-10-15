@@ -18,11 +18,12 @@ import { debug, status } from "./log";
 import { parseOptions } from "./options";
 import { renderTimeline, start } from "./parallel";
 import { Stage, type StageSettings } from "./stage";
+import { KeyedError } from "../shared/errors";
 
 /** Load the lyrics, wait for fonts and layout, then park every player at its line. */
 async function setup(stage: Stage, ttml: string, options: StageOptions): Promise<void> {
 	const count = await stage.page.evaluate((text, opts) => window.amllRender.load(text, opts), ttml, options);
-	if (!count) throw new Error("TTML 中没有可显示的歌词行");
+	if (!count) throw new KeyedError("no_lyric_lines");
 	await stage.pump(stage.page.evaluate(() => document.fonts.ready.then(() => true)));
 	// let ResizeObserver report the final line sizes, then park the springs
 	for (let i = 0; i < 5; i++) await stage.frame(false);

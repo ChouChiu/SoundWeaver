@@ -17,6 +17,7 @@
 
 import { IsolationRenderer, LyricPlayer, MeshGradientRenderer } from "@applemusic-like-lyrics/core";
 import { random, randomFrom, song } from "./clock";
+import { KeyedError } from "../shared/errors";
 
 /** The parts of AMLL's renderers the frame loop below touches; private in the typings. */
 interface RendererInternals {
@@ -98,7 +99,7 @@ export async function albumReady(): Promise<void> {
 /** Throw if the background's WebGL context is gone: its frames would come out blank. */
 export function checkBackground(): void {
 	if (live.background?.contextLost) {
-		throw new Error("流动背景的 WebGL 上下文丢失（多为显存不足），请减少同时渲染的任务或降低渲染比例");
+		throw new KeyedError("webgl_lost");
 	}
 }
 

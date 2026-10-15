@@ -4,6 +4,7 @@ import { captureFormat, type Encoding, encoder } from "./ffmpeg";
 import { debug } from "./log";
 import type { Run } from "./run";
 import type { Stage } from "./stage";
+import { KeyedError } from "../shared/errors";
 
 export interface Segment {
 	from: number;
@@ -56,7 +57,7 @@ export async function renderSegment(
 			} else {
 				// No damage means no new screenshot: the picture is unchanged, repeat the last one.
 				previous = (await stage.frame(format)) ?? previous ?? (await stage.frame(format));
-				if (!previous) throw new Error(`第 ${frame} 帧截图失败`);
+				if (!previous) throw new KeyedError("capture_failed", { frame });
 				if (visible === 0) blank = previous;
 			}
 		}

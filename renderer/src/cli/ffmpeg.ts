@@ -5,6 +5,7 @@ import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Writable } from "node:stream";
 import type { Run } from "./run";
+import { KeyedError } from "../shared/errors";
 
 const QUIET = ["-hide_banner", "-nostdin", "-loglevel", "error", "-y"];
 
@@ -50,7 +51,7 @@ function ffmpeg(run: Run, args: string[], stdin: "pipe" | "ignore"): { stdin: Wr
 		// no ffmpeg on PATH, or no process to be had: there is no exit to wait for
 		child.on("error", (error) => {
 			run.children.delete(child);
-			reject(new Error(`无法启动 ffmpeg：${error.message}`));
+			reject(new KeyedError("ffmpeg_spawn", { message: error.message }));
 		});
 		child.on("close", (code) => {
 			run.children.delete(child);

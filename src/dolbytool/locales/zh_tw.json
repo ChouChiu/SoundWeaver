@@ -578,5 +578,15 @@
   "renderer.parallel_jobs": "分 {jobs} 段平行渲染",
   "renderer.concat_segments": "拼接分段",
   "renderer.analyse_audio": "分析音訊",
-  "renderer.mux_audio": "混入音訊"
+  "renderer.mux_audio": "混入音訊",
+  "renderer.error.no_lyric_lines": "TTML 中沒有可顯示的歌詞行",
+  "renderer.error.no_lyric_lines_track": "第 {track} 首的 TTML 中沒有可顯示的歌詞行",
+  "renderer.error.empty_playlist": "歌單為空",
+  "renderer.error.capture_failed": "第 {frame} 格截圖失敗",
+  "renderer.error.no_objects": "全景聲碼流中沒有動態物件",
+  "renderer.error.head_model": "頭模無法解析：{message}",
+  "renderer.error.ffmpeg_spawn": "無法啟動 ffmpeg：{message}",
+  "renderer.error.webgl_lost": "流動背景的 WebGL 上下文遺失（多為顯示記憶體不足），請減少同時渲染的任務或降低渲染比例",
+  "renderer.error.player_blank": "播放器頁面沒有渲染出任何內容，請檢查 TTML 歌詞檔案",
+  "renderer.error.page_error": "渲染頁面出錯：{message}"
 }

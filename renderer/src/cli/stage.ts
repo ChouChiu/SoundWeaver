@@ -6,6 +6,7 @@ import puppeteer, { type Browser, type CDPSession, type Page } from "puppeteer-c
 import { BROWSER_ARGS } from "./chrome";
 import { debug } from "./log";
 import type { Run } from "./run";
+import { findKeyed, KeyedError } from "../shared/errors";
 
 // the bundle sits next to the built page in dist/
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -190,7 +191,9 @@ export class Stage {
 	 * error), which would otherwise be encoded as a black video.
 	 */
 	throwIfBroken(): void {
-		if (this.pageError !== null) throw new Error(`渲染页面出错：${this.pageError}`);
+		if (this.pageError !== null) {
+			throw findKeyed(this.pageError) ?? new KeyedError("page_error", { message: this.pageError });
+		}
 	}
 
 	/** Advance one frame interval; with a `screenshot` format, return the picture (none when nothing changed). */

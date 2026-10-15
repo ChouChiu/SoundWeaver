@@ -17,7 +17,10 @@ export type Status =
 	| { key: "mux_audio" };
 
 /** A status names its text by key (with its values) for the Python side to put in the user's language. */
-export type Event = ({ type: "status" } & Status) | { type: "progress"; frame: number; total: number };
+export type Event =
+	| ({ type: "status" } & Status)
+	| { type: "progress"; frame: number; total: number }
+	| { type: "error"; key: string; [value: string]: string | number };
 
 export function emit(event: Event): void {
 	process.stdout.write(`${JSON.stringify(event)}\n`);

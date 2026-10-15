@@ -10,6 +10,7 @@ import { setFrameSize, setLineResolution } from "./lines";
 import { ObjectView } from "./objects";
 import { camera, placeHead, ROOM_HALF, silhouette, tint, world } from "./scene";
 import * as timeline from "./timeline";
+import { KeyedError } from "../shared/errors";
 
 // a loaded head is fitted to this share of the room height, then scaled by the option
 const HEAD_HEIGHT = 0.15;
@@ -72,7 +73,7 @@ let duration = 0;
 function parseGlb(base64: string): Promise<THREE.Object3D> {
 	const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
 	return new Promise((resolve, reject) =>
-		new GLTFLoader().parse(bytes.buffer, "", (gltf) => resolve(gltf.scene), (e) => reject(new Error(`头模无法解析：${e.message}`))),
+		new GLTFLoader().parse(bytes.buffer, "", (gltf) => resolve(gltf.scene), (e) => reject(new KeyedError("head_model", { message: e.message }))),
 	);
 }
 

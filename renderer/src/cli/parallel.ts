@@ -9,6 +9,7 @@ import { debug, emit, status } from "./log";
 import { isAbort, Run } from "./run";
 import { renderSegment, splitFrames } from "./segment";
 import type { Stage } from "./stage";
+import { findKeyed, KeyedError } from "../shared/errors";
 
 // Each browser renders on roughly one core; keep segments long enough to be worth a launch,
 // a page load and the preroll replayed before the first frame (6 s on the player page).
@@ -125,7 +126,11 @@ export function start(main: (run: Run) => Promise<void>): void {
 		.catch((error) => {
 			// a cancel exits from its own handler once the browsers are closed
 			if (run.cancelling) return;
-			console.error(error instanceof Error ? error.message : String(error));
+			const message = error instanceof Error ? error.message : String(error);
+			// the key for the Python side to word, the text itself for anyone reading stderr
+			const keyed = error instanceof KeyedError ? error : findKeyed(message);
+			if (keyed) emit({ type: "error", key: keyed.key, ...keyed.values });
+			console.error(message);
 			process.exit(1);
 		});
 }

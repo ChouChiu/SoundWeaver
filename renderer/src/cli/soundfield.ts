@@ -17,6 +17,7 @@ import { debug, status } from "./log";
 import { defaultJobs, number } from "./options";
 import { renderTimeline, start } from "./parallel";
 import { Stage, type StageSettings } from "./stage";
+import { KeyedError } from "../shared/errors";
 
 const VIEWS: ViewPreset[] = ["iso", "top", "angle"];
 const COLOR_MODES: ColorMode[] = ["tint", "height", "object"];
@@ -115,7 +116,7 @@ start(async (run) => {
 			const count = await stage.pump(
 				stage.page.evaluate((s, o, g) => window.soundfield.load(s, o, g), scene, opts.options, glb),
 			);
-			if (!count) throw new Error("全景声码流中没有动态对象");
+			if (!count) throw new KeyedError("no_objects");
 			debug(`soundfield loaded, ${count} objects, WebGL on ${await stage.page.evaluate(() => window.soundfield.gpu())}`);
 		},
 	};

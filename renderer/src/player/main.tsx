@@ -83,6 +83,7 @@ import {
 	TimedMeshRenderer,
 } from "./timed";
 import { motionReady, seekMotion, setMotion } from "./motion";
+import { KeyedError } from "../shared/errors";
 
 // A segment replays this much before its first frame, so the scroll springs and
 // the spectrum are where a run from the start would have them.
@@ -232,7 +233,7 @@ function queue(tracks: PlayerTrack[], options: PlayerOptions): Song[] {
 		let lines = (parsed.lines as LyricLine[]).filter(
 			(line) => (options.backgroundVocals || !line.isBG) && line.words.some((w) => w.word.trim()),
 		);
-		if (track.ttml !== null && !lines.length) throw new Error(`第 ${index + 1} 首的 TTML 中没有可显示的歌词行`);
+		if (track.ttml !== null && !lines.length) throw new KeyedError("no_lyric_lines_track", { track: index + 1 });
 		const name = track.title || metadata(meta, "musicName")[0] || "";
 		const artists = track.artists.length ? track.artists : metadata(meta, "artists");
 		if (options.filterCredits) lines = withoutCredits(lines, [name, ...metadata(meta, "musicName"), ...artists]);
@@ -284,7 +285,7 @@ window.player = {
 		show(0);
 		// a render error unmounts everything and is only reported, never thrown here
 		if (!document.getElementById("root")!.childElementCount) {
-			throw new Error("播放器页面没有渲染出任何内容，请检查 TTML 歌词文件");
+			throw new KeyedError("player_blank");
 		}
 		// the cover has to decode before the background can take its colours
 		if (cover) {

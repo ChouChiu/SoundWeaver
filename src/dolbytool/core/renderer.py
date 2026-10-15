@@ -73,7 +73,12 @@ def run_renderer(
     on_status: Callable[[str], None],
     exit_message: str | None = None,
 ) -> None:
-    """Run `script` to completion; raises RendererError with its stderr on failure."""
+    """Run `script` to completion; raises RendererError on failure.
+
+    The error is the renderer's own when it names one by key, put in the
+    user's language; otherwise its stderr.
+    """
+    failure: dict[str, object] = {}
 
     def on_line(line: str) -> None:
         # stdout carries one JSON event per line; anything else is not ours to parse
@@ -86,11 +91,24 @@ def run_renderer(
         if event.get("type") == "progress" and event.get("total"):
             on_fraction(min(1.0, event["frame"] / event["total"]))
         elif event.get("type") == "status":
-            values = {k: v for k, v in event.items() if k not in ("type", "key")}
-            on_status(t(f"renderer.{event.get('key')}", **values))
+            on_status(t(f"renderer.{event.get('key')}", **_values(event)))
+        elif event.get("type") == "error":
+            failure.update(event)
 
-    # SIGTERM lets the renderer close its browsers and remove its segment files
-    run_streaming(
-        [find_runtime(), str(script), *args], on_line, token,
-        error=RendererError, exit_message=exit_message or t("error.renderer_exit"), grace=10,
-    )  # fmt: skip
+    try:
+        # SIGTERM lets the renderer close its browsers and remove its segment files
+        run_streaming(
+            [find_runtime(), str(script), *args], on_line, token,
+            error=RendererError, exit_message=exit_message or t("error.renderer_exit"), grace=10,
+        )  # fmt: skip
+    except RendererError as error:
+        if not failure:
+            raise
+        raise RendererError(
+            t(f"renderer.error.{failure.get('key')}", **_values(failure))
+        ) from error
+
+
+def _values(event: dict) -> dict[str, object]:
+    """An event's values, without what names it."""
+    return {k: v for k, v in event.items() if k not in ("type", "key")}

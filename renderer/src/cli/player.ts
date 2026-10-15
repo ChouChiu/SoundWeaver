@@ -25,6 +25,7 @@ import { debug, status } from "./log";
 import { defaultJobs, number } from "./options";
 import { renderTimeline, start } from "./parallel";
 import { Stage, type StageSettings } from "./stage";
+import { KeyedError } from "../shared/errors";
 
 const BACKGROUNDS: BackgroundKind[] = ["mesh", "isolation", "solid", "none"];
 const CONTROLS: ControlsKind[] = ["controls", "fft", "none"];
@@ -222,7 +223,7 @@ interface PlaylistEntry {
 }
 
 async function tracks(entries: PlaylistEntry[]): Promise<PlayerTrack[]> {
-	if (!entries.length) throw new Error("歌单为空");
+	if (!entries.length) throw new KeyedError("empty_playlist");
 	return Promise.all(
 		entries.map(async (entry) => ({
 			ttml: entry.ttml ? await readFile(path.resolve(entry.ttml), "utf8") : null,
