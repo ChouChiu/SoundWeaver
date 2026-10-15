@@ -21,6 +21,10 @@ logger = logging.getLogger(__name__)
 
 Row = tuple[float, tuple[str, ...]]
 
+# The wides stand about a sixth of the way back: TS 103 420 table B.10 puts them at
+# ADM Y = 0.677419, 10 of the 62 steps of pos3D_Y behind the front wall.
+_WIDE_Y = 10 / 62
+
 # Room positions (x 0..1 left to right, y 0..1 front to back, z 0..1 up) of
 # every bed channel OAMD can name, for a layout that has no speaker of that name.
 BED_POSITIONS = {
@@ -31,7 +35,7 @@ BED_POSITIONS = {
     "Tfl": (0.0, 0.0, 1.0), "Tfr": (1.0, 0.0, 1.0),
     "Tsl": (0.0, 0.5, 1.0), "Tsr": (1.0, 0.5, 1.0),
     "Tbl": (0.0, 1.0, 1.0), "Tbr": (1.0, 1.0, 1.0),
-    "Lw": (0.0, 0.25, 0.0), "Rw": (1.0, 0.25, 0.0),
+    "Lw": (0.0, _WIDE_Y, 0.0), "Rw": (1.0, _WIDE_Y, 0.0),
     "LFE2": (0.5, 0.0, -1.0),
 }  # fmt: skip
 # With back surrounds in the bed, Ls and Rs are the side pair.
@@ -42,7 +46,7 @@ _FRONT: Row = (0.0, ("L", "C", "R"))
 _SURROUND: Row = (1.0, ("Ls", "Rs"))
 _SIDE: Row = (0.5, ("Ls", "Rs"))
 _BACK: Row = (1.0, ("Lb", "Rb"))
-_WIDE: Row = (0.25, ("Lw", "Rw"))
+_WIDE: Row = (_WIDE_Y, ("Lw", "Rw"))
 _TOP_MIDDLE: Row = (0.5, ("Tsl", "Tsr"))
 _TOP_FRONT: Row = (0.0, ("Tfl", "Tfr"))
 _TOP_BACK: Row = (1.0, ("Tbl", "Tbr"))

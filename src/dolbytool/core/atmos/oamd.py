@@ -37,17 +37,25 @@ DISTANCE_FACTORS = (1.1, 1.3, 1.6, 2.0, 2.5, 3.2, 4.0, 5.0, 6.3, 7.9, 10.0, 12.6
 
 OBJECT_ELEMENT = 1
 TRIM_ELEMENT = 2
+EXTENDED_ELEMENT = 5  # extended_object_element (table 26)
 # global_trim_mode (table 33)
 _DEFAULT_TRIM, _DISABLE_TRIM, _CUSTOM_TRIM = 0, 1, 2
-# trim_centre (table 35), and trim_surround and trim_height (tables 36, 37), in dB
-_CENTRE_TRIMS = (6, 3, 1.5, 0.75, -0.75, -1.5, -3, -4.5, -6, -7.5, -9, -10.5, -12, -13.5, -16, -36)
+# trim_centre (table 35), and trim_surround and trim_height (tables 36, 37), in dB.
+# The tables give -16 for code 14, which breaks their 1.5 dB steps; Dolby's
+# decoder holds 0x02d8 in Q12 there, -15.0 dB (truehdd issue 26).
+_CENTRE_TRIMS = (6, 3, 1.5, 0.75, -0.75, -1.5, -3, -4.5, -6, -7.5, -9, -10.5, -12, -13.5, -15, -36)
 _TRIMS = (None, None, None, None, *_CENTRE_TRIMS[4:])  # 0 to 3 reserved
 NUM_TRIM_CONFIGS = 9
-# Which trim configuration a layout without heights takes.  The standard
-# leaves the order of the nine to the renderer; rendering the objects of four
-# masters to 5.1 against their 5.1 core matches only with 1 as 5.1, whose
-# flags differ between them; 0 and 2 follow in the usual 2.0, 5.1, 7.1 order.
+# Which trim configuration a layout without heights takes.  The standard does
+# not order the nine; a Dolby Atmos master file names them NoSurroundsNoHeights,
+# SomeSurroundsNoHeights, ManySurroundsNoHeights, then the same with some and
+# with many heights.  Rendering the objects of four masters to 5.1 against
+# their 5.1 core bears out 1 as 5.1, whose flags differ between them.  What
+# Dolby's automatic trim does on a layout with heights is not published, so
+# those configurations are left unapplied.
 TRIM_CONFIGS = {"2.0": 0, "5.1": 1, "7.1": 2}
+# ext_prec_pos3D_X, _Y and _Z (tables 44 to 46), in fifths of a coded step
+_FINE_STEPS = (1, 2, -1, -2)
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,14 +71,48 @@ class Render:
     size: tuple[float, float, float] = (0.0, 0.0, 0.0)
     screen: bool = False
     snap: bool = False
+    # ext_prec_pos3D_X, _Y, _Z of this update alone, in fifths of a step
+    # (clause 5.6.6.4); differential updates build on the coded bits without them
+    fine: tuple[int, int, int] = (0, 0, 0)
+    warp: bool = False  # warp_mode 1 applies (table 32)
 
     @property
     def position(self) -> tuple[float, float, float]:
-        return (min(1.0, self.x_bits / 62), min(1.0, self.y_bits / 62), self.z_bits / 15)
+        """The room position the object renders at (clauses 5.2.1.2 and 5.6.1.1.8 to 11).
+
+        An object beyond the walls (b_object_distance_specified) sits a
+        distance factor out along its direction from the room's centre.  A room
+        panner has no speakers out there, so it stands where that direction
+        meets the walls: the same for every distance factor, at infinity too.
+        Clipping the far position to the room instead would drag it towards a
+        corner, the more so the farther it is.
+        """
+        fx, fy, fz = self.fine
+        x = min(1.0, max(0.0, self.x_bits / 62 + fx / 310))
+        y = min(1.0, max(0.0, self.y_bits / 62 + fy / 310))
+        z = min(1.0, max(-1.0, self.z_bits / 15 + fz / 75))
+        if self.warp:
+            y = min(1.0, 2 * y)
+        if self.distance is not None:
+            x, y, z = _to_walls(x, y, z)
+        return x, y, z
 
     def warped(self, trim: Trim) -> Render:
         """The position the renderer takes: warp_mode 1 doubles y (table 32)."""
-        return replace(self, y_bits=min(62.0, 2 * self.y_bits)) if trim.warp else self
+        return replace(self, warp=True) if trim.warp else self
+
+
+def _to_walls(x: float, y: float, z: float) -> tuple[float, float, float]:
+    """Where the ray from the room's centre through (x, y, z) leaves the room (figure 3).
+
+    The room spans x and y from 0 to 1 and z from -1 to 1 (clause 4.2.1); a
+    position at the centre itself has no direction and stays put.
+    """
+    dx, dy, dz = x - 0.5, y - 0.5, z
+    reach = max(abs(dx) / 0.5, abs(dy) / 0.5, abs(dz))
+    if reach == 0:
+        return x, y, z
+    return 0.5 + dx / reach, 0.5 + dy / reach, dz / reach
 
 
 @dataclass(frozen=True, slots=True)
@@ -297,6 +339,8 @@ class OamdDecoder:
                 self._object_element(bits, frame)
             elif kind == TRIM_ELEMENT:
                 self.trim = _trim_element(bits, count)
+            elif kind == EXTENDED_ELEMENT:
+                _extended_element(bits, frame)
             if bits.pos > end:
                 raise BitstreamError("oa_element overran its size")
             bits.pos = end
@@ -404,3 +448,38 @@ class OamdDecoder:
             if screen:
                 bits.skip(5)  # screen_factor_bits, depth_factor_idx
         return Render(x, y, z, distance, zone, elevation, size, screen, bits.flag())
+
+
+def _extended_element(bits: BitReader, frame: Frame) -> None:
+    """extended_object_element (clause 5.5.13): finer positions for this frame's updates.
+
+    Its blocks follow the object_element's update blocks, so one that comes
+    before any (none of the masters at hand carry the element at all) has
+    nothing to refine and is passed over.  Divergence is read past: the
+    stream gives its amount but not how far apart the two halves go, which
+    ADM and BS.2127 carry as positionRange.
+    """
+    dynamic = [
+        obj for obj in range(frame.program.anchored, frame.object_count) if frame.updates[obj]
+    ]
+    if bits.flag():  # b_obj_div_block
+        for obj in dynamic:
+            for u in frame.updates[obj]:
+                if u.active and bits.flag():  # b_object_divergence
+                    mode = bits.read(2)
+                    if mode == 0:
+                        bits.skip(2)  # object_div_table
+                    elif mode in (2, 3):
+                        bits.skip(6)  # object_div_code
+    if bits.flag():  # b_ext_prec_pos_block
+        for obj in dynamic:
+            updates = frame.updates[obj]
+            for blk, u in enumerate(updates):
+                if not u.active or not bits.flag():  # b_ext_prec_pos
+                    continue
+                present = bits.read(3)  # ext_prec_pos_presence[2..0]
+                fine = tuple(
+                    _FINE_STEPS[bits.read(2)] if present & flag else 0
+                    for flag in (0b100, 0b010, 0b001)
+                )
+                updates[blk] = replace(u, render=replace(u.render, fine=fine))

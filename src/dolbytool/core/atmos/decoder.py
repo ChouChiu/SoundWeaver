@@ -284,7 +284,7 @@ class _Decode:
 _TRACE_SUFFIX = ".trace.pickle"
 _KEEP_TRACES = 16
 # bumped whenever the shares a layout gets change, so older traces go unread
-_TRACE_VERSION = 4
+_TRACE_VERSION = 5
 
 
 def _trace_path(source: Path, layout: SpeakerLayout) -> Path:
