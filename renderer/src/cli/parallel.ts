@@ -10,7 +10,8 @@ import { isAbort, Run } from "./run";
 import { renderSegment, splitFrames } from "./segment";
 import type { Stage } from "./stage";
 
-// Each browser renders on roughly one core; keep segments long enough to be worth a launch.
+// Each browser renders on roughly one core; keep segments long enough to be worth a launch,
+// a page load and the preroll replayed before the first frame (6 s on the player page).
 const MIN_SEGMENT_SECONDS = 10;
 
 export interface Timeline {
@@ -66,7 +67,7 @@ export async function renderTimeline(
 		const fit = Math.max(1, 1 + Math.floor((free - VRAM_MARGIN_MIB) / vramPerJob));
 		debug(`vram: ${free} MiB free, ${vramPerJob} MiB a segment, room for ${fit}`);
 		if (fit < jobs) {
-			status(`显存不足以并行 ${jobs} 段，减为 ${fit} 段`);
+			status({ key: "vram_jobs", jobs, fit });
 			jobs = fit;
 		}
 	}
@@ -85,7 +86,7 @@ export async function renderTimeline(
 		return;
 	}
 
-	status(`分 ${jobs} 段并行渲染`);
+	status({ key: "parallel_jobs", jobs });
 	const tmp = await mkdtemp(path.join(path.dirname(out), ".render-parts-"));
 	run.tempDirs.add(tmp);
 	const ext = path.extname(out);
@@ -109,7 +110,7 @@ export async function renderTimeline(
 		(r): r is PromiseRejectedResult => r.status === "rejected" && !isAbort(r.reason),
 	);
 	if (failed) throw failed.reason;
-	status("拼接分段");
+	status({ key: "concat_segments" });
 	await concat(run, segments.map((s) => s.out), out, tmp, codec);
 	debug("concatenated");
 }

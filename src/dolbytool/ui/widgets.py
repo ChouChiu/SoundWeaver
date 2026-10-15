@@ -5,8 +5,8 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPixmap
+from PySide6.QtCore import QObject, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QGuiApplication, QIcon, QPainter, QPainterPath, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFormLayout,
@@ -38,6 +38,21 @@ from qfluentwidgets import (
 from dolbytool.core.i18n import t
 from dolbytool.ui import fluent
 
+# One spacing scale for every page, so the pages line up with each other.
+# Page edge (left, top, right, bottom), inside the window's own margin; the
+# right edge leaves room for the scroll bar.
+PAGE_MARGINS = (0, 0, 12, 8)
+# between the cards of a page, and between a title and what it heads
+SECTION_SPACING = 12
+# inside a card: its edge, and the gap between its rows
+CARD_MARGINS = (16, 12, 16, 14)
+ROW_SPACING = 8
+# between a label and its field, between controls in one row, and before a
+# second label/field pair in the same row
+FIELD_SPACING = 12
+INLINE_SPACING = 8
+PAIR_GAP = 36
+
 
 def hex_name(color: QColor) -> str:
     return color.name(QColor.NameFormat.HexRgb)
@@ -45,8 +60,9 @@ def hex_name(color: QColor) -> str:
 
 def swatch_icon(color: QColor, size: int = 16) -> QIcon:
     """A rounded colour chip with a faint outline, visible on light and dark alike."""
-    scale = 2
-    pix = QPixmap(size * scale, size * scale)
+    # drawn at the screen's pixel density, so it stays sharp at 1.5x, 2x or 3x
+    scale = max(1.0, QGuiApplication.instance().devicePixelRatio())
+    pix = QPixmap(round(size * scale), round(size * scale))
     pix.setDevicePixelRatio(scale)
     pix.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pix)
@@ -69,6 +85,7 @@ class ColorButton(PushButton):
         super().__init__(parent)
         self._title = title
         self._color = QColor(color)
+        self.setAccessibleName(title)
         self.clicked.connect(self._pick)
         self._sync()
 
@@ -117,13 +134,15 @@ def browse_row(
     button.setToolTip(tooltip or t("action.browse"))
     button.clicked.connect(slot)
     row = QHBoxLayout()
-    row.setSpacing(6)
+    row.setSpacing(INLINE_SPACING)
     row.addWidget(edit, 1)
     row.addWidget(button)
     return edit, button, row
 
 
-def hbox(*items: QWidget | str | int, stretch: bool = True, spacing: int = 16) -> QHBoxLayout:
+def hbox(
+    *items: QWidget | str | int, stretch: bool = True, spacing: int = FIELD_SPACING
+) -> QHBoxLayout:
     """A row of widgets; strings become labels, ints become spacing."""
     row = QHBoxLayout()
     # Fluent check boxes and combo boxes carry no margin of their own
@@ -141,7 +160,7 @@ def hbox(*items: QWidget | str | int, stretch: bool = True, spacing: int = 16) -
 
 
 def size_row(width: CompactSpinBox, height: CompactSpinBox) -> QHBoxLayout:
-    return hbox(width, "×", height, spacing=6)
+    return hbox(width, "×", height, spacing=INLINE_SPACING)
 
 
 class HintTree(TreeWidget):
@@ -197,8 +216,8 @@ class Card(SimpleCardWidget):
     def __init__(self, title: str = "", parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._layout = QVBoxLayout(self)
-        self._layout.setContentsMargins(16, 12, 16, 14)
-        self._layout.setSpacing(10)
+        self._layout.setContentsMargins(*CARD_MARGINS)
+        self._layout.setSpacing(ROW_SPACING + 2)
         if title:
             self._layout.addWidget(StrongBodyLabel(title))
 
@@ -215,14 +234,24 @@ def section(title: str, content: QLayout | QWidget) -> Card:
     return card
 
 
+def field_label(text: str, field: QWidget | QLayout | None) -> BodyLabel:
+    """A label naming `field`, tied to it so screen readers and mnemonics find the field."""
+    label = BodyLabel(text)
+    if isinstance(field, QWidget):
+        label.setBuddy(field)
+        if not field.accessibleName():
+            field.setAccessibleName(text.rstrip("：:"))
+    return label
+
+
 def form(rows: Iterable[tuple[str, QWidget | QLayout]]) -> QFormLayout:
     layout = QFormLayout()
     layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
     layout.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-    layout.setHorizontalSpacing(12)
-    layout.setVerticalSpacing(8)
+    layout.setHorizontalSpacing(FIELD_SPACING)
+    layout.setVerticalSpacing(ROW_SPACING)
     for label, field in rows:
-        layout.addRow(BodyLabel(label), field)
+        layout.addRow(field_label(label, field), field)
     return layout
 
 
@@ -237,11 +266,11 @@ def two_column_grid(rows: Sequence[Row]) -> QGridLayout:
     stretches across it, other fields keep their own size.
     """
     grid = QGridLayout()
-    grid.setHorizontalSpacing(12)
-    grid.setVerticalSpacing(8)
+    grid.setHorizontalSpacing(FIELD_SPACING)
+    grid.setVerticalSpacing(ROW_SPACING)
     right_align = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
     for r, (left_label, left, right_label, right) in enumerate(rows):
-        grid.addWidget(BodyLabel(left_label), r, 0, right_align)
+        grid.addWidget(field_label(left_label, left), r, 0, right_align)
         if right is None and isinstance(left, (QLayout, QLineEdit)):
             if isinstance(left, QLayout):
                 grid.addLayout(left, r, 1, 1, 4)
@@ -252,9 +281,9 @@ def two_column_grid(rows: Sequence[Row]) -> QGridLayout:
         else:
             grid.addWidget(left, r, 1, Qt.AlignmentFlag.AlignLeft)
         if right is not None:
-            label = BodyLabel(right_label or "")
+            label = field_label(right_label or "", right)
             # a gap between the two pairs, which would otherwise touch
-            label.setContentsMargins(36, 0, 0, 0)
+            label.setContentsMargins(PAIR_GAP, 0, 0, 0)
             grid.addWidget(label, r, 2, right_align)
             if isinstance(right, QLayout):
                 grid.addLayout(right, r, 3)
@@ -266,6 +295,45 @@ def two_column_grid(rows: Sequence[Row]) -> QGridLayout:
 
 # rows a track list grows to before it scrolls
 _MAX_ROWS = 8
+_PENDING = Qt.ItemDataRole.UserRole + 1
+
+
+def select_all_row(check_all: Callable[[bool], None], count: QWidget) -> QHBoxLayout:
+    """Select all / select none links, and a count of what is ticked at the far end."""
+    row = QHBoxLayout()
+    row.setSpacing(4)
+    for text, state in ((t("action.select_all"), True), (t("action.deselect_all"), False)):
+        button = HyperlinkButton()
+        button.setText(text)
+        button.clicked.connect(lambda _=False, on=state: check_all(on))
+        row.addWidget(button)
+    row.addStretch(1)
+    row.addWidget(count)
+    return row
+
+
+class Debouncer(QObject):
+    """Runs `slot` once a burst of `poke()` calls has been quiet for `ms` milliseconds.
+
+    For work that follows typing or a stream of file events, where each event
+    alone would redo it.
+    """
+
+    def __init__(self, slot: Callable[[], None], ms: int = 400, parent: QObject | None = None):
+        super().__init__(parent)
+        self._slot = slot
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(ms)
+        self._timer.timeout.connect(slot)
+
+    def poke(self) -> None:
+        self._timer.start()
+
+    def now(self) -> None:
+        """Run at once, dropping the pending call."""
+        self._timer.stop()
+        self._slot()
 
 
 @dataclass(frozen=True, slots=True)
@@ -288,16 +356,8 @@ class TrackList(QWidget):
         self.list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self.list.setUniformItemSizes(True)
         self.list.itemChanged.connect(lambda _item: self._remember())
-        buttons = QHBoxLayout()
-        buttons.setSpacing(4)
-        for text, state in ((t("action.select_all"), True), (t("action.deselect_all"), False)):
-            button = HyperlinkButton()
-            button.setText(text)
-            button.clicked.connect(lambda _=False, on=state: self.check_all(on))
-            buttons.addWidget(button)
-        buttons.addStretch(1)
         self.count_label = hint_label(wrap=False)
-        buttons.addWidget(self.count_label)
+        buttons = select_all_row(self.check_all, self.count_label)
         layout = QGridLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.list, 0, 0)
@@ -306,9 +366,7 @@ class TrackList(QWidget):
         self.changed.connect(self._count)
         # ticked keys, including those of layouts not shown right now
         self._memory: set[str] = set()
-
-    def is_empty(self) -> bool:
-        return self.list.count() == 0
+        fluent.on_theme_change(self._recolor)
 
     def checked(self) -> set[str]:
         return {
@@ -334,7 +392,6 @@ class TrackList(QWidget):
             self._memory = (self._memory - shown) | (checked & shown)
         self.list.blockSignals(True)
         self.list.clear()
-        dim = fluent.dim()
         for track in tracks:
             item = QListWidgetItem(track.text)
             item.setData(Qt.ItemDataRole.UserRole, track.key)
@@ -342,12 +399,22 @@ class TrackList(QWidget):
             item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable)
             on = track.key in checked
             item.setCheckState(Qt.CheckState.Checked if on else Qt.CheckState.Unchecked)
-            if track.pending:
-                item.setForeground(dim)
+            item.setData(_PENDING, track.pending)
             self.list.addItem(item)
         self.list.blockSignals(False)
+        self._recolor()
         self._count()
         self._fit()
+
+    def _recolor(self) -> None:
+        """Grey the pending tracks in the current theme's secondary colour."""
+        dim = fluent.dim()
+        self.list.blockSignals(True)
+        for i in range(self.list.count()):
+            item = self.list.item(i)
+            if item.data(_PENDING):
+                item.setForeground(dim)
+        self.list.blockSignals(False)
 
     def _fit(self) -> None:
         """As tall as the tracks, so a layout's stems show without scrolling, up to a point."""
@@ -373,4 +440,3 @@ class TrackList(QWidget):
         self.count_label.setText(
             t("widgets.selected_count", selected=len(self.checked()), total=total) if total else ""
         )
-

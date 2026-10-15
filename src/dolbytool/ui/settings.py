@@ -1,19 +1,21 @@
-"""Settings page: manage language, appearance, runtime environment, and storage."""
+"""Settings page: language, appearance, the tools found, storage, shortcuts and version."""
 
 from __future__ import annotations
 
+import logging
 import shutil
+from collections.abc import Sequence
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, Qt, QUrl
-from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PySide6.QtCore import QSettings, Qt, QUrl, Signal
+from PySide6.QtGui import QAction, QDesktopServices, QKeySequence
+from PySide6.QtWidgets import QVBoxLayout, QWidget
 from qfluentwidgets import (
+    BodyLabel,
     FluentIcon,
-    HyperlinkCard,
     InfoBadge,
     InfoBar,
-    PrimaryPushButton,
     PushButton,
     PushSettingCard,
     ScrollArea,
@@ -22,15 +24,10 @@ from qfluentwidgets import (
     TitleLabel,
 )
 
-from dolbytool.core.i18n import (
-    LANGUAGE_NAMES,
-    SUPPORTED_LANGUAGES,
-    get_language,
-    t,
-)
-from dolbytool.core.paths import WORK_ROOT, sweep_scratch
-from dolbytool.features.waveform.encoders import ENCODERS, encoder_available
-from dolbytool.ui import fluent
+from dolbytool.core.i18n import LANGUAGE_NAMES, get_language, t
+from dolbytool.core.paths import WORK_ROOT, cache_dir, sweep_scratch
+from dolbytool.features.waveform.encoders import encoder_available
+from dolbytool.ui import widgets
 from dolbytool.ui.fluent import (
     THEME_AUTO,
     THEME_DARK,
@@ -40,241 +37,204 @@ from dolbytool.ui.fluent import (
     set_theme_mode,
 )
 
+logger = logging.getLogger(__name__)
+
+# caches rebuilt on demand: decoded Atmos traces and motion artwork frames
+_CLEARABLE = ("cache", "motion")
+
+
+def _app_version() -> str:
+    try:
+        return version("soundweaver")
+    except PackageNotFoundError:
+        return "?"
+
+
+def _size(path: Path) -> int:
+    return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+
 
 class SettingsPage(QWidget):
-    """Modern Fluent settings page."""
+    """The app's own settings, apart from what each output page sets."""
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    language_picked = Signal(str)
+    about_requested = Signal()
+
+    def __init__(self, shortcuts: Sequence[QAction], parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._init_ui()
-
-    def _init_ui(self) -> None:
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-
         scroll = ScrollArea(self)
         scroll.setWidgetResizable(True)
         scroll.enableTransparentBackground()
-
         container = QWidget()
-        container_layout = QVBoxLayout(container)
-        container_layout.setContentsMargins(36, 20, 36, 24)
-        container_layout.setSpacing(20)
-
-        # Title
-        self.title_label = TitleLabel(t("settings.title"), container)
-        container_layout.addWidget(self.title_label)
-
-        # 1. General group
-        self._build_general_group(container_layout, container)
-
-        # 2. Environment & Acceleration group
-        self._build_environment_group(container_layout, container)
-
-        # 3. Storage & Cache group
-        self._build_storage_group(container_layout, container)
-
-        # 4. About group
-        self._build_about_group(container_layout, container)
-
-        container_layout.addSpacing(40)
+        column = QVBoxLayout(container)
+        column.setContentsMargins(*widgets.PAGE_MARGINS)
+        column.setSpacing(widgets.SECTION_SPACING * 2)
+        column.addWidget(TitleLabel(t("settings.title"), container))
+        column.addWidget(self._general_group(container))
+        column.addWidget(self._environment_group(container))
+        column.addWidget(self._storage_group(container))
+        column.addWidget(self._shortcuts_group(container, shortcuts))
+        column.addWidget(self._about_group(container))
+        column.addStretch(1)
         scroll.setWidget(container)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(scroll)
 
-    def _build_general_group(self, layout: QVBoxLayout, container: QWidget) -> None:
-        self.group_general = SettingCardGroup(t("settings.group_general"), container)
+    @staticmethod
+    def _trailing(card: SettingCard, *items: QWidget) -> None:
+        """Put `items` at the right end of a setting card."""
+        for index, item in enumerate(items):
+            if index:
+                card.hBoxLayout.addSpacing(8)
+            card.hBoxLayout.addWidget(item, 0, Qt.AlignmentFlag.AlignRight)
+        card.hBoxLayout.addSpacing(16)
 
-        # Language card
-        self.card_lang = SettingCard(
-            FluentIcon.LANGUAGE,
-            t("settings.language"),
-            t("settings.language_desc"),
-            self.group_general,
+    @staticmethod
+    def _combo(card: SettingCard, items: Sequence[tuple[str, str]], current: str) -> ComboBox:
+        combo = ComboBox(card)
+        for label, data in items:
+            combo.addItem(label, data)
+        combo.setCurrentIndex(max(0, combo.findData(current)))
+        return combo
+
+    def _general_group(self, parent: QWidget) -> SettingCardGroup:
+        group = SettingCardGroup(t("settings.group_general"), parent)
+        language = SettingCard(
+            FluentIcon.LANGUAGE, t("settings.language"), t("settings.language_desc"), group
         )
-        self.combo_lang = ComboBox(self.card_lang)
-        for code, name in LANGUAGE_NAMES.items():
-            self.combo_lang.addItem(name, userData=code)
-
-        cur_lang = get_language()
-        for idx in range(self.combo_lang.count()):
-            if self.combo_lang.itemData(idx) == cur_lang:
-                self.combo_lang.setCurrentIndex(idx)
-                break
-
-        self.combo_lang.currentIndexChanged.connect(self._on_language_changed)
-        self.card_lang.hBoxLayout.addWidget(self.combo_lang, 0, Qt.AlignRight)
-        self.card_lang.hBoxLayout.addSpacing(16)
-        self.group_general.addSettingCard(self.card_lang)
-
-        # Theme card
-        self.card_theme = SettingCard(
-            FluentIcon.BRUSH,
-            t("settings.theme"),
-            t("settings.theme_desc"),
-            self.group_general,
+        self.combo_lang = self._combo(
+            language, [(name, code) for code, name in LANGUAGE_NAMES.items()], get_language()
         )
-        self.combo_theme = ComboBox(self.card_theme)
-        self.combo_theme.addItem(t("settings.theme_auto"), userData=THEME_AUTO)
-        self.combo_theme.addItem(t("settings.theme_light"), userData=THEME_LIGHT)
-        self.combo_theme.addItem(t("settings.theme_dark"), userData=THEME_DARK)
+        self.combo_lang.currentIndexChanged.connect(
+            lambda i: self.language_picked.emit(self.combo_lang.itemData(i))
+        )
+        self._trailing(language, self.combo_lang)
+        group.addSettingCard(language)
 
-        cur_mode = get_theme_mode()
-        for idx in range(self.combo_theme.count()):
-            if self.combo_theme.itemData(idx) == cur_mode:
-                self.combo_theme.setCurrentIndex(idx)
-                break
+        theme = SettingCard(FluentIcon.BRUSH, t("settings.theme"), t("settings.theme_desc"), group)
+        self.combo_theme = self._combo(
+            theme,
+            [
+                (t("settings.theme_auto"), THEME_AUTO),
+                (t("settings.theme_light"), THEME_LIGHT),
+                (t("settings.theme_dark"), THEME_DARK),
+            ],
+            get_theme_mode(),
+        )
+        self.combo_theme.currentIndexChanged.connect(
+            lambda i: set_theme_mode(self.combo_theme.itemData(i))
+        )
+        self._trailing(theme, self.combo_theme)
+        group.addSettingCard(theme)
+        return group
 
-        self.combo_theme.currentIndexChanged.connect(self._on_theme_changed)
-        self.card_theme.hBoxLayout.addWidget(self.combo_theme, 0, Qt.AlignRight)
-        self.card_theme.hBoxLayout.addSpacing(16)
-        self.group_general.addSettingCard(self.card_theme)
-
-        layout.addWidget(self.group_general)
-
-    def _build_environment_group(self, layout: QVBoxLayout, container: QWidget) -> None:
-        self.group_env = SettingCardGroup(t("settings.group_environment"), container)
-
-        # FFmpeg status card
-        ffmpeg_bin = shutil.which("ffmpeg")
-        ffprobe_bin = shutil.which("ffprobe")
+    def _environment_group(self, parent: QWidget) -> SettingCardGroup:
+        group = SettingCardGroup(t("settings.group_environment"), parent)
+        ffmpeg_bin, ffprobe_bin = shutil.which("ffmpeg"), shutil.which("ffprobe")
         ffmpeg_ok = bool(ffmpeg_bin and ffprobe_bin)
-        ffmpeg_desc = t("settings.ffmpeg_available", path=ffmpeg_bin) if ffmpeg_ok else t("settings.ffmpeg_missing")
-
-        self.card_ffmpeg = SettingCard(
+        card = SettingCard(
             FluentIcon.MEDIA,
             t("settings.ffmpeg_status"),
-            ffmpeg_desc,
-            self.group_env,
-        )
-        badge_ffmpeg = (
-            InfoBadge.success(t("settings.status_ready"), parent=self.card_ffmpeg)
+            t("settings.ffmpeg_available", path=ffmpeg_bin)
             if ffmpeg_ok
-            else InfoBadge.error(t("settings.status_missing"), parent=self.card_ffmpeg)
+            else t("settings.ffmpeg_missing"),
+            group,
         )
-        badge_ffmpeg.setAlignment(Qt.AlignCenter)
-        badge_ffmpeg.setFixedSize(54, 22)
-        self.card_ffmpeg.hBoxLayout.addWidget(badge_ffmpeg, 0, Qt.AlignRight)
-        self.card_ffmpeg.hBoxLayout.addSpacing(16)
-        self.group_env.addSettingCard(self.card_ffmpeg)
+        badge = (
+            InfoBadge.success(t("settings.status_ready"), parent=card)
+            if ffmpeg_ok
+            else InfoBadge.error(t("settings.status_missing"), parent=card)
+        )
+        self._trailing(card, badge)
+        group.addSettingCard(card)
 
-        # NVENC Hardware encoder status card
-        has_nvenc = encoder_available("h264_nvenc") or encoder_available("hevc_nvenc")
-        enc_desc = t("settings.encoders_nvenc_available") if has_nvenc else t("settings.encoders_software_only")
-
-        self.card_encoder = SettingCard(
+        nvenc = ffmpeg_ok and (encoder_available("h264_nvenc") or encoder_available("hevc_nvenc"))
+        card = SettingCard(
             FluentIcon.SPEED_HIGH,
             t("settings.encoders_status"),
-            enc_desc,
-            self.group_env,
+            t("settings.encoders_nvenc_available")
+            if nvenc
+            else t("settings.encoders_software_only"),
+            group,
         )
-        badge_enc = (
-            InfoBadge.success(t("settings.status_ready"), parent=self.card_encoder)
-            if has_nvenc
-            else InfoBadge.warning(t("settings.status_software"), parent=self.card_encoder)
+        badge = (
+            InfoBadge.success(t("settings.status_ready"), parent=card)
+            if nvenc
+            else InfoBadge.warning(t("settings.status_software"), parent=card)
         )
-        badge_enc.setAlignment(Qt.AlignCenter)
-        badge_enc.setFixedSize(68 if not has_nvenc else 54, 22)
-        self.card_encoder.hBoxLayout.addWidget(badge_enc, 0, Qt.AlignRight)
-        self.card_encoder.hBoxLayout.addSpacing(16)
-        self.group_env.addSettingCard(self.card_encoder)
+        self._trailing(card, badge)
+        group.addSettingCard(card)
+        return group
 
-        layout.addWidget(self.group_env)
+    def _storage_group(self, parent: QWidget) -> SettingCardGroup:
+        group = SettingCardGroup(t("settings.group_storage"), parent)
+        scratch = SettingCard(FluentIcon.FOLDER, t("settings.scratch_cache"), str(WORK_ROOT), group)
+        scratch.setToolTip(t("settings.scratch_cache_desc"))
+        open_scratch = PushButton(t("settings.open_dir"), scratch)
+        open_scratch.clicked.connect(lambda: self._open_path(WORK_ROOT))
+        self.clear_button = PushButton(t("settings.clear_cache"), scratch)
+        self.clear_button.setToolTip(t("settings.clear_cache_tip"))
+        self.clear_button.clicked.connect(self._clear_cache)
+        self._trailing(scratch, open_scratch, self.clear_button)
+        group.addSettingCard(scratch)
 
-    def _build_storage_group(self, layout: QVBoxLayout, container: QWidget) -> None:
-        self.group_storage = SettingCardGroup(t("settings.group_storage"), container)
+        conf_file = Path(QSettings().fileName())
+        config = SettingCard(FluentIcon.DOCUMENT, t("settings.config_file"), str(conf_file), group)
+        open_config = PushButton(t("settings.open_dir"), config)
+        open_config.clicked.connect(lambda: self._open_path(conf_file.parent))
+        self._trailing(config, open_config)
+        group.addSettingCard(config)
+        return group
 
-        # Scratch directory card with Open and Clear buttons
-        scratch_dir = WORK_ROOT
-        self.card_scratch = SettingCard(
-            FluentIcon.FOLDER,
-            t("settings.scratch_cache"),
-            str(scratch_dir),
-            self.group_storage,
-        )
-        btn_open = PushButton(t("settings.open_dir"), self.card_scratch)
-        btn_open.clicked.connect(lambda: self._open_path(scratch_dir))
-        btn_clear = PushButton(t("settings.clear_cache"), self.card_scratch)
-        btn_clear.clicked.connect(self._clear_cache)
+    def _shortcuts_group(self, parent: QWidget, actions: Sequence[QAction]) -> SettingCardGroup:
+        group = SettingCardGroup(t("settings.group_shortcuts"), parent)
+        for action in actions:
+            card = SettingCard(action.icon(), action.text().replace("&", ""), None, group)
+            keys = BodyLabel(action.shortcut().toString(QKeySequence.SequenceFormat.NativeText))
+            self._trailing(card, keys)
+            group.addSettingCard(card)
+        return group
 
-        self.card_scratch.hBoxLayout.addWidget(btn_open, 0, Qt.AlignRight)
-        self.card_scratch.hBoxLayout.addSpacing(8)
-        self.card_scratch.hBoxLayout.addWidget(btn_clear, 0, Qt.AlignRight)
-        self.card_scratch.hBoxLayout.addSpacing(16)
-        self.group_storage.addSettingCard(self.card_scratch)
-
-        # Config file path
-        settings = QSettings("SoundWeaver", "SoundWeaver")
-        conf_file = Path(settings.fileName())
-        self.card_config = SettingCard(
-            FluentIcon.DOCUMENT,
-            t("settings.config_file"),
-            str(conf_file),
-            self.group_storage,
-        )
-        btn_open_conf = PushButton(t("settings.open_dir"), self.card_config)
-        btn_open_conf.clicked.connect(lambda: self._open_path(conf_file.parent))
-        self.card_config.hBoxLayout.addWidget(btn_open_conf, 0, Qt.AlignRight)
-        self.card_config.hBoxLayout.addSpacing(16)
-        self.group_storage.addSettingCard(self.card_config)
-
-        layout.addWidget(self.group_storage)
-
-    def _build_about_group(self, layout: QVBoxLayout, container: QWidget) -> None:
-        self.group_about = SettingCardGroup(t("settings.group_about"), container)
-
-        self.card_about = PushSettingCard(
+    def _about_group(self, parent: QWidget) -> SettingCardGroup:
+        group = SettingCardGroup(t("settings.group_about"), parent)
+        about = PushSettingCard(
             t("settings.open_about_dialog"),
             FluentIcon.INFO,
             "SoundWeaver",
-            t("settings.app_version") + " 0.1.0 (AGPL-3.0-or-later)",
-            self.group_about,
+            f"{t('settings.app_version')} {_app_version()} (AGPL-3.0-or-later)",
+            group,
         )
-        self.card_about.clicked.connect(self._show_about)
-        self.group_about.addSettingCard(self.card_about)
+        about.clicked.connect(self.about_requested)
+        group.addSettingCard(about)
+        return group
 
-        layout.addWidget(self.group_about)
+    def set_running(self, running: bool) -> None:
+        """A run reads the caches; they are not cleared under it."""
+        self.clear_button.setEnabled(not running)
 
-    def _on_language_changed(self, index: int) -> None:
-        code = self.combo_lang.itemData(index)
-        if not code or code == get_language():
-            return
-        win = self.window()
-        if hasattr(win, "_set_language"):
-            win._set_language(code)
-
-    def _on_theme_changed(self, index: int) -> None:
-        mode = self.combo_theme.itemData(index)
-        if mode:
-            set_theme_mode(mode)
-
-    def _open_path(self, path: Path) -> None:
+    @staticmethod
+    def _open_path(path: Path) -> None:
         path.mkdir(parents=True, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
     def _clear_cache(self) -> None:
+        """Empty the rebuildable caches and the scratch of dead processes, never this one's."""
         sweep_scratch()
-        # Clean up process scratch folders
-        scratch_dir = WORK_ROOT / "scratch"
-        if scratch_dir.is_dir():
-            for child in scratch_dir.iterdir():
+        freed = 0
+        for name in _CLEARABLE:
+            root = cache_dir(name)
+            for entry in root.iterdir():
                 try:
-                    if child.is_dir():
-                        shutil.rmtree(child, ignore_errors=True)
-                    else:
-                        child.unlink(missing_ok=True)
-                except Exception:
-                    pass
+                    size = _size(entry) if entry.is_dir() else entry.stat().st_size
+                    shutil.rmtree(entry) if entry.is_dir() else entry.unlink()
+                except OSError as error:
+                    logger.warning("cannot remove %s: %s", entry, error)
+                    continue
+                freed += size
         InfoBar.success(
             t("settings.clear_cache"),
-            t("settings.cache_cleared"),
+            t("settings.cache_cleared", size=f"{freed / 2**20:.1f} MB"),
             duration=3000,
             parent=self.window(),
         )
-
-    def _show_about(self) -> None:
-        win = self.window()
-        if hasattr(win, "_about"):
-            win._about()
-        else:
-            fluent.tell(self, t("app.about_title"), t("app.description"))

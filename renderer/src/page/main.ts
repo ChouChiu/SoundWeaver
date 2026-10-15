@@ -14,4 +14,5 @@ window.renderPage = {
 	prerollStart: (ms) => stage.prerollStart(ms),
 	seek: (ms) => stage.seek(ms),
 	endTime: () => stage.endTime(),
+	visibleWindows: () => stage.visibleWindows(),
 };

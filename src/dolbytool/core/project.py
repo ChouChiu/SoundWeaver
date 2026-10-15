@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from dolbytool.core.audio import AudioInfo
+from dolbytool.core.i18n import t
 from dolbytool.core.speakers import DEFAULT_ATMOS, SpeakerLayout
 from dolbytool.core.stems import layout_stems, stem_hint, stem_label, stem_path
 
@@ -33,14 +34,10 @@ class Track:
 
     @property
     def label(self) -> str:
-        from dolbytool.core.i18n import t
-
         return t("audio.original") if self.is_original else stem_label(self.key)
 
     @property
     def hint(self) -> str:
-        from dolbytool.core.i18n import t
-
         return t("audio.original_hint") if self.is_original else stem_hint(self.key)
 
 
@@ -78,16 +75,12 @@ class Project:
 
     @property
     def stems(self) -> tuple[Track, ...]:
-        return tuple(t for t in self.tracks if not t.is_original)
+        return tuple(track for track in self.tracks if not track.is_original)
 
     @property
     def speakers(self) -> SpeakerLayout | None:
         """The speakers the stems are split from, None without a surround source."""
         return split_speakers(self.info, self.atmos_layout) if self.info else None
-
-    @property
-    def has_audio(self) -> bool:
-        return self.info is not None
 
     def inputs(self) -> tuple[Path, ...]:
         return tuple(p for p in (self.audio, self.cover, self.ttml) if p is not None)

@@ -8,6 +8,7 @@ from PySide6.QtCore import QSettings, Signal
 from PySide6.QtWidgets import QDoubleSpinBox, QLineEdit, QSpinBox, QWidget
 from qfluentwidgets import CheckBox, CompactDoubleSpinBox, LineEdit
 
+from dolbytool.core.i18n import t
 from dolbytool.core.project import PlanContext, Project
 from dolbytool.core.task import Step
 from dolbytool.ui import fluent, widgets
@@ -29,35 +30,18 @@ class FeaturePanel(QWidget):
 
     title_key = ""
     description_key = ""
-    _title = ""
-    _description = ""
     icon = ""
     enabled_key = ""
     enabled_default = True
 
     @property
     def title(self) -> str:
-        if self.title_key:
-            from dolbytool.core.i18n import t
-
-            return t(self.title_key)
-        return self._title
-
-    @title.setter
-    def title(self, value: str) -> None:
-        self._title = value
+        return t(self.title_key)
 
     @property
     def description(self) -> str:
-        if self.description_key:
-            from dolbytool.core.i18n import t
+        return t(self.description_key)
 
-            return t(self.description_key)
-        return self._description
-
-    @description.setter
-    def description(self, value: str) -> None:
-        self._description = value
     # whether ticking this output requires a readable source audio
     needs_audio = True
     # made once per album from what the tracks share (the cover), not once per track
@@ -103,7 +87,7 @@ class FeaturePanel(QWidget):
         box.setDecimals(1)
         box.setSingleStep(step)
         box.setValue(value)
-        box.setSuffix(" 秒")
+        box.setSuffix(t("unit.seconds_suffix"))
         box.setToolTip(tip)
         self.remember(key, box, replan)
         return box
@@ -189,6 +173,9 @@ class FeaturePanel(QWidget):
     def notes(self, ctx: PlanContext) -> list[str]:
         """Log lines to print when the run starts."""
         return []
+
+    def cancel_background(self) -> None:
+        """A run is starting: stop work of the panel's own (a preview) that would compete with it."""
 
     def shutdown(self) -> None:
         """The window is closing: stop anything the panel still has running."""

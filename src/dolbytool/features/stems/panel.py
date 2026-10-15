@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QSettings
-from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QVBoxLayout
-from qfluentwidgets import CheckBox, CompactDoubleSpinBox, HyperlinkButton
+from PySide6.QtWidgets import QGridLayout, QVBoxLayout
+from qfluentwidgets import CheckBox, CompactDoubleSpinBox
 
+from dolbytool.core.i18n import t
 from dolbytool.core.project import ATMOS_LAYOUT_KEY, PlanContext, Project
 from dolbytool.core.speakers import DEFAULT_ATMOS, LAYOUTS, atmos_layout
 from dolbytool.core.stems import StemKind
@@ -16,45 +17,24 @@ from dolbytool.ui import fluent, widgets
 from dolbytool.ui.feature import FeaturePanel
 
 COLUMNS = 3
-ADM_TEXT = "导出 ADM BWF（含空间对象三维轨迹）"
-ADM_TIP = (
-    "仅适用于杜比全景声源：将各动态对象与声床分轨导出为 24-bit 多声道 BWF WAV，\n"
-    "按杜比全景声母带 ADM 规范 (Dolby Atmos Master ADM Profile) 内嵌 axml 与 chna 元数据，\n"
-    "记录空间三维轨迹，可导入杜比渲染器、ADM 查看器及专业 DAW"
-)
-LAYOUT_TIP = (
-    "杜比全景声源渲染到的扬声器布局，决定可导出的分轨与声场视频的分轨暗化；\n"
-    "床声道在没有对应扬声器的布局中按其位置摆放，ADM BWF 不受影响"
-)
 
 
 class StemsPanel(FeaturePanel):
     title_key = "stems.title"
     description_key = "stems.description"
-    _title = "分轨"
     icon = "view-media-equalizer"
-    _description = "按声道布局分离导出 WAV 分轨；杜比全景声源可渲染为 2.0 至 9.1.6 等多种布局，支持导出标准 ADM BWF"
     enabled_key = "do_stems"
 
     def __init__(self, settings: QSettings, parent=None) -> None:
         super().__init__(settings, parent)
-        from dolbytool.core.i18n import t
-
         self.checks: dict[str, CheckBox] = {}
         # unticked stems, including those of layouts not shown right now
         self._skip: set[str] = set()
         self.grid = QGridLayout()
-        self.grid.setHorizontalSpacing(18)
-        self.grid.setVerticalSpacing(6)
-        buttons = QHBoxLayout()
-        for text, state in ((t("action.select_all"), True), (t("action.deselect_all"), False)):
-            button = HyperlinkButton()
-            button.setText(text)
-            button.clicked.connect(lambda _=False, on=state: self._check_all(on))
-            buttons.addWidget(button)
-        buttons.addStretch(1)
+        self.grid.setHorizontalSpacing(widgets.PAIR_GAP // 2)
+        self.grid.setVerticalSpacing(widgets.ROW_SPACING)
         self.info = widgets.hint_label(wrap=False)
-        buttons.addWidget(self.info)
+        buttons = widgets.select_all_row(self._check_all, self.info)
         stems = QVBoxLayout()
         stems.addLayout(self.grid)
         stems.addLayout(buttons)
@@ -110,7 +90,7 @@ class StemsPanel(FeaturePanel):
         self.changed.emit()
 
     def _chosen(self, project: Project) -> set[str]:
-        return {t.key for t in project.stems if t.key not in self._skip}
+        return {track.key for track in project.stems if track.key not in self._skip}
 
     def _adm(self, ctx: PlanContext) -> bool:
         info = ctx.project.info
@@ -121,7 +101,7 @@ class StemsPanel(FeaturePanel):
         kinds = set(ctx.required_stems)
         if self.enabled:
             kinds |= self._chosen(ctx.project)
-        return [t.key for t in ctx.project.stems if t.key in kinds]
+        return [track.key for track in ctx.project.stems if track.key in kinds]
 
     def _implicit(self, ctx: PlanContext) -> bool:
         """The split runs only because another output needs a stem that is not there yet."""
@@ -137,8 +117,6 @@ class StemsPanel(FeaturePanel):
             self.grid.removeWidget(box)
             box.deleteLater()
         self.checks = {}
-        from dolbytool.core.i18n import t
-
         atmos = project.info is not None and project.info.atmos
         self.adm.setEnabled(atmos)
         exists = bool(
@@ -160,36 +138,33 @@ class StemsPanel(FeaturePanel):
         if not stems:
             self.info.setText(t("stems.hint_empty"))
             return
-        done = sum(t.exists for t in stems)
+        done = sum(track.exists for track in stems)
         self.info.setText(
-            t("stems.done_status", done=done, total=len(stems)) if done else t("stems.not_done_status")
+            t("stems.done_status", done=done, total=len(stems))
+            if done
+            else t("stems.not_done_status")
         )
 
     def is_active(self, ctx: PlanContext) -> bool:
         return bool(self._kinds(ctx)) or self._adm(ctx)
 
     def problem(self, ctx: PlanContext) -> str | None:
-        from dolbytool.core.i18n import t
-
         if ctx.project.info is not None and not self._chosen(ctx.project) and not self._adm(ctx):
             return t("stems.prompt_pick_one")
         return None
 
     def summary(self, ctx: PlanContext) -> str | None:
-        from dolbytool.core.i18n import t
-
         kinds = self._kinds(ctx)
         parts = [t("stems.summary", count=len(kinds))] if kinds else []
         if self._adm(ctx):
             parts.append("ADM BWF")
         if not parts:
             return None
-        note = t("stems.needed_by", by="、".join(ctx.requested_by)) if self._implicit(ctx) else ""
-        return "、".join(parts) + note
+        sep = t("common.list_sep")
+        note = t("stems.needed_by", by=sep.join(ctx.requested_by)) if self._implicit(ctx) else ""
+        return sep.join(parts) + note
 
     def notes(self, ctx: PlanContext) -> list[str]:
-        from dolbytool.core.i18n import t
-
         return [t("stems.implicit_note")] if self._implicit(ctx) else []
 
     def plan(self, ctx: PlanContext) -> list[Step]:

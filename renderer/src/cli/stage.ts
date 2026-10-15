@@ -9,8 +9,8 @@ import type { Run } from "./run";
 
 // the bundle sits next to the built page in dist/
 const here = path.dirname(fileURLToPath(import.meta.url));
-// SSIM 0.994 against a PNG capture after a CRF 18 encode; 100 costs a third more time
-const JPEG_QUALITY = 95;
+// quality of the opaque capture fed to the encoder; see the SSIM note in ffmpeg.ts
+const JPEG_QUALITY = 90;
 
 export interface StageSettings {
 	executablePath: string;
@@ -31,6 +31,8 @@ export class Stage {
 	private frameTime: number;
 	// the first uncaught error of the page: whatever it draws after that cannot be trusted
 	private pageError: string | null = null;
+	// when the page shows anything, sorted and merged; null when it cannot say
+	private windows: [number, number][] | null = null;
 
 	private constructor(
 		private readonly run: Run,
@@ -89,6 +91,8 @@ export class Stage {
 			stage.throwIfBroken();
 			try {
 				await settings.setup(stage);
+				const windows = await stage.page.evaluate(() => window.renderPage.visibleWindows?.());
+				stage.windows = windows ? mergeWindows(windows) : null;
 			} catch (error) {
 				// the page's own error says more than the check that tripped over it
 				stage.throwIfBroken();
@@ -155,6 +159,25 @@ export class Stage {
 		return visible;
 	}
 
+	/**
+	 * Whether the page may show anything at `ms`.  Outside the windows the page
+	 * reported every frame is the empty picture, so a caller holding one can
+	 * skip the browser; a page that reports none may show something anywhere.
+	 */
+	isVisible(ms: number): boolean {
+		const windows = this.windows;
+		if (windows === null) return true;
+		// the last window starting at or before `ms`; they are merged, so it is the only candidate
+		let lo = 0;
+		let hi = windows.length;
+		while (lo < hi) {
+			const mid = (lo + hi) >> 1;
+			if (windows[mid][0] <= ms) lo = mid + 1;
+			else hi = mid;
+		}
+		return lo > 0 && ms <= windows[lo - 1][1];
+	}
+
 	private noteError(error: unknown): void {
 		const message = error instanceof Error ? error.message || error.name : String(error);
 		debug(`page error: ${message}`);
@@ -188,4 +211,15 @@ export class Stage {
 		await this.browser.close();
 		this.run.browsers.delete(this.browser);
 	}
+}
+
+/** `windows` sorted by start, overlapping and touching ones joined. */
+function mergeWindows(windows: [number, number][]): [number, number][] {
+	const merged: [number, number][] = [];
+	for (const [from, until] of [...windows].sort((a, b) => a[0] - b[0])) {
+		const last = merged.at(-1);
+		if (last && from <= last[1]) last[1] = Math.max(last[1], until);
+		else merged.push([from, until]);
+	}
+	return merged;
 }

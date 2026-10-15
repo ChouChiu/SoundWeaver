@@ -17,6 +17,7 @@ from pathlib import Path
 
 from dolbytool.core.cancel import CancellationToken
 from dolbytool.core.ffmpeg import duration, run_ffmpeg
+from dolbytool.core.i18n import t
 from dolbytool.core.paths import atomic_output, work_root
 from dolbytool.core.project import Track
 from dolbytool.core.task import Report, Step, percent
@@ -114,9 +115,6 @@ def waveform_target(output_dir: Path, source: Path) -> Path:
     return output_dir / f"{source.stem}.mp4"
 
 
-from dolbytool.core.i18n import t
-
-
 def waveform_step(track: Track, target: Path, spec: WaveformSpec) -> Step:
     def run(token: CancellationToken, report: Report) -> str:
         encoder, note = encoder_for(spec.encoder, spec.screen_width, spec.height)
@@ -124,10 +122,13 @@ def waveform_step(track: Track, target: Path, spec: WaveformSpec) -> Step:
             report(0, note)
         use = replace(spec, encoder=encoder)
         if not track.path.is_file():
-            raise FileNotFoundError(f"{t('error.file_not_found')}：{track.path}")
-        render_waveform_video(track.path, target, use, token, percent(report, t("step.render_and_encode")))
+            raise FileNotFoundError(
+                t("common.labeled", label=t("error.file_not_found"), text=track.path)
+            )
+        render_waveform_video(
+            track.path, target, use, token, percent(report, t("step.render_and_encode"))
+        )
         return target.name
 
     # each video is light on the CPU, so several encode side by side
     return Step(t("step.waveform_video_track", label=track.label), run, (target,), parallel=True)
-

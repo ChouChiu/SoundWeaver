@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from dolbytool.core.cancel import CancellationToken
+from dolbytool.core.i18n import t
 from dolbytool.core.paths import atomic_output
 from dolbytool.core.renderer import renderer_script, run_renderer
 from dolbytool.core.task import Progress, Report, Step
@@ -65,16 +66,13 @@ def render_subtitle_video(
     with atomic_output(output) as partial:
         run_renderer(
             script, [*args, "--out", str(partial)], token, on_fraction, on_status,
-            "字幕渲染器退出码 {code}",
+            t("error.lyrics_renderer_exit"),
         )  # fmt: skip
     on_fraction(1.0)
 
 
 def lyrics_target(output_dir: Path, name_source: Path) -> Path:
     return output_dir / f"{name_source.stem}_lyrics.webm"
-
-
-from dolbytool.core.i18n import t
 
 
 def lyrics_step(ttml: Path, target: Path, spec: SubtitleSpec, duration: float | None) -> Step:
@@ -88,4 +86,3 @@ def lyrics_step(ttml: Path, target: Path, spec: SubtitleSpec, duration: float | 
         return target.name
 
     return Step(t("step.lyrics_video"), run, (target,))
-

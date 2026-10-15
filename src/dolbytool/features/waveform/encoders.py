@@ -5,6 +5,7 @@ from __future__ import annotations
 import subprocess
 from functools import cache
 
+from dolbytool.core.i18n import t
 from dolbytool.core.process import NO_WINDOW
 
 ENCODERS: dict[str, list[str]] = {
@@ -22,11 +23,6 @@ ENCODERS: dict[str, list[str]] = {
 }  # fmt: skip
 
 
-ENCODER_LABELS = {
-    "h264_nvenc": "H.264 (NVIDIA 硬件编码)",
-    "hevc_nvenc": "HEVC (NVIDIA 硬件编码)",
-    "libx264": "H.264 (软件编码)",
-}
 DEFAULT_ENCODER = "h264_nvenc"
 FALLBACK_ENCODER = "libx264"
 # Largest side NVENC encodes on this generation of cards (H.264 level 6.2 / HEVC);
@@ -34,16 +30,27 @@ FALLBACK_ENCODER = "libx264"
 NVENC_MAX_SIDE = {"h264_nvenc": 4096, "hevc_nvenc": 8192}
 
 
+# A wedged GPU driver can hang the probe; past this it counts as unusable.
+_PROBE_TIMEOUT = 15
+
+
 @cache
 def encoder_available(name: str) -> bool:
-    """Encode one tiny frame; a listed NVENC encoder still fails without a usable GPU/driver."""
-    result = subprocess.run(
-        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
-         "color=black:s=256x256:d=0.1", "-frames:v", "1", "-c:v", name, "-f", "null", "-"],
-        check=False,
-        capture_output=True,
-        creationflags=NO_WINDOW,
-    )  # fmt: skip
+    """Encode one tiny frame; a listed NVENC encoder still fails without a usable GPU/driver.
+
+    False as well without an ffmpeg to ask: the missing-tools banner says so.
+    """
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+             "color=black:s=256x256:d=0.1", "-frames:v", "1", "-c:v", name, "-f", "null", "-"],
+            check=False,
+            capture_output=True,
+            timeout=_PROBE_TIMEOUT,
+            creationflags=NO_WINDOW,
+        )  # fmt: skip
+    except (OSError, subprocess.TimeoutExpired):
+        return False
     return result.returncode == 0
 
 
@@ -65,5 +72,9 @@ def encoder_for(name: str, width: int, height: int) -> tuple[str, str | None]:
     if usable == name:
         return name, None
     too_big = side > NVENC_MAX_SIDE.get(name, side)
-    reason = f"超出 {name} 最大 {NVENC_MAX_SIDE[name]} px" if too_big else f"{name} 不可用"
-    return usable, f"{reason}，改用 {usable}"
+    reason = (
+        t("encoder.too_large", name=name, side=NVENC_MAX_SIDE[name])
+        if too_big
+        else t("encoder.unavailable", name=name)
+    )
+    return usable, t("encoder.fallback", reason=reason, usable=usable)

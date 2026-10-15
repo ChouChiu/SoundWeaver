@@ -285,7 +285,7 @@ start(async (run) => {
 	const want = { low: opts.beat && opts.options.background === "mesh", fft: opts.options.controls === "fft" };
 	let audio: AudioFrames | null = null;
 	if (opts.audio && (want.low || want.fft)) {
-		status("分析音频");
+		status({ key: "analyse_audio" });
 		audio = await analyse(run, opts.audio, 1000 / opts.fps, want);
 		debug(`audio analysed: ${(audio.low ?? audio.fft)?.length} frames`);
 	}
@@ -316,7 +316,7 @@ start(async (run) => {
 		},
 	};
 
-	status("启动浏览器");
+	status({ key: "launch_browser" });
 	const first = await Stage.open(run, settings);
 	const startFrame = Math.round(opts.start * opts.fps);
 	const seconds = opts.duration ?? Math.max(0.1, (await first.endTime()) / 1000 - opts.start);
@@ -342,7 +342,7 @@ start(async (run) => {
 	run.tempDirs.add(tmp);
 	const picture = path.join(tmp, `picture${path.extname(opts.out)}`);
 	await renderTimeline(run, first, () => Stage.open(run, settings), { ...encoding, out: picture });
-	status("混入音频");
+	status({ key: "mux_audio" });
 	const muxed = path.join(tmp, `muxed${path.extname(opts.out)}`);
 	await muxAudio(run, picture, opts.audio, opts.audioMode, muxed, startFrame / opts.fps);
 	await rename(muxed, opts.out);

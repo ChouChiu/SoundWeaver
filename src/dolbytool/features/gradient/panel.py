@@ -11,6 +11,7 @@ from qfluentwidgets import TransparentToggleToolButton
 
 from dolbytool.core import motion
 from dolbytool.core.ffmpeg import MAX_FRAME_SIDE, frame_problem
+from dolbytool.core.i18n import t
 from dolbytool.core.paths import FileStamp, file_stamp
 from dolbytool.core.project import PlanContext, Project
 from dolbytool.core.task import Step
@@ -30,16 +31,12 @@ DEFAULT_BOTTOM = "#040509"
 class GradientPanel(FeaturePanel):
     title_key = "gradient.title"
     description_key = "gradient.description"
-    _title = "渐变图"
     icon = "color-gradient"
-    _description = "提取封面主色调并向下平滑压暗过渡，生成背景渐变图 (PNG)"
     enabled_key = "do_gradient"
     per_album = True
 
     def __init__(self, settings: QSettings, parent=None) -> None:
         super().__init__(settings, parent)
-        from dolbytool.core.i18n import t
-
         self._cover: FileStamp | None = None
         self._swatches = Latest(self)
 
@@ -105,16 +102,16 @@ class GradientPanel(FeaturePanel):
         self.swatch_hint.show()
         if not cover or not cover.is_file():
             self._swatches.cancel()
-            self.swatch_hint.setText("选择封面后显示封面主要颜色")
+            self.swatch_hint.setText(t("gradient.swatch_hint"))
             return
-        self.swatch_hint.setText("正在提取封面颜色…")
+        self.swatch_hint.setText(t("gradient.extracting"))
         self._swatches.run(lambda: palette.palette(motion.still(cover)), self._show_swatches)
 
     def _show_swatches(self, result: list[palette.Swatch] | Exception) -> None:
         if isinstance(result, Exception):
             # Pillow and ffmpeg raise many kinds of error for a broken picture
-            self.swatch_hint.setText("封面无法读取")
-            logger.warning("封面取色失败：%s", result)
+            self.swatch_hint.setText(t("gradient.cover_unreadable"))
+            logger.warning("cannot take the colours of the cover: %s", result)
             return
         swatches = result
         self.swatch_hint.hide()
@@ -125,7 +122,7 @@ class GradientPanel(FeaturePanel):
             button.setCheckable(True)
             button.setAutoExclusive(True)
             button.setChecked(sw is main)
-            button.setToolTip(f"{sw.hex}（色彩占比约 {sw.share:.0%}）\n点击应用为渐变主色")
+            button.setToolTip(t("gradient.swatch_tip", hex=sw.hex, share=sw.share))
             button.clicked.connect(lambda _=False, rgb=sw.rgb: self._apply_main(rgb))
             self.swatch_row.insertWidget(index, button)
         self._apply_main(main.rgb)
@@ -151,19 +148,23 @@ class GradientPanel(FeaturePanel):
         else:
             w, h = max(1, round(side * aspect)), side
         top, bottom = QColor(spec.top), QColor(spec.bottom)
-        image = QImage(w, h, QImage.Format.Format_RGB32)
+        # in device pixels, so the preview is as sharp as the screen
+        ratio = self.preview.devicePixelRatioF()
+        pw, ph = max(1, round(w * ratio)), max(1, round(h * ratio))
+        image = QImage(pw, ph, QImage.Format.Format_RGB32)
         painter = QPainter(image)
-        for y in range(h):
-            t = spec.weight(y / h)
+        for y in range(ph):
+            mix = spec.weight(y / ph)
             painter.fillRect(
-                0, y, w, 1,
+                0, y, pw, 1,
                 QColor(
-                    round(top.red() + (bottom.red() - top.red()) * t),
-                    round(top.green() + (bottom.green() - top.green()) * t),
-                    round(top.blue() + (bottom.blue() - top.blue()) * t),
+                    round(top.red() + (bottom.red() - top.red()) * mix),
+                    round(top.green() + (bottom.green() - top.green()) * mix),
+                    round(top.blue() + (bottom.blue() - top.blue()) * mix),
                 ),
             )  # fmt: skip
         painter.end()
+        image.setDevicePixelRatio(ratio)
         self.preview.setPixmap(QPixmap.fromImage(image))
 
     # ---- hooks -----------------------------------------------------------------------
@@ -178,19 +179,18 @@ class GradientPanel(FeaturePanel):
         return frame_problem(self.width_spin.value(), self.height_spin.value())
 
     def summary(self, ctx: PlanContext) -> str | None:
-        from dolbytool.core.i18n import t
-
         spec = self.spec()
         return t("gradient.summary", width=spec.width, height=spec.height)
 
     def confirm(self, ctx: PlanContext) -> bool:
-        from dolbytool.core.i18n import t
-
         cover = ctx.project.cover
         if cover and cover.is_file():
             return True
         return fluent.ask(
-            self, t("status.cannot_start"), t("gradient.prompt_pick_cover"), accept=t("action.continue")
+            self,
+            t("status.cannot_start"),
+            t("gradient.prompt_pick_cover"),
+            accept=t("action.continue"),
         )
 
     def plan(self, ctx: PlanContext) -> list[Step]:

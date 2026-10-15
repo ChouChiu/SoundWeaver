@@ -14,9 +14,10 @@ export type Codec = (typeof CODECS)[number];
 
 /**
  * How frames come from the browser.  PNG is lossless; `fast` takes JPEG at
- * quality 95 for an opaque video instead, about half the capture time (the
+ * quality 90 for an opaque video instead, about half the capture time (the
  * zlib pass on a blurred full-frame background dominates a frame) at a slight
- * softening of fine detail.  Alpha always needs PNG.
+ * softening of fine detail: SSIM 0.9972 against the PNG capture after a CRF 18
+ * encode of a 720p player clip, 0.9977 at quality 95.  Alpha always needs PNG.
  */
 export function captureFormat({ codec, fast }: Encoding): "png" | "jpeg" {
 	return fast && codec !== "vp9" ? "jpeg" : "png";
@@ -45,13 +46,18 @@ function ffmpeg(run: Run, args: string[], stdin: "pipe" | "ignore"): { stdin: Wr
 	});
 	// EPIPE from a dead encoder; its exit status is what `done` reports
 	child.stdin?.on("error", () => {});
-	const done = new Promise<void>((resolve, reject) =>
+	const done = new Promise<void>((resolve, reject) => {
+		// no ffmpeg on PATH, or no process to be had: there is no exit to wait for
+		child.on("error", (error) => {
+			run.children.delete(child);
+			reject(new Error(`无法启动 ffmpeg：${error.message}`));
+		});
 		child.on("close", (code) => {
 			run.children.delete(child);
 			if (code === 0) resolve();
 			else reject(new Error(stderr.trim() || `ffmpeg exited with ${code}`));
-		}),
-	);
+		});
+	});
 	return { stdin: child.stdin, done };
 }
 
@@ -62,22 +68,24 @@ function codecArgs({ codec, crf, fps, threads }: Encoding): string[] {
 		case "vp9":
 			return [
 				"-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p", "-b:v", "0", "-crf", String(crf),
-				// realtime/6: ~1.7x faster than good/2 here and no worse on flat text, files a bit larger
+				// realtime/6: ~1.7x faster than good/2 here and no worse on flat text, files a bit
+				// larger; screen tuning and tile columns suit large flat areas and spread rows over cores
 				"-row-mt", "1", "-auto-alt-ref", "0", "-deadline", "realtime", "-cpu-used", "6",
+				"-tune-content", "screen", "-tile-columns", "2",
 				"-metadata:s:v:0", "alpha_mode=1", ...limit,
 			]; // prettier-ignore
 		case "libx264":
-			// half the default lookahead: about 30 % less memory, no visible change on this content
+			// faster rather than medium: less CPU per frame for files somewhat larger at the same CRF
 			return [
-				"-c:v", "libx264", "-preset", "medium", "-crf", String(crf), "-pix_fmt", "yuv420p", "-g", gop,
-				"-rc-lookahead", "20", ...limit,
+				"-c:v", "libx264", "-preset", "faster", "-crf", String(crf), "-pix_fmt", "yuv420p", "-g", gop,
+				...limit,
 			]; // prettier-ignore
 		case "h264_nvenc":
 		case "hevc_nvenc":
 			return [
-				// without a maxrate NVENC caps the bitrate (about 35 Mbps at 1080p60) and a CQ
-				// below ~10 stops buying anything
-				"-c:v", codec, "-preset", "p5", "-tune", "hq", "-rc", "vbr", "-cq", String(crf), "-b:v", "0",
+				// p4 is the balanced NVENC preset; without a maxrate NVENC caps the bitrate (about
+				// 35 Mbps at 1080p60), and a CQ below ~10 stops buying anything
+				"-c:v", codec, "-preset", "p4", "-tune", "hq", "-rc", "vbr", "-cq", String(crf), "-b:v", "0",
 				"-maxrate", "500M", "-bufsize", "1000M",
 				"-spatial-aq", "1", "-pix_fmt", "yuv420p", "-g", gop,
 				...(codec === "hevc_nvenc" ? ["-tag:v", "hvc1"] : []),

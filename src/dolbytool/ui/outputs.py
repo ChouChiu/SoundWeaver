@@ -21,6 +21,8 @@ class _Row(QWidget):
         self.check.setOffText("")
         self.check.label.hide()
         self.check.setToolTip(t("switch.enable_disable", name=panel.title))
+        # the switch shows no text of its own: say what it turns on
+        self.check.setAccessibleName(panel.title)
         self.check.checkedChanged.connect(panel.set_enabled)
         icon = IconWidget(fluent.icon(panel.icon))
         icon.setFixedSize(20, 20)

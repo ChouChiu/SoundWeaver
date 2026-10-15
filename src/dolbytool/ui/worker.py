@@ -16,6 +16,7 @@ from itertools import groupby
 from PySide6.QtCore import QThread, Signal
 
 from dolbytool.core.cancel import CancellationToken, ProcessingCancelled
+from dolbytool.core.i18n import t
 from dolbytool.core.task import Step
 
 logger = logging.getLogger(__name__)
@@ -72,25 +73,26 @@ class Worker(QThread):
             self.step_finished.emit(index, Outcome.SKIPPED, "", 0.0)
             return
         self.step_started.emit(index)
-        logger.info("开始 %s", step.title)
+        logger.info(t("log.step_started", title=step.title))
         started = time.monotonic()
 
         def report(value: int, message: str) -> None:
             self.step_progress.emit(index, max(0, min(100, int(value))), message)
 
-        report(0, "准备中")
+        report(0, t("status.preparing"))
         try:
             note = step.run(self.token, report) or ""
         except ProcessingCancelled:
-            logger.info("已取消 %s", step.title)
+            logger.info(t("log.step_cancelled", title=step.title))
             self.step_finished.emit(index, Outcome.CANCELLED, "", time.monotonic() - started)
             return
         except Exception as error:  # surface every failure in the log, keep the app alive
             self._failed = True
             message = str(error) or type(error).__name__
-            logger.exception("失败 %s：%s", step.title, message)
+            logger.exception(t("log.step_failed", title=step.title, message=message))
             self.step_finished.emit(index, Outcome.FAILED, message, time.monotonic() - started)
             return
         seconds = time.monotonic() - started
-        logger.info("完成 %s（%.1f 秒）%s", step.title, seconds, f"：{note}" if note else "")
+        done = t("log.step_done", title=step.title, seconds=seconds)
+        logger.info(t("common.labeled", label=done, text=note) if note else done)
         self.step_finished.emit(index, Outcome.DONE, note, seconds)

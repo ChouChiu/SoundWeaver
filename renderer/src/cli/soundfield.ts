@@ -120,7 +120,7 @@ start(async (run) => {
 		},
 	};
 
-	status("启动浏览器");
+	status({ key: "launch_browser" });
 	const first = await Stage.open(run, settings);
 	const seconds = opts.duration ?? Math.max(0.1, (await first.endTime()) / 1000 - opts.start);
 	const startFrame = Math.round(opts.start * opts.fps);

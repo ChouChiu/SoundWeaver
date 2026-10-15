@@ -45,7 +45,7 @@ export async function headlessShell(): Promise<string> {
 		return latest.executablePath;
 	}
 	const buildId = await resolveBuildId(browser, platform, "stable");
-	status(`下载 chrome-headless-shell ${buildId}`);
+	status({ key: "download_chrome", build: buildId });
 	let last = -1;
 	await install({
 		browser,
@@ -56,7 +56,7 @@ export async function headlessShell(): Promise<string> {
 			const percent = total ? Math.floor((done / total) * 100) : 0;
 			if (percent !== last) {
 				last = percent;
-				status(`下载 chrome-headless-shell ${percent}%`);
+				status({ key: "download_chrome_progress", percent });
 			}
 		},
 	});

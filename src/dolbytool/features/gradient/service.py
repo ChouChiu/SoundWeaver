@@ -8,6 +8,7 @@ from pathlib import Path
 from dolbytool.core import motion
 from dolbytool.core.cancel import CancellationToken
 from dolbytool.core.ffmpeg import run_ffmpeg
+from dolbytool.core.i18n import t
 from dolbytool.core.paths import atomic_output
 from dolbytool.core.task import Report, Step
 from dolbytool.features.gradient import palette
@@ -29,8 +30,8 @@ class GradientSpec:
 
     def weight(self, y: float) -> float:
         """Share of the bottom colour at relative height `y` (0 top, 1 bottom), smoothstepped."""
-        t = min(1.0, max(0.0, (y - self.start) / self.span))
-        return t * t * (3 - 2 * t)
+        x = min(1.0, max(0.0, (y - self.start) / self.span))
+        return x * x * (3 - 2 * x)
 
 
 def gradient_target(output_dir: Path, audio: Path) -> Path:
@@ -42,9 +43,9 @@ def render_gradient(spec: GradientSpec, output: Path, token: CancellationToken) 
     w, h = spec.width, spec.height
     y0 = round(spec.start * h)
     span = max(1, round(spec.span * h))
-    t = f"clip((Y-{y0})/{span},0,1)"
+    x = f"clip((Y-{y0})/{span},0,1)"
     # one column of the mask, widened: the blend only changes from row to row
-    mask = f"nullsrc=s=1x{h},geq=lum='{t}*{t}*(3-2*{t})*255',scale={w}:{h}:flags=neighbor"
+    mask = f"nullsrc=s=1x{h},geq=lum='{x}*{x}*(3-2*{x})*255',scale={w}:{h}:flags=neighbor"
     with atomic_output(output) as partial:
         run_ffmpeg(
             [
@@ -65,9 +66,6 @@ def cover_spec(spec: GradientSpec, cover: Path) -> GradientSpec:
     return replace(spec, top=top, bottom=bottom)
 
 
-from dolbytool.core.i18n import t
-
-
 def gradient_step(spec: GradientSpec, target: Path, cover: Path | None = None) -> Step:
     """With `cover`, the colours are picked from it when the step runs."""
 
@@ -81,4 +79,3 @@ def gradient_step(spec: GradientSpec, target: Path, cover: Path | None = None) -
         return target.name
 
     return Step(t("step.gradient"), run, (target,))
-

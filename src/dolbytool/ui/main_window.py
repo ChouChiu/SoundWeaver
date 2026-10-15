@@ -37,7 +37,6 @@ from PySide6.QtWidgets import (
 from qfluentwidgets import (
     Action,
     BodyLabel,
-    CaptionLabel,
     IconWidget,
     InfoBar,
     InfoBarPosition,
@@ -54,13 +53,7 @@ from qfluentwidgets import (
 )
 
 from dolbytool.core import ffmpeg
-from dolbytool.core.i18n import (
-    LANGUAGE_NAMES,
-    SUPPORTED_LANGUAGES,
-    get_language,
-    set_language,
-    t,
-)
+from dolbytool.core.i18n import get_language, set_language, t
 from dolbytool.core.project import PlanContext, Project
 from dolbytool.core.task import Step
 from dolbytool.features.batch.panel import BatchPanel
@@ -102,7 +95,7 @@ class _PageHeader(QWidget):
         self.status = widgets.hint_label()
         self.status.hide()
         title = QHBoxLayout()
-        title.setSpacing(12)
+        title.setSpacing(widgets.FIELD_SPACING)
         title.addWidget(icon)
         title.addWidget(TitleLabel(panel.title))
         title.addStretch(1)
@@ -128,8 +121,8 @@ def _scroll_page(*items: QWidget) -> ScrollArea:
     content.setObjectName("page")
     content.setStyleSheet("QWidget#page { background: transparent; }")
     layout = QVBoxLayout(content)
-    layout.setContentsMargins(0, 0, 12, 6)
-    layout.setSpacing(10)
+    layout.setContentsMargins(*widgets.PAGE_MARGINS)
+    layout.setSpacing(widgets.SECTION_SPACING)
     for item in items:
         layout.addWidget(item)
     layout.addStretch(1)
@@ -188,21 +181,22 @@ class MainWindow(QMainWindow):
             act = Action(fluent.icon(icon), text, self)
             if shortcut is not None:
                 act.setShortcut(shortcut)
-                act.setToolTip(f"{text}（{QKeySequence(shortcut).toString()}）")
+                keys = act.shortcut().toString(QKeySequence.SequenceFormat.NativeText)
+                act.setToolTip(t("common.with_note", text=text, note=keys))
             act.triggered.connect(slot)
             # shortcuts fire from anywhere in the window, not only from the bar's buttons
             self.addAction(act)
             return act
 
-        self.act_audio = action(t("action.open_audio"), "document-open", self.source.pick_audio,
+        self.act_audio = action(t("action.open_audio"), "document-open", self._single(self.source.pick_audio),
                                 QKeySequence.StandardKey.Open)  # fmt: skip
         self.act_batch_files = action(t("action.batch_add"), "list-add", self._batch_files,
                                       QKeySequence("Ctrl+Shift+B"))  # fmt: skip
         self.act_batch_folder = action(t("action.add_album_folder"), "folder-add", self._batch_folder,
                                        QKeySequence("Ctrl+Shift+M"))  # fmt: skip
-        self.act_cover = action(t("action.select_cover"), "insert-image", self.source.pick_cover,
+        self.act_cover = action(t("action.select_cover"), "insert-image", self._single(self.source.pick_cover),
                                 QKeySequence("Ctrl+Shift+O"))  # fmt: skip
-        self.act_ttml = action(t("action.select_lyrics"), "text-xml", self.source.pick_ttml,
+        self.act_ttml = action(t("action.select_lyrics"), "text-xml", self._single(self.source.pick_ttml),
                                 QKeySequence("Ctrl+L"))  # fmt: skip
         self.act_open_dir = action(t("action.open_output_dir"), "folder-open", self._open_output_dir,
                                    QKeySequence("Ctrl+E"))  # fmt: skip
@@ -212,12 +206,24 @@ class MainWindow(QMainWindow):
         self.act_start = action(
             t("action.start"), "media-playback-start", self._start, QKeySequence("Ctrl+Return")
         )
-        self.act_cancel = action(t("action.cancel"), "process-stop", self._cancel, QKeySequence("Escape"))
+        # a stray Escape (closing a popup) must not throw a long run away unasked
+        self.act_cancel = action(
+            t("action.cancel"), "process-stop", self._ask_cancel, QKeySequence("Escape")
+        )
         self.act_cancel.setEnabled(False)
         self.input_actions = (
             self.act_audio, self.act_cover, self.act_ttml,
             self.act_batch_files, self.act_batch_folder,
         )  # fmt: skip
+
+    def _single(self, pick):
+        """`pick` on the single-source page, switched to first: a shortcut works from batch mode too."""
+
+        def run() -> None:
+            self.mode.setCurrentIndex(SINGLE)
+            pick()
+
+        return run
 
     def _build_body(self) -> QWidget:
         """Navigation on the left; on the right the page it shows above the action bar."""
@@ -240,7 +246,16 @@ class MainWindow(QMainWindow):
             ROUTE_TASKS, "view-list-details", t("nav.tasks_logs"), self._build_tasks_page(),
             NavigationItemPosition.BOTTOM,
         )  # fmt: skip
-        self.settings_page = SettingsPage(self)
+        self.settings_page = SettingsPage(
+            (
+                self.act_audio, self.act_cover, self.act_ttml, self.act_batch_files,
+                self.act_batch_folder, self.act_open_dir, self.act_start, self.act_cancel,
+                self.act_quit,
+            ),
+            self,
+        )  # fmt: skip
+        self.settings_page.language_picked.connect(self._set_language)
+        self.settings_page.about_requested.connect(self._about)
         self._add_route(
             ROUTE_SETTINGS, "preferences-system", t("nav.settings"), self.settings_page,
             NavigationItemPosition.BOTTOM,
@@ -248,13 +263,16 @@ class MainWindow(QMainWindow):
 
         right = QWidget()
         right_layout = QVBoxLayout(right)
-        right_layout.setContentsMargins(4, 10, 14, 12)
-        right_layout.setSpacing(10)
+        right_layout.setContentsMargins(4, 12, 14, 12)
+        right_layout.setSpacing(widgets.SECTION_SPACING)
         if self._missing_tools:
             right_layout.addWidget(
                 InfoBar.error(
                     t("status.missing_dependencies_title"),
-                    t("status.missing_dependencies_banner", tools="、".join(self._missing_tools)),
+                    t(
+                        "status.missing_dependencies_banner",
+                        tools=t("common.list_sep").join(self._missing_tools),
+                    ),
                     isClosable=False,
                     duration=-1,
                     position=InfoBarPosition.NONE,
@@ -306,17 +324,17 @@ class MainWindow(QMainWindow):
 
         # the inputs on the left, the outputs beside them at their full height
         left = self._inputs_layout = QVBoxLayout()
-        left.setSpacing(10)
+        left.setSpacing(widgets.SECTION_SPACING)
         left.addWidget(self.mode_bar)
         left.addWidget(self.mode)
         left.addStretch(1)
         body = QHBoxLayout()
-        body.setSpacing(12)
+        body.setSpacing(widgets.SECTION_SPACING)
         body.addLayout(left, 3)
         body.addWidget(outputs, 1)
         title = QHBoxLayout()
         title.addWidget(TitleLabel(t("inputs.title")))
-        title.addSpacing(12)
+        title.addSpacing(widgets.FIELD_SPACING)
         title.addWidget(
             widgets.hint_label(t("inputs.hint"), wrap=False),
             0,
@@ -324,8 +342,8 @@ class MainWindow(QMainWindow):
         )
         title.addStretch(1)
         layout = QVBoxLayout()
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(10)
+        layout.setContentsMargins(*widgets.PAGE_MARGINS)
+        layout.setSpacing(widgets.SECTION_SPACING)
         layout.addLayout(title)
         layout.addLayout(body, 1)
         self._fit_mode()
@@ -349,8 +367,8 @@ class MainWindow(QMainWindow):
         self.splitter.setChildrenCollapsible(False)
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(10)
+        layout.setContentsMargins(*widgets.PAGE_MARGINS)
+        layout.setSpacing(widgets.SECTION_SPACING)
         layout.addWidget(TitleLabel(t("tasks.title")))
         layout.addWidget(self.splitter, 1)
         return page
@@ -366,14 +384,12 @@ class MainWindow(QMainWindow):
     def _build_action_bar(self) -> QWidget:
         bar = widgets.Card()
         row = QHBoxLayout()
-        row.setSpacing(10)
+        row.setSpacing(widgets.FIELD_SPACING)
         text = QVBoxLayout()
         text.setSpacing(0)
         self.summary = BodyLabel()
         self.summary.setWordWrap(True)
-        self.status = CaptionLabel()
-        self.status.setTextColor(fluent.dim(), fluent.dim())
-        self.status.setWordWrap(True)
+        self.status = widgets.hint_label()
         self.status.hide()
         text.addWidget(self.summary)
         text.addWidget(self.status)
@@ -388,13 +404,12 @@ class MainWindow(QMainWindow):
         self.cancel_btn.clicked.connect(self._cancel)
         self.cancel_btn.hide()
         self.start_btn = PrimaryPushButton(fluent.icon("media-playback-start"), t("action.start"))
-        self.start_btn.setToolTip("Ctrl+Enter")
+        self.start_btn.setToolTip(self.act_start.toolTip())
         self.start_btn.setMinimumWidth(110)
         self.start_btn.clicked.connect(self._start)
         for button in (self.open_dir_btn, self.cancel_btn, self.start_btn):
             row.addWidget(button)
         bar.set_body(row)
-        bar.layout().setContentsMargins(16, 10, 12, 10)
         return bar
 
     def _mode_changed(self, index: int) -> None:
@@ -485,7 +500,9 @@ class MainWindow(QMainWindow):
             if project.probing:
                 return t("status.parsing_audio")
             if project.info is None:
-                return t("error.audio_parse_failed", error=project.audio_error or t("error.unknown"))
+                return t(
+                    "error.audio_parse_failed", error=project.audio_error or t("error.unknown")
+                )
         return panel.problem(ctx)
 
     def _problems(self, ctx: PlanContext) -> dict[int, str]:
@@ -510,14 +527,17 @@ class MainWindow(QMainWindow):
     def _blocker(self, ctx: PlanContext, problems: dict[int, str]) -> str | None:
         """Why Start cannot run right now, or None when it can."""
         if self._missing_tools:
-            return t("status.missing_dependencies_blocker", tools="、".join(self._missing_tools))
+            return t(
+                "status.missing_dependencies_blocker",
+                tools=t("common.list_sep").join(self._missing_tools),
+            )
         if not any(panel.enabled for panel in self.panels):
             return t("status.no_output_selected")
         if self._is_batch:
             return self._batch_blocker()
         if problems:
             index, text = next(iter(problems.items()))
-            return f"{self.panels[index].title}：{text}"
+            return t("common.labeled", label=self.panels[index].title, text=text)
         return self._dir_problem(ctx.project.output_dir)
 
     def _batch_blocker(self) -> str | None:
@@ -540,7 +560,7 @@ class MainWindow(QMainWindow):
             if album and panel.per_album:
                 continue
             if panel.enabled and (p := self._why_not(ctx, panel)):
-                left_out.append(f"{panel.title}（{p}）")
+                left_out.append(t("common.with_note", text=panel.title, note=p))
                 continue
             steps[panel] = panel.plan(ctx)
         return steps, left_out
@@ -559,7 +579,9 @@ class MainWindow(QMainWindow):
                 if not (panel.enabled and panel.per_album):
                     continue
                 if p := panel.problem(ctx):
-                    plan.skipped.append(f"{album_prefix} · {panel.title}：{p}")
+                    plan.skipped.append(
+                        t("common.labeled", label=f"{album_prefix} · {panel.title}", text=p)
+                    )
                     continue
                 steps = panel.plan(ctx)
                 plan.steps += [replace(s, title=f"{album_prefix} · {s.title}") for s in steps]
@@ -575,7 +597,13 @@ class MainWindow(QMainWindow):
                 continue
             if project.info is None:
                 plan.status.append(
-                    (t("batch.skipped_prefix", reason=project.audio_error or t("error.cannot_read_short")), True)
+                    (
+                        t(
+                            "batch.skipped_prefix",
+                            reason=project.audio_error or t("error.cannot_read_short"),
+                        ),
+                        True,
+                    )
                 )
                 continue
             if dir_problem := self._dir_problem(project.output_dir):
@@ -593,7 +621,7 @@ class MainWindow(QMainWindow):
                 plan.status.append((t("batch.merged_into_album"), False))
                 continue
             if not steps:
-                reason = "；".join(left_out) or t("batch.no_outputs_to_generate")
+                reason = t("common.clause_sep").join(left_out) or t("batch.no_outputs_to_generate")
                 plan.status.append((t("batch.skipped_prefix", reason=reason), True))
                 continue
             plan.steps += [replace(s, title=f"{name} · {s.title}") for s in steps]
@@ -602,13 +630,13 @@ class MainWindow(QMainWindow):
             plan.output_dirs.append(project.output_dir)
             text = t("batch.tasks_count", count=len(steps))
             if left_out:
-                text += t("batch.not_generating_suffix", notes="、".join(left_out))
+                text += t("batch.not_generating_suffix", notes=t("common.list_sep").join(left_out))
             plan.status.append((text, bool(left_out)))
         if album_project:
             ctx = self._context(album_project, batch=True)
             for panel, tracks in made.items():
                 closing = panel.album_plan(ctx, tracks)
-                plan.steps += [replace(s, title=f"专辑 · {s.title}") for s in closing]
+                plan.steps += [replace(s, title=f"{album_prefix} · {s.title}") for s in closing]
                 if closing and album_project.output_dir not in plan.output_dirs:
                     assert album_project.output_dir is not None
                     plan.output_dirs.append(album_project.output_dir)
@@ -636,7 +664,9 @@ class MainWindow(QMainWindow):
             if not missing:
                 continue
             ok = len(projects) - sum(missing.values())
-            why = "；".join(t("batch.shares_track_reason", count=n, reason=p) for p, n in missing.items())
+            why = t("common.clause_sep").join(
+                t("batch.shares_track_reason", count=n, reason=p) for p, n in missing.items()
+            )
             shares[index] = (t("batch.shares_status", ok=ok, total=len(projects), why=why), ok == 0)
         return shares
 
@@ -700,7 +730,7 @@ class MainWindow(QMainWindow):
             )
             return
         parts = [s for panel in self._active(ctx) if (s := panel.summary(ctx))]
-        self.summary.setText(t("inputs.to_generate", items="、".join(parts)))
+        self.summary.setText(t("inputs.to_generate", items=t("common.list_sep").join(parts)))
 
     def _show_page(self, index: int) -> None:
         if index >= 0:
@@ -742,7 +772,7 @@ class MainWindow(QMainWindow):
         if clash := self._clash(inputs, steps):
             fluent.tell(self, t("status.cannot_start"), clash)
             return
-        if not self._confirm_overwrite([t for step in steps for t in step.targets]):
+        if not self._confirm_overwrite([target for step in steps for target in step.targets]):
             return
         try:
             for out in dirs:
@@ -751,7 +781,9 @@ class MainWindow(QMainWindow):
             fluent.tell(self, t("status.cannot_start"), t("error.cannot_create_dir", error=error))
             return
         self._save_settings()
-        logger.info("—— 开始执行 %d 项任务，输出目录：%s", len(steps), self._output_label(dirs))
+        logger.info(
+            "—— %s", t("status.run_started", count=len(steps), path=self._output_label(dirs))
+        )
         for note in notes:
             logger.info(note)
         self.tasks.set_steps(steps)
@@ -775,7 +807,7 @@ class MainWindow(QMainWindow):
         if plan.skipped:
             lines.append(t("batch.confirm_skipped_outputs", count=len(plan.skipped)))
         details = [
-            f"{index:02d} {track.audio.name}：{text}"
+            t("common.labeled", label=f"{index:02d} {track.audio.name}", text=text)
             for index, (track, (text, problem)) in enumerate(
                 zip(self.batch.tracks, plan.status, strict=False), 1
             )
@@ -792,16 +824,16 @@ class MainWindow(QMainWindow):
     @staticmethod
     def _clash(inputs: set[Path], steps: list[Step]) -> str | None:
         """Outputs that would overwrite an input, or that two steps would both write."""
-        targets = [t.resolve() for step in steps for t in step.targets]
+        targets = [target.resolve() for step in steps for target in step.targets]
         resolved = {p.resolve() for p in inputs}
-        if hit := next((t for t in targets if t in resolved), None):
+        if hit := next((target for target in targets if target in resolved), None):
             return t("error.clash_input", name=hit.name)
-        if twice := [t for t, n in Counter(targets).items() if n > 1]:
+        if twice := [target for target, n in Counter(targets).items() if n > 1]:
             return t("error.clash_steps", name=twice[0].name)
         return None
 
     def _confirm_overwrite(self, targets: list[Path]) -> bool:
-        existing = [t for t in targets if t.exists()]
+        existing = [target for target in targets if target.exists()]
         if not existing:
             return True
         return fluent.ask(
@@ -811,6 +843,15 @@ class MainWindow(QMainWindow):
             "\n".join(p.name for p in existing),
             t("action.overwrite"),
         )
+
+    def _ask_cancel(self) -> None:
+        if self.worker and fluent.ask(
+            self,
+            t("action.cancel_confirm_title"),
+            t("action.cancel_confirm_body"),
+            accept=t("action.cancel"),
+        ):
+            self._cancel()
 
     def _cancel(self) -> None:
         if self.worker:
@@ -824,7 +865,9 @@ class MainWindow(QMainWindow):
         overall = self.tasks.overall()
         self.progress.setValue(overall)
         self.setWindowTitle(f"{overall}% · {app_title()}")
-        self._show_status(f"{self.tasks.topLevelItem(index).text(0)}：{message}")
+        self._show_status(
+            t("common.labeled", label=self.tasks.topLevelItem(index).text(0), text=message)
+        )
 
     def _on_step_finished(self, index: int, outcome: str, note: str, seconds: float) -> None:
         self.tasks.finished(index, outcome, note, seconds)
@@ -876,7 +919,10 @@ class MainWindow(QMainWindow):
         self.batch.set_running(running)
         self.mode_bar.setEnabled(not running)
         self.outputs.set_locked(running)
+        self.settings_page.set_running(running)
         for panel, header in zip(self.panels, self.headers, strict=True):
+            if running:
+                panel.cancel_background()
             panel.setEnabled(not running)
             header.check.setEnabled(not running)
         for action in self.input_actions:
@@ -902,18 +948,6 @@ class MainWindow(QMainWindow):
         out = self._output_dir()
         if out and out.is_dir():
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(out)))
-
-    def _choose_language(self) -> None:
-        from qfluentwidgets import RoundMenu
-        menu = RoundMenu(parent=self)
-        for code, name in LANGUAGE_NAMES.items():
-            act = Action(name, self)
-            if code == get_language():
-                act.setCheckable(True)
-                act.setChecked(True)
-            act.triggered.connect(lambda _=False, c=code: self._set_language(c))
-            menu.addAction(act)
-        menu.exec(self.nav.mapToGlobal(self.nav.rect().bottomLeft()))
 
     def _set_language(self, code: str) -> None:
         if code == get_language():
@@ -987,7 +1021,10 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent) -> None:
         if self.worker:
             if self._ask_on_close and not fluent.ask(
-                self, t("status.task_running_title"), t("status.task_running_prompt"), accept=t("action.quit")
+                self,
+                t("status.task_running_title"),
+                t("status.task_running_prompt"),
+                accept=t("action.quit"),
             ):
                 event.ignore()
                 return

@@ -6,9 +6,10 @@ from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QVBoxLayout
 
 from dolbytool.core.ffmpeg import MAX_FRAME_SIDE, frame_problem
+from dolbytool.core.i18n import t
 from dolbytool.core.project import PlanContext, Project, Track
 from dolbytool.core.task import Step
-from dolbytool.features.waveform.encoders import DEFAULT_ENCODER, ENCODER_LABELS
+from dolbytool.features.waveform.encoders import DEFAULT_ENCODER
 from dolbytool.features.waveform.service import WaveformSpec, waveform_step, waveform_target
 from dolbytool.ui import widgets
 from dolbytool.ui.feature import FeaturePanel
@@ -19,15 +20,11 @@ DEFAULT_TRACKS = ("surround",)
 class WaveformPanel(FeaturePanel):
     title_key = "waveform.title"
     description_key = "waveform.description"
-    _title = "波形视频"
     icon = "view-media-visualization"
-    _description = "为所选音轨生成水平滚动波形视频 (MP4)，若所选分轨未生成将自动追加前置分轨任务"
     enabled_key = "do_waveform"
 
     def __init__(self, settings: QSettings, parent=None) -> None:
         super().__init__(settings, parent)
-        from dolbytool.core.i18n import t
-
         self.tracks = widgets.TrackList()
         self.tracks.changed.connect(self.changed)
 
@@ -37,7 +34,9 @@ class WaveformPanel(FeaturePanel):
         self.screen_w = self.spin("screen_w", 64, MAX_FRAME_SIDE, d.screen_width, " px", step=2)
         self.screen_h = self.spin("screen_h", 32, MAX_FRAME_SIDE, d.height, " px", step=2)
         # "wave2/" keys: the dark look replaced the old white-background defaults
-        self.wave_color = self.color("wave2/wave_color", d.wave_color, t("waveform.pick_wave_color"))
+        self.wave_color = self.color(
+            "wave2/wave_color", d.wave_color, t("waveform.pick_wave_color")
+        )
         self.background = self.color("wave2/background", d.background, t("waveform.pick_bg_color"))
         self.playhead = self.color("wave2/playhead", d.playhead, t("waveform.pick_playhead_color"))
         self.unplayed = self.spin(
@@ -94,7 +93,7 @@ class WaveformPanel(FeaturePanel):
 
     def _selected(self, project: Project, batch: bool = False) -> list[Track]:
         keys = self.tracks.keys()
-        picked = [t for t in project.tracks if t.key in keys]
+        picked = [track for track in project.tracks if track.key in keys]
         # a batch track whose layout shares no ticked key gets its source, as refresh() would
         if batch and not picked and project.tracks:
             return [project.tracks[0]]
@@ -103,8 +102,6 @@ class WaveformPanel(FeaturePanel):
     # ---- hooks -----------------------------------------------------------------------
 
     def refresh(self, project: Project) -> None:
-        from dolbytool.core.i18n import t
-
         checked = self.tracks.keys()
         items = []
         for track in project.tracks:
@@ -126,11 +123,13 @@ class WaveformPanel(FeaturePanel):
         self.tracks.set_tracks(items, checked)
 
     def required_stems(self, project: Project) -> set[str]:
-        return {t.key for t in self._selected(project) if not t.is_original and not t.exists}
+        return {
+            track.key
+            for track in self._selected(project)
+            if not track.is_original and not track.exists
+        }
 
     def problem(self, ctx: PlanContext) -> str | None:
-        from dolbytool.core.i18n import t
-
         too_big = frame_problem(self.screen_w.value(), self.screen_h.value())
         if too_big:
             return too_big
@@ -139,8 +138,6 @@ class WaveformPanel(FeaturePanel):
         return None
 
     def summary(self, ctx: PlanContext) -> str | None:
-        from dolbytool.core.i18n import t
-
         count = len(self._selected(ctx.project, ctx.batch))
         return t("waveform.summary", count=count) if count else None
 

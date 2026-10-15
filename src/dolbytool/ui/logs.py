@@ -11,6 +11,7 @@ from PySide6.QtCore import QMessageLogContext, QObject, QSocketNotifier, QtMsgTy
 from PySide6.QtCore import qInstallMessageHandler as _install
 from PySide6.QtWidgets import QApplication
 
+from dolbytool.core.i18n import t
 from dolbytool.core.logs import LogFormatter
 
 _qt = logging.getLogger("qt")
@@ -80,7 +81,7 @@ class InterruptHandler:
     def _interrupt(self, _signum: int, _frame: object) -> None:
         self.pressed += 1
         if self.pressed == 1:
-            logging.getLogger(__name__).info("收到 Ctrl+C，正在退出，再按一次强制退出")
+            logging.getLogger(__name__).info(t("status.sigint_exit"))
             self.close()
         else:
             self.app.exit(130)

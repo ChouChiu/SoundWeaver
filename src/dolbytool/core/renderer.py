@@ -15,6 +15,7 @@ from functools import cache
 from pathlib import Path
 
 from dolbytool.core.cancel import CancellationToken
+from dolbytool.core.i18n import t
 from dolbytool.core.process import run_streaming
 
 # A PyInstaller bundle carries renderer/dist under its data root (sys._MEIPASS).
@@ -32,9 +33,7 @@ def renderer_script(name: str) -> Path:
     """A built script in renderer/dist, or RendererError telling how to build it."""
     script = RENDERER_DIR / "dist" / name
     if not script.is_file():
-        raise RendererError(
-            f"渲染器组件尚未构建，请先在 {RENDERER_DIR} 目录执行 bun install 与 bun run build"
-        )
+        raise RendererError(t("error.renderer_not_built", dir=RENDERER_DIR))
     return script
 
 
@@ -63,7 +62,7 @@ def find_runtime() -> str:
     for bun in (shutil.which("bun"), Path.home() / ".bun" / "bin" / "bun"):
         if bun and Path(bun).is_file():
             return str(bun)
-    raise RendererError("未检测到 Node.js 或 Bun，视频渲染需要 JavaScript 运行时环境")
+    raise RendererError(t("error.no_js_runtime"))
 
 
 def run_renderer(
@@ -72,7 +71,7 @@ def run_renderer(
     token: CancellationToken | None,
     on_fraction: Callable[[float], None],
     on_status: Callable[[str], None],
-    exit_message: str = "渲染器退出码 {code}",
+    exit_message: str | None = None,
 ) -> None:
     """Run `script` to completion; raises RendererError with its stderr on failure."""
 
@@ -87,10 +86,11 @@ def run_renderer(
         if event.get("type") == "progress" and event.get("total"):
             on_fraction(min(1.0, event["frame"] / event["total"]))
         elif event.get("type") == "status":
-            on_status(str(event.get("message", "")))
+            values = {k: v for k, v in event.items() if k not in ("type", "key")}
+            on_status(t(f"renderer.{event.get('key')}", **values))
 
     # SIGTERM lets the renderer close its browsers and remove its segment files
     run_streaming(
         [find_runtime(), str(script), *args], on_line, token,
-        error=RendererError, exit_message=exit_message, grace=10,
+        error=RendererError, exit_message=exit_message or t("error.renderer_exit"), grace=10,
     )  # fmt: skip

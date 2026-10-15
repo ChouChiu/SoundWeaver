@@ -10,41 +10,26 @@ import json
 import tempfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
+from functools import cache
 from pathlib import Path
 
 from dolbytool.core import ffmpeg, motion
 from dolbytool.core.cancel import CancellationToken
+from dolbytool.core.i18n import t
 from dolbytool.core.paths import atomic_output, work_root
 from dolbytool.core.renderer import renderer_script, run_renderer
 from dolbytool.core.task import Progress, Report, Step
 from dolbytool.features.lyrics.service import css_font_list
-from dolbytool.features.waveform.encoders import encoder_for
+from dolbytool.features.waveform.encoders import encoder_available, encoder_for
 
-BACKGROUNDS = {
-    "mesh": "流体渐变 (Mesh Gradient)",
-    "isolation": "隔离色块 (Isolation)",
-    "solid": "纯色",
-    "none": "透明 (仅 VP9)",
-}
-CODECS = {
-    "libx264": "H.264 (软件编码)",
-    "h264_nvenc": "H.264 (NVIDIA 硬件编码)",
-    "hevc_nvenc": "HEVC (NVIDIA 硬件编码)",
-    "vp9": "VP9 + Alpha (透明 WebM)",
-}
 # a sensible quality per encoder: CRF for the software ones, CQ for NVENC
 DEFAULT_QUALITY = {"libx264": 18, "h264_nvenc": 19, "hevc_nvenc": 21, "vp9": 30}
-LYRIC_SIZES = {
-    "tiny": "极小",
-    "extra-small": "很小",
-    "small": "小",
-    "medium": "中（默认）",
-    "large": "大",
-    "extra-large": "很大",
-    "huge": "巨大",
-}
-CONTROLS = {"controls": "播放按钮", "fft": "音频频谱", "none": "不显示"}
-AUDIO_MODES = {"encode": "转码 (AAC / Opus)", "copy": "复制原音轨", "none": "不混入"}
+
+
+@cache
+def default_codec() -> str:
+    """H.264 on the GPU where this machine can encode it, else in software; probes once."""
+    return "h264_nvenc" if encoder_available("h264_nvenc") else "libx264"
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,7 +172,7 @@ def render_player_video(
             args += ["--song-length", f"{duration:.3f}"]
     on_fraction(0.0)
     if cover and motion.is_motion(cover):
-        on_status("提取动态封面帧")
+        on_status(t("step.extract_motion_frame"))
         frames = motion.frames(cover, motion.side_for(spec.width, spec.height), token)
         args += ["--cover", str(motion.still(cover)), "--cover-frames", str(frames)]
     elif cover:
@@ -199,7 +184,7 @@ def render_player_video(
     with atomic_output(output) as partial:
         run_renderer(
             script, [*args, "--out", str(partial)], token, on_fraction, on_status,
-            "播放器渲染器退出码 {code}",
+            t("error.player_renderer_exit"),
         )  # fmt: skip
     on_fraction(1.0)
 
@@ -212,14 +197,15 @@ PREVIEW_FPS = 30
 def preview_spec(spec: PlayerSpec) -> PlayerSpec:
     """`spec` at half size, laid out the same: the page scale halves with the frame."""
     vp9 = spec.background == "none"
+    codec = "vp9" if vp9 else (spec.codec if spec.codec.endswith("_nvenc") else "libx264")
     return replace(
         spec,
         width=max(64, round(spec.width * PREVIEW_SCALE)),
         height=max(64, round(spec.height * PREVIEW_SCALE)),
         ui_scale=round(spec.ui_scale * PREVIEW_SCALE),
         fps=min(spec.fps, PREVIEW_FPS),
-        codec="vp9" if vp9 else "libx264",
-        quality=33 if vp9 else 23,
+        codec=codec,
+        quality=33 if vp9 else (spec.quality if spec.codec.endswith("_nvenc") else 23),
         audio_mode="encode" if spec.audio_mode != "none" else "none",
     )
 
@@ -228,7 +214,7 @@ def player_target(output_dir: Path, name_source: Path, spec: PlayerSpec) -> Path
     return output_dir / f"{name_source.stem}_player{spec.suffix}"
 
 
-def _available(spec: PlayerSpec, report: Report) -> PlayerSpec:
+def available(spec: PlayerSpec, report: Report) -> PlayerSpec:
     """`spec` with libx264 in place of an NVENC encoder this machine lacks."""
     if spec.codec.endswith("_nvenc"):
         codec, note = encoder_for(spec.codec, spec.width, spec.height)
@@ -236,9 +222,6 @@ def _available(spec: PlayerSpec, report: Report) -> PlayerSpec:
             report(0, note)
             return replace(spec, codec=codec, quality=DEFAULT_QUALITY[codec])
     return spec
-
-
-from dolbytool.core.i18n import t
 
 
 def player_step(
@@ -252,7 +235,7 @@ def player_step(
     """`duration` is the song's, so the progress bar and the video run its whole length."""
 
     def run(token: CancellationToken, report: Report) -> str:
-        use = _available(spec, report)
+        use = available(spec, report)
         progress = Progress(report, t("step.frame_render_encode"))
         render_player_video(
             ttml, cover, audio, target, use, duration, token, progress.fraction, progress.status
@@ -300,9 +283,9 @@ def render_queue(
     with tempfile.TemporaryDirectory(dir=work_root()) as scratch:
         playlist = Path(scratch) / "playlist.json"
         entries = [
-            {"ttml": str(t.ttml) if t.ttml else None, "title": t.title,
-             "artists": list(t.artists), "album": t.album, "duration": length}
-            for t, length in zip(tracks, lengths, strict=True)
+            {"ttml": str(track.ttml) if track.ttml else None, "title": track.title,
+             "artists": list(track.artists), "album": track.album, "duration": length}
+            for track, length in zip(tracks, lengths, strict=True)
         ]  # fmt: skip
         playlist.write_text(json.dumps(entries, ensure_ascii=False), encoding="utf-8")
         audio = None
@@ -310,7 +293,9 @@ def render_queue(
             on_status(t("step.concat_album_audio"))
             listing = Path(scratch) / "audio.txt"
             listing.write_text(
-                "".join("file '{}'\n".format(str(t.audio).replace("'", "'\\''")) for t in tracks),
+                "".join(
+                    "file '{}'\n".format(str(track.audio).replace("'", "'\\''")) for track in tracks
+                ),
                 encoding="utf-8",
             )
             audio = Path(scratch) / "queue.mka"
@@ -329,10 +314,9 @@ def queue_step(
     tracks: Sequence[QueueTrack], cover: Path | None, target: Path, spec: PlayerSpec
 ) -> Step:
     def run(token: CancellationToken, report: Report) -> str:
-        use = _available(spec, report)
+        use = available(spec, report)
         progress = Progress(report, t("step.frame_render_encode"))
         render_queue(tracks, cover, target, use, token, progress.fraction, progress.status)
         return t("step.album_continuous_title", name=target.name, count=len(tracks))
 
     return Step(t("step.album_player_video"), run, (target,))
-

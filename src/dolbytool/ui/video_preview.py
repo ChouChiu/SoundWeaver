@@ -66,4 +66,3 @@ class VideoPreview(QDialog):
     def closeEvent(self, event) -> None:
         self.player.stop()
         super().closeEvent(event)
-

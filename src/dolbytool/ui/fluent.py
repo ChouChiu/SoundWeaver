@@ -8,6 +8,7 @@ widgets' API differs from Qt's.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from PySide6.QtCore import QPropertyAnimation, QSettings, Qt
@@ -22,12 +23,15 @@ from qfluentwidgets import (
     SubtitleLabel,
     Theme,
     isDarkTheme,
+    qconfig,
     setFontFamilies,
     setTheme,
     setThemeColor,
 )
 from qfluentwidgets import ComboBox as _ComboBox
 from qfluentwidgets.components.dialog_box.mask_dialog_base import MaskDialogBase
+
+from dolbytool.core.i18n import t
 
 # Fluent's critical colours, readable on their own theme
 _NEGATIVE_LIGHT = QColor("#c42b1c")
@@ -106,11 +110,16 @@ def dim() -> QColor:
     return QColor(255, 255, 255, 140) if isDarkTheme() else QColor(0, 0, 0, 120)
 
 
-def _system_dark(app: QGuiApplication) -> bool:
+def on_theme_change(slot: Callable[[], None]) -> None:
+    """Call `slot` after the light/dark theme flips, for colours taken from the theme once."""
+    qconfig.themeChangedFinished.connect(slot)
+
+
+def _system_dark_from(palette: QPalette, app: QGuiApplication) -> bool:
     scheme = app.styleHints().colorScheme()
     if scheme != Qt.ColorScheme.Unknown:
         return scheme == Qt.ColorScheme.Dark
-    return app.palette().color(QPalette.ColorRole.Window).lightness() < 128
+    return palette.color(QPalette.ColorRole.Window).lightness() < 128
 
 
 THEME_AUTO = "auto"
@@ -122,16 +131,45 @@ def get_theme_mode() -> str:
     return QSettings().value("theme_mode", THEME_AUTO, type=str)
 
 
+# the desktop's own palette, taken before a forced theme replaces it
+_system_palette: QPalette | None = None
+
+
+def _forced_palette(dark: bool) -> QPalette:
+    """The window colours Fluent draws its own light or dark theme on.
+
+    The Fluent widgets colour themselves, but the window behind them takes the
+    application palette: forcing dark on a light desktop would leave white text
+    on a light window.
+    """
+    palette = QPalette(_system_palette)
+    window, text = (
+        (QColor(32, 32, 32), QColor(255, 255, 255))
+        if dark
+        else (QColor(243, 243, 243), QColor(0, 0, 0))
+    )
+    for role, color in (
+        (QPalette.ColorRole.Window, window),
+        (QPalette.ColorRole.Base, window.lighter(115) if dark else QColor(255, 255, 255)),
+        (QPalette.ColorRole.WindowText, text),
+        (QPalette.ColorRole.Text, text),
+        (QPalette.ColorRole.ButtonText, text),
+    ):
+        palette.setColor(role, color)
+    return palette
+
+
 def _sync_theme(app: QApplication) -> None:
+    global _system_palette
+    if _system_palette is None:
+        _system_palette = QPalette(app.palette())
     mode = get_theme_mode()
-    if mode == THEME_LIGHT:
-        theme = Theme.LIGHT
-    elif mode == THEME_DARK:
-        theme = Theme.DARK
-    else:
-        theme = Theme.DARK if _system_dark(app) else Theme.LIGHT
-    setTheme(theme, lazy=False)
-    setThemeColor(app.palette().color(QPalette.ColorRole.Highlight), lazy=False)
+    system_dark = _system_dark_from(_system_palette, app)
+    dark = mode == THEME_DARK or (mode == THEME_AUTO and system_dark)
+    # the desktop's palette where it already matches, a stand-in where it is overridden
+    app.setPalette(_system_palette if dark == system_dark else _forced_palette(dark))
+    setTheme(Theme.DARK if dark else Theme.LIGHT, lazy=False)
+    setThemeColor(_system_palette.color(QPalette.ColorRole.Highlight), lazy=False)
 
 
 def set_theme_mode(mode: str) -> None:
@@ -146,7 +184,15 @@ def apply_theme(app: QApplication) -> None:
     """Follow the desktop's dark/light scheme, accent colour and UI font, now and on change."""
     setFontFamilies([app.font().family(), "Noto Sans CJK SC", "Microsoft YaHei UI"])
     _sync_theme(app)
-    app.styleHints().colorSchemeChanged.connect(lambda _s: _sync_theme(app))
+    app.styleHints().colorSchemeChanged.connect(lambda _s: _resync_desktop(app))
+
+
+def _resync_desktop(app: QApplication) -> None:
+    """The desktop switched schemes: take its new palette before following it."""
+    global _system_palette
+    _system_palette = None
+    app.setPalette(QPalette())
+    _sync_theme(app)
 
 
 class ComboBox(_ComboBox):
@@ -185,9 +231,6 @@ def _fade_in_unshadowed(self: MaskDialogBase, event) -> None:
 MaskDialogBase.showEvent = _fade_in_unshadowed
 
 
-from dolbytool.core.i18n import t
-
-
 class MessageDialog(MessageBoxBase):
     """A Fluent message dialog, optionally with a read-only details box below the text."""
 
@@ -221,10 +264,13 @@ class MessageDialog(MessageBoxBase):
             self.cancelButton.setText(cancel)
 
 
-def ask(parent: QWidget, title: str, text: str, details: str = "", accept: str | None = None) -> bool:
-    return bool(MessageDialog(parent, title, text, details, accept, cancel=t("action.cancel")).exec())
+def ask(
+    parent: QWidget, title: str, text: str, details: str = "", accept: str | None = None
+) -> bool:
+    return bool(
+        MessageDialog(parent, title, text, details, accept, cancel=t("action.cancel")).exec()
+    )
 
 
 def tell(parent: QWidget, title: str, text: str, details: str = "") -> None:
     MessageDialog(parent, title, text, details, t("action.confirm"), cancel=None).exec()
-

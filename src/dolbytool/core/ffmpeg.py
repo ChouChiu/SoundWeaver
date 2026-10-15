@@ -9,6 +9,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from dolbytool.core.cancel import CancellationToken
+from dolbytool.core.i18n import t
 from dolbytool.core.process import NO_WINDOW, run_streaming
 
 
@@ -25,7 +26,7 @@ _MAX_PADDED_PIXELS = (2**31 - 1) // 8
 def frame_problem(width: int, height: int) -> str | None:
     """Why FFmpeg cannot encode frames of this size, or None."""
     if (width + 128) * (height + 128) >= _MAX_PADDED_PIXELS:
-        return f"画面 {width}×{height} 像素过多，超出 FFmpeg 单帧上限（约 2.68 亿像素）"
+        return t("error.frame_too_large", width=width, height=height)
     return None
 
 
@@ -47,9 +48,9 @@ def probe(path: Path) -> dict:
             creationflags=NO_WINDOW,
         )  # fmt: skip
     except FileNotFoundError as error:
-        raise FFmpegError("找不到 ffprobe，请先安装 ffmpeg") from error
+        raise FFmpegError(t("error.ffprobe_missing")) from error
     except subprocess.TimeoutExpired as error:
-        raise FFmpegError(f"ffprobe 读取超时：{path.name}") from error
+        raise FFmpegError(t("error.ffprobe_timeout", name=path.name)) from error
     if result.returncode != 0:
         raise FFmpegError(result.stderr.strip() or f"ffprobe exited with {result.returncode}")
     return json.loads(result.stdout)
@@ -58,7 +59,7 @@ def probe(path: Path) -> dict:
 def first_audio_stream(data: dict) -> dict:
     stream = next((s for s in data.get("streams", []) if s.get("codec_type") == "audio"), None)
     if stream is None:
-        raise FFmpegError("没有音频流")
+        raise FFmpegError(t("error.no_audio_stream"))
     return stream
 
 
@@ -67,7 +68,7 @@ def duration(path: Path) -> float:
     try:
         return float(probe(path)["format"]["duration"])
     except (KeyError, ValueError) as error:
-        raise FFmpegError(f"无法读取时长：{path}") from error
+        raise FFmpegError(t("error.no_duration", name=path)) from error
 
 
 def run_ffmpeg(
@@ -91,7 +92,7 @@ def run_ffmpeg(
     try:
         run_streaming(cmd, on_line, token, error=FFmpegError)
     except FileNotFoundError as error:
-        raise FFmpegError("找不到 ffmpeg，请先安装") from error
+        raise FFmpegError(t("error.ffmpeg_missing")) from error
 
 
 def extract_frame(source: Path, stream: int, target: Path) -> None:

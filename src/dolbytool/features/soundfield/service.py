@@ -22,6 +22,7 @@ from pathlib import Path
 
 from dolbytool.core.atmos import trace_atmos
 from dolbytool.core.cancel import CancellationToken
+from dolbytool.core.i18n import t
 from dolbytool.core.paths import atomic_output, work_root
 from dolbytool.core.renderer import renderer_script, run_renderer
 from dolbytool.core.speakers import DEFAULT_ATMOS, SpeakerLayout
@@ -54,8 +55,6 @@ def track_speakers(key: str, layout: SpeakerLayout) -> tuple[str, ...]:
 
 
 # camera presets the renderer knows, with their labels
-VIEWS = {"iso": "等轴测", "top": "顶部", "angle": "Angle（对面低角度）"}
-COLOR_MODES = {"tint": "统一色调", "height": "按高度（地面冷、顶部暖）", "object": "按对象区分"}
 # share of the progress bar the object trace takes; drawing is the rest
 TRACE_SHARE = 0.3
 
@@ -110,12 +109,12 @@ def render_soundfield_videos(
     script = renderer_script("soundfield.mjs")
     on_fraction(0.0)
     with tempfile.TemporaryDirectory(dir=work_root()) as work:
-        on_status("解析全景声对象")
+        on_status(t("step.parse_atmos_objects"))
         trace = trace_atmos(audio, token, lambda f: on_fraction(f * TRACE_SHARE), layout)
         share = (1 - TRACE_SHARE) / max(1, len(videos))
         for i, video in enumerate(videos):
             start = TRACE_SHARE + i * share
-            prefix = f"{video.label}：" if len(videos) > 1 else ""
+            label = video.label if len(videos) > 1 else None
             scene = Path(work) / f"scene-{i}.json"
             wanted = TRACK_SPEAKERS[video.key]
             data = trace.to_json(None if wanted is ALL_SPEAKERS else wanted)
@@ -124,8 +123,10 @@ def render_soundfield_videos(
                 run_renderer(
                     script, _args(scene, partial, spec, duration), token,
                     lambda f, start=start: on_fraction(start + share * f),
-                    lambda m, prefix=prefix: on_status(prefix + m),
-                    "声场渲染器退出码 {code}",
+                    lambda m, label=label: on_status(
+                        t("common.labeled", label=label, text=m) if label else m
+                    ),
+                    t("error.soundfield_renderer_exit"),
                 )  # fmt: skip
     on_fraction(1.0)
     return [v.target for v in videos]
@@ -157,9 +158,6 @@ def soundfield_target(output_dir: Path, track_path: Path) -> Path:
     return output_dir / f"{track_path.stem}_soundfield.webm"
 
 
-from dolbytool.core.i18n import t
-
-
 def soundfield_step(
     audio: Path,
     videos: list[SoundfieldVideo],
@@ -180,8 +178,11 @@ def soundfield_step(
         paths = render_soundfield_videos(
             audio, videos, spec, token, duration, on_fraction, progress.status, layout
         )
-        return "、".join(p.name for p in paths)
+        return t("common.list_sep").join(p.name for p in paths)
 
-    title = t("step.soundfield_video") if len(videos) == 1 else t("step.soundfield_videos_count", count=len(videos))
+    title = (
+        t("step.soundfield_video")
+        if len(videos) == 1
+        else t("step.soundfield_videos_count", count=len(videos))
+    )
     return Step(title, run, tuple(v.target for v in videos))
-

@@ -17,6 +17,7 @@ import soundfile as sf
 
 from dolbytool.core import ffmpeg
 from dolbytool.core.cancel import CancellationToken
+from dolbytool.core.i18n import t
 from dolbytool.core.paths import atomic_output, work_root
 
 # Anything decoded from a wider or floating-point source is written at 24
@@ -112,7 +113,7 @@ def decode_audio(path: Path, token: CancellationToken) -> AudioData:
         )
         frames = scratch.stat().st_size // (4 * channels)
         if frames <= 0:
-            raise ValueError(f"音频不含任何采样：{path.name}")
+            raise ValueError(t("error.no_samples", name=path.name))
         interleaved = np.memmap(scratch, dtype=np.float32, mode="r", shape=(frames, channels))
     except BaseException:
         scratch.unlink(missing_ok=True)
@@ -121,10 +122,10 @@ def decode_audio(path: Path, token: CancellationToken) -> AudioData:
 
 
 def read_audio(path: Path, token: CancellationToken) -> AudioData:
-    """Decode a file libsndfile reads into a scratch buffer; ffmpeg converts anything else first."""
+    """Read a file libsndfile can open into a scratch buffer (`load_audio` takes anything else)."""
     with sf.SoundFile(path) as source:
         if source.frames <= 0:
-            raise ValueError(f"音频不含任何采样：{path.name}")
+            raise ValueError(t("error.no_samples", name=path.name))
         audio = create_pcm_audio(
             source.channels, source.frames, source.samplerate, _bit_depth(source.subtype)
         )

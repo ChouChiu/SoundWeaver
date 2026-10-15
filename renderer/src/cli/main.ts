@@ -43,7 +43,7 @@ start(async (run) => {
 		setup: (stage) => setup(stage, ttml, opts.stage),
 	};
 
-	status("启动浏览器");
+	status({ key: "launch_browser" });
 	const first = await Stage.open(run, settings);
 	const seconds = opts.duration ?? (await first.endTime()) / 1000 + 0.5;
 	await renderTimeline(run, first, () => Stage.open(run, settings), { ...opts, seconds });

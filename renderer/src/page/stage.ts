@@ -101,6 +101,10 @@ export class Stage implements AmllRender, RenderPage {
 		return this.end;
 	}
 
+	visibleWindows(): [number, number][] {
+		return this.slots.map((s) => [s.showFrom, s.showUntil]);
+	}
+
 	seek(time: number): number {
 		let visible = 0;
 		this.tick.style.setProperty("--frame-time", String(time));

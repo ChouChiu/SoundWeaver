@@ -62,11 +62,15 @@ class TaskView(widgets.HintTree):
         self._values: list[int] = []
         self._targets: list[tuple[Path, ...]] = []
         self._errors: dict[int, str] = {}
+        # each row's icon, by `_ICONS` key, redrawn when the theme changes
+        self._icons: list[str] = []
+        fluent.on_theme_change(self._recolor)
 
     def set_steps(self, steps: list[Step]) -> None:
         self.clear()
         self._bars, self._values, self._errors = [], [0] * len(steps), {}
         self._targets = [step.targets for step in steps]
+        self._icons = ["queued"] * len(steps)
         for step in steps:
             item = QTreeWidgetItem([step.title, "", t("status.waiting")])
             item.setIcon(0, fluent.qicon(_ICONS["queued"]))
@@ -81,6 +85,7 @@ class TaskView(widgets.HintTree):
 
     def started(self, index: int) -> None:
         item = self.topLevelItem(index)
+        self._icons[index] = "running"
         item.setIcon(0, fluent.qicon(_ICONS["running"]))
         item.setText(2, t("status.running"))
         self.scrollToItem(item)
@@ -92,6 +97,7 @@ class TaskView(widgets.HintTree):
 
     def finished(self, index: int, outcome: str, note: str, seconds: float) -> None:
         item = self.topLevelItem(index)
+        self._icons[index] = outcome
         item.setIcon(0, fluent.qicon(_ICONS[outcome]))
         state = _state_text(Outcome(outcome))
         if outcome == Outcome.DONE:
@@ -108,18 +114,27 @@ class TaskView(widgets.HintTree):
             item.setForeground(2, fluent.negative())
         elif outcome == Outcome.CANCELLED:
             self._bars[index].pause()
-        item.setText(2, f"{state}：{note}" if note else state)
+        item.setText(2, t("common.labeled", label=state, text=note) if note else state)
         item.setToolTip(2, note)
 
     def failures(self) -> list[str]:
         """Title and error of every failed step."""
         return [
-            f"{self.topLevelItem(i).text(0)}：{error}" for i, error in sorted(self._errors.items())
+            t("common.labeled", label=self.topLevelItem(i).text(0), text=error)
+            for i, error in sorted(self._errors.items())
         ]
+
+    def _recolor(self) -> None:
+        """Icons and the failure colour are taken from the theme: take them again."""
+        for index, key in enumerate(self._icons):
+            item = self.topLevelItem(index)
+            item.setIcon(0, fluent.qicon(_ICONS[key]))
+            if index in self._errors:
+                item.setForeground(2, fluent.negative())
 
     def _open(self, item: QTreeWidgetItem, _column: int) -> None:
         index = self.indexOfTopLevelItem(item)
-        existing = [t for t in self._targets[index] if t.exists()]
+        existing = [target for target in self._targets[index] if target.exists()]
         if existing:
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(existing[0])))
 

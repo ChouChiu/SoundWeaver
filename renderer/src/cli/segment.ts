@@ -38,20 +38,27 @@ export async function renderSegment(
 	});
 	let previous: Buffer | undefined;
 	// With no line on screen every frame is the same empty picture: capture it once,
-	// then skip the browser for the intro, gaps and outro.
+	// then skip the browser for the intro, gaps and outro, without even a seek
+	// where the page reported nothing can show.
 	let blank: Buffer | undefined;
 	const format = captureFormat(encoding);
 	for (let frame = from; frame < to; frame++) {
 		if (failure) throw failure;
 		run.throwIfAborted();
-		const visible = await stage.seek(at(frame));
-		if (visible === 0 && blank) {
+		const time = at(frame);
+		if (blank && !stage.isVisible(time)) {
 			previous = blank;
 		} else {
-			// No damage means no new screenshot: the picture is unchanged, repeat the last one.
-			previous = (await stage.frame(format)) ?? previous ?? (await stage.frame(format));
-			if (!previous) throw new Error(`第 ${frame} 帧截图失败`);
-			if (visible === 0) blank = previous;
+			// the seek must land before the frame is drawn: the two go one after the other
+			const visible = await stage.seek(time);
+			if (visible === 0 && blank) {
+				previous = blank;
+			} else {
+				// No damage means no new screenshot: the picture is unchanged, repeat the last one.
+				previous = (await stage.frame(format)) ?? previous ?? (await stage.frame(format));
+				if (!previous) throw new Error(`第 ${frame} 帧截图失败`);
+				if (visible === 0) blank = previous;
+			}
 		}
 		if (!stdin.write(previous)) {
 			// a dead encoder never drains; its exit rejects `done` instead

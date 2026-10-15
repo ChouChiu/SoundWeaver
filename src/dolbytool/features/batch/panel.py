@@ -15,7 +15,7 @@ from collections.abc import Iterable
 from dataclasses import replace
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, Qt, QTimer, Signal
+from PySide6.QtCore import QSettings, Qt, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -29,7 +29,6 @@ from PySide6.QtWidgets import (
 )
 from qfluentwidgets import (
     Action,
-    BodyLabel,
     LineEdit,
     PushButton,
     RoundMenu,
@@ -37,6 +36,7 @@ from qfluentwidgets import (
     TransparentPushButton,
 )
 
+from dolbytool.core.i18n import t
 from dolbytool.core.paths import path_from_text
 from dolbytool.core.project import ATMOS_LAYOUT_KEY, Project, expected_tracks
 from dolbytool.core.speakers import SpeakerLayout, atmos_layout
@@ -51,7 +51,6 @@ from dolbytool.features.batch.service import (
     track_output_dir,
 )
 from dolbytool.features.source import lyrics as lyric_match
-from dolbytool.features.source.panel import AUDIO_FILTER, IMAGE_FILTER, TTML_FILTER
 from dolbytool.features.source.service import Inspection, folder_cover, inspect
 from dolbytool.ui import fluent, widgets
 from dolbytool.ui.background import Each
@@ -59,19 +58,12 @@ from dolbytool.ui.background import Each
 logger = logging.getLogger(__name__)
 
 _LYRICS, _STATUS = 2, 3
-_SETTLE_MS = 400
-ALBUM_TIP = (
-    "按碟号与音轨号排序，所有音轨共用专辑封面，\n"
-    "输出统一保存到「<专辑名>_stems/<音轨名>」，渐变图整张专辑只生成一张"
-)
 
 
 class BatchPanel(widgets.Card):
     changed = Signal()
 
     def __init__(self, settings: QSettings, parent: QWidget | None = None) -> None:
-        from dolbytool.core.i18n import t
-
         super().__init__(t("batch.title"), parent)
         self.settings = settings
         self.tracks: list[BatchTrack] = []
@@ -84,12 +76,19 @@ class BatchPanel(widgets.Card):
         self._auto: dict[Path, Path] = {}
         self._probe = Each(self)
         self._running = False
+        # the art found in a folder, by folder, with the folder's mtime it was found at
+        self._folder_covers: dict[Path, tuple[int, Path | None]] = {}
 
-        self.list = widgets.HintTree(
-            t("batch.hint")
-        )
+        self.list = widgets.HintTree(t("batch.hint"))
         self.list.setColumnCount(4)
-        self.list.setHeaderLabels([t("batch.col_track"), t("batch.col_info"), t("batch.col_lyrics"), t("batch.col_status")])
+        self.list.setHeaderLabels(
+            [
+                t("batch.col_track"),
+                t("batch.col_info"),
+                t("batch.col_lyrics"),
+                t("batch.col_status"),
+            ]
+        )
         self.list.setRootIsDecorated(False)
         self.list.setUniformRowHeights(True)
         self.list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -119,7 +118,7 @@ class BatchPanel(widgets.Card):
         self.remove_btn.setToolTip(t("batch.remove_tip"))
         clear = self._button(t("batch.clear"), "edit-clear-all", self.clear, flat=True)
         buttons = QHBoxLayout()
-        buttons.setSpacing(6)
+        buttons.setSpacing(widgets.INLINE_SPACING)
         for button in (add_files, add_folder, import_lyrics, self.lyrics_btn, self.remove_btn):
             buttons.addWidget(button)
         buttons.addStretch(1)
@@ -139,25 +138,29 @@ class BatchPanel(widgets.Card):
         self._buttons += [cover_btn, out_btn]
         # one form, so the labels line up whether the album rows show or not
         self.form = QFormLayout()
-        self.form.setVerticalSpacing(8)
+        self.form.setHorizontalSpacing(widgets.FIELD_SPACING)
+        self.form.setVerticalSpacing(widgets.ROW_SPACING)
         self.form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.form.addRow(BodyLabel(t("batch.album_name")), self.album_name)
-        self.form.addRow(BodyLabel(t("batch.album_cover")), cover_row)
-        self.form.addRow(BodyLabel(t("batch.output_root")), out_row)
+        self.form.addRow(
+            widgets.field_label(t("batch.album_name"), self.album_name), self.album_name
+        )
+        self.form.addRow(widgets.field_label(t("batch.album_cover"), self.album_cover), cover_row)
+        self.form.addRow(widgets.field_label(t("batch.output_root"), self.out_edit), out_row)
 
         layout = QVBoxLayout()
-        layout.setSpacing(8)
+        layout.setSpacing(widgets.ROW_SPACING)
         layout.addWidget(self.list, 1)
         layout.addLayout(buttons)
         layout.addWidget(self.album)
         layout.addLayout(self.form)
         self.set_body(layout)
 
-        self._settle = QTimer(self, singleShot=True, interval=_SETTLE_MS)
-        self._settle.timeout.connect(self._sync)
+        # edits settle before the list is redrawn, so typing a path reads it once
+        self._settle = widgets.Debouncer(self._sync, parent=self)
         for edit in (self.album_name, self.album_cover, self.out_edit):
-            edit.textChanged.connect(lambda _t: self._settle.start())
-            edit.editingFinished.connect(self._flush)
+            edit.textChanged.connect(lambda _t: self._settle.poke())
+            edit.editingFinished.connect(self._settle.now)
+        fluent.on_theme_change(self._sync)
         self._sync()
 
     def _button(self, text: str, icon: str, slot, flat: bool = False) -> PushButton:
@@ -178,9 +181,11 @@ class BatchPanel(widgets.Card):
         return self._probe.busy
 
     def album_title(self) -> str:
-        from dolbytool.core.i18n import t
-
-        return self.album_name.text().strip() or album_name(self.tracks) or t("batch.default_album_name")
+        return (
+            self.album_name.text().strip()
+            or album_name(self.tracks)
+            or t("batch.default_album_name")
+        )
 
     def output_root(self) -> Path | None:
         """Where the tracks' folders go; None leaves each track's next to it."""
@@ -193,9 +198,20 @@ class BatchPanel(widgets.Card):
         if cover := path_from_text(self.album_cover.text()):
             return cover
         folder = common_folder(self.tracks)
-        if folder and (found := folder_cover(folder)):
+        if folder and (found := self._folder_cover(folder)):
             return found
-        return next((t.cover for t in self.tracks if t.cover), None)
+        return next((track.cover for track in self.tracks if track.cover), None)
+
+    def _folder_cover(self, folder: Path) -> Path | None:
+        """`folder_cover`, read again only once the folder changes: it is asked on every redraw."""
+        try:
+            stamp = folder.stat().st_mtime_ns
+        except OSError:
+            return None
+        cached = self._folder_covers.get(folder)
+        if cached is None or cached[0] != stamp:
+            cached = self._folder_covers[folder] = (stamp, folder_cover(folder))
+        return cached[1]
 
     def _cover(self, track: BatchTrack) -> Path | None:
         if self.is_album:
@@ -216,7 +232,7 @@ class BatchPanel(widgets.Card):
         return atmos_layout(str(self.settings.value(ATMOS_LAYOUT_KEY, "")))
 
     def projects(self) -> list[Project]:
-        return [self.project(t) for t in self.tracks]
+        return [self.project(track) for track in self.tracks]
 
     def album_project(self) -> Project | None:
         """The album as one input, for the outputs made once per album."""
@@ -268,61 +284,56 @@ class BatchPanel(widgets.Card):
     # ---- picking ---------------------------------------------------------------------
 
     def pick_files(self) -> None:
-        from dolbytool.core.i18n import t
-
-        paths, _ = QFileDialog.getOpenFileNames(self, t("batch.dialog_add_audio"), self.start_dir(), AUDIO_FILTER)
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, t("batch.dialog_add_audio"), self.start_dir(), t("source.filter_audio")
+        )
         self.add(Path(p) for p in paths)
 
     def pick_folder(self) -> None:
-        from dolbytool.core.i18n import t
-
-        path = QFileDialog.getExistingDirectory(self, t("batch.dialog_add_folder"), self.start_dir())
+        path = QFileDialog.getExistingDirectory(
+            self, t("batch.dialog_add_folder"), self.start_dir()
+        )
         if path:
             self.add([Path(path)], album=True)
 
     def pick_cover(self) -> None:
-        from dolbytool.core.i18n import t
-
-        path, _ = QFileDialog.getOpenFileName(self, t("batch.dialog_pick_album_cover"), self.start_dir(), IMAGE_FILTER)
+        path, _ = QFileDialog.getOpenFileName(
+            self, t("batch.dialog_pick_album_cover"), self.start_dir(), t("source.filter_image")
+        )
         if path:
             self.album_cover.setText(path)
-            self._flush()
+            self._settle.now()
 
     def pick_output(self) -> None:
-        from dolbytool.core.i18n import t
-
         start = str(self.output_root() or self.start_dir())
         path = QFileDialog.getExistingDirectory(self, t("batch.dialog_pick_output_root"), start)
         if path:
             self.out_edit.setText(path)
-            self._flush()
+            self._settle.now()
 
     def pick_ttml(self) -> None:
-        from dolbytool.core.i18n import t
-
         rows = self._selected_rows()
         if len(rows) != 1:
             return
         track = self.tracks[rows[0]]
         path, _ = QFileDialog.getOpenFileName(
-            self, t("batch.dialog_assign_lyrics_for", name=track.audio.name), str(track.audio.parent), TTML_FILTER
+            self,
+            t("batch.dialog_assign_lyrics_for", name=track.audio.name),
+            str(track.audio.parent),
+            t("source.filter_ttml"),
         )
         if path:
             self._ttml[track.audio] = Path(path)
             self._sync()
 
     def pick_lyrics(self) -> None:
-        from dolbytool.core.i18n import t
-
         paths, _ = QFileDialog.getOpenFileNames(
-            self, t("batch.dialog_import_lyrics"), self.start_dir(), TTML_FILTER
+            self, t("batch.dialog_import_lyrics"), self.start_dir(), t("source.filter_ttml")
         )
         self.import_lyrics(Path(p) for p in paths)
 
     def import_lyrics(self, paths: Iterable[Path]) -> int:
         """Add lyric files, folders searched, for the tracks to be matched against."""
-        from dolbytool.core.i18n import t
-
         new = [p for p in lyric_match.lyric_files(paths) if p not in self._imported]
         if not new:
             return 0
@@ -330,9 +341,11 @@ class BatchPanel(widgets.Card):
         self._match()
         used = set(self._auto.values()) | {p for p in self._ttml.values() if p}
         left = [p.name for p in new if p not in used]
-        message = t("batch.lyrics_imported_summary", imported=len(new), matched=len(new) - len(left))
+        message = t(
+            "batch.lyrics_imported_summary", imported=len(new), matched=len(new) - len(left)
+        )
         if left:
-            message += t("batch.lyrics_unmatched_note", names="、".join(left))
+            message += t("batch.lyrics_unmatched_note", names=t("common.list_sep").join(left))
         logger.info(message)
         self._sync()
         return len(new)
@@ -348,8 +361,6 @@ class BatchPanel(widgets.Card):
         self._sync()
 
     def _context_menu(self, pos) -> None:
-        from dolbytool.core.i18n import t
-
         rows = self._selected_rows()
         if not rows or self._running:
             return
@@ -368,7 +379,7 @@ class BatchPanel(widgets.Card):
     def add(self, paths: Iterable[Path], album: bool = False) -> int:
         """Queue the audio among `paths`, folders included; a folder turns album mode on."""
         paths = list(paths)
-        known = {t.audio.resolve() for t in self.tracks}
+        known = {track.audio.resolve() for track in self.tracks}
         added = 0
         # lyrics dropped along with the tracks count as imported, folders' as found
         self._imported += [
@@ -393,13 +404,15 @@ class BatchPanel(widgets.Card):
             self.settings.setValue("last_dir", str(self.tracks[-1].audio.parent))
             if (album or any(p.is_dir() for p in paths)) and not self.is_album:
                 self.album.setChecked(True)
-            logger.info("已加入 %d 首音轨，共 %d 首", added, len(self.tracks))
+            logger.info("added %d tracks, %d in all", added, len(self.tracks))
         self._sync()
         return added
 
     def remove_selected(self) -> None:
+        if self._running:
+            return  # the run's plan refers to the tracks by row
         rows = set(self._selected_rows())
-        self.tracks = [t for i, t in enumerate(self.tracks) if i not in rows]
+        self.tracks = [track for i, track in enumerate(self.tracks) if i not in rows]
         # a removed track's lyrics may be the next best for another
         self._match()
         self._sync()
@@ -414,14 +427,14 @@ class BatchPanel(widgets.Card):
     # ---- reactions -------------------------------------------------------------------
 
     def _read(self, audio: Path, result: Inspection | Exception) -> None:
-        index = next((i for i, t in enumerate(self.tracks) if t.audio == audio), None)
+        index = next((i for i, track in enumerate(self.tracks) if track.audio == audio), None)
         if index is None:
             return  # removed while it was being read
         if isinstance(result, Exception):
             result = Inspection(audio, error=str(result) or type(result).__name__)
         error = result.error
         if error:
-            logger.warning("无法读取 %s：%s", audio.name, error)
+            logger.warning("cannot read %s: %s", audio.name, error)
             # ffmpeg says where it failed first and why last
             error = error.strip().splitlines()[-1].removeprefix(f"{audio}: ")
         self.tracks[index] = replace(
@@ -436,15 +449,11 @@ class BatchPanel(widgets.Card):
         picked = set(self._ttml.values())
         pool = [p for p in (*self._imported, *self._nearby) if p not in picked and p.is_file()]
         open_tracks = [
-            (t.audio, t.info.title if t.info else "")
-            for t in self.tracks
-            if t.audio not in self._ttml
+            (track.audio, track.info.title if track.info else "")
+            for track in self.tracks
+            if track.audio not in self._ttml
         ]
         self._auto = lyric_match.match(open_tracks, pool)
-
-    def _flush(self) -> None:
-        self._settle.stop()
-        self._sync()
 
     def layout_changed(self) -> None:
         """The Atmos render layout changed: redraw what each track is rendered to."""
@@ -452,8 +461,6 @@ class BatchPanel(widgets.Card):
 
     def _sync(self) -> None:
         """Order the tracks, redraw the list and tell the window."""
-        from dolbytool.core.i18n import t
-
         # by audio, kept on each row: the rows may be stale after a removal or reorder
         selected = {i.data(0, Qt.ItemDataRole.UserRole) for i in self.list.selectedItems()}
         if self.is_album and not self._probe.busy:
@@ -464,40 +471,62 @@ class BatchPanel(widgets.Card):
             album_name(self.tracks) or t("batch.album_name_placeholder")
         )
         root = self.output_root()
-        self.out_edit.setPlaceholderText(
-            str(root) if root else t("batch.output_root_placeholder")
-        )
+        self.out_edit.setPlaceholderText(str(root) if root else t("batch.output_root_placeholder"))
         self.list.blockSignals(True)
-        self.list.clear()
+        # rows are updated in place while the tracks stay the same, so the scroll
+        # position and the focus survive every probe result coming in
+        same = self.list.topLevelItemCount() == len(self.tracks) and all(
+            self.list.topLevelItem(i).data(0, Qt.ItemDataRole.UserRole) == track.audio
+            for i, track in enumerate(self.tracks)
+        )
+        if not same:
+            self.list.clear()
         for number, track in enumerate(self.tracks, 1):
-            info = track.info
-            if track.probing:
-                detail = t("status.reading")
-            elif info is None:
-                detail = t("error.cannot_read", error=track.error)
-            else:
-                detail = info.describe(self.atmos_layout())
-            # the list numbers the tracks itself
-            stem = lyric_match.without_number(track.audio.stem)
-            name = (info.title if info and info.title else "") or stem
-            lyrics = self.lyrics_for(track)
-            manual = track.audio in self._ttml
-            shown = lyrics.name if lyrics else (t("batch.lyrics_disabled") if manual else t("batch.lyrics_none"))
-            item = QTreeWidgetItem([f"{number:02d}. {name}", detail, shown, ""])
-            item.setData(0, Qt.ItemDataRole.UserRole, track.audio)
-            item.setToolTip(0, str(track.audio))
-            item.setToolTip(1, detail)
-            how = t("batch.lyrics_manual") if manual else (t("batch.lyrics_auto") if lyrics else t("batch.lyrics_not_found"))
-            item.setToolTip(_LYRICS, f"{lyrics or shown}\n（{how}）")
-            if not lyrics:
-                item.setForeground(_LYRICS, fluent.dim())
-            if info is None and not track.probing:
-                item.setForeground(1, fluent.negative())
-            self.list.addTopLevelItem(item)
-            item.setSelected(track.audio in selected)
+            item = self.list.topLevelItem(number - 1) if same else QTreeWidgetItem()
+            self._fill_row(item, number, track)
+            if not same:
+                self.list.addTopLevelItem(item)
+                item.setSelected(track.audio in selected)
         self.list.blockSignals(False)
         self._update_buttons()
         self.changed.emit()
+
+    def _fill_row(self, item: QTreeWidgetItem, number: int, track: BatchTrack) -> None:
+        info = track.info
+        if track.probing:
+            detail = t("status.reading")
+        elif info is None:
+            detail = t("error.cannot_read", error=track.error)
+        else:
+            detail = info.describe(self.atmos_layout())
+        # the list numbers the tracks itself
+        stem = lyric_match.without_number(track.audio.stem)
+        name = (info.title if info and info.title else "") or stem
+        lyrics = self.lyrics_for(track)
+        manual = track.audio in self._ttml
+        if lyrics:
+            shown = lyrics.name
+        else:
+            shown = t("batch.lyrics_disabled") if manual else t("batch.lyrics_none")
+        item.setText(0, f"{number:02d}. {name}")
+        item.setText(1, detail)
+        item.setText(_LYRICS, shown)
+        item.setData(0, Qt.ItemDataRole.UserRole, track.audio)
+        item.setToolTip(0, str(track.audio))
+        item.setToolTip(1, detail)
+        if manual:
+            how = t("batch.lyrics_manual")
+        else:
+            how = t("batch.lyrics_auto") if lyrics else t("batch.lyrics_not_found")
+        item.setToolTip(_LYRICS, t("common.with_note", text=lyrics or shown, note=how))
+        for column, color in (
+            (_LYRICS, None if lyrics else fluent.dim()),
+            (1, fluent.negative() if info is None and not track.probing else None),
+        ):
+            if color is None:
+                item.setData(column, Qt.ItemDataRole.ForegroundRole, None)
+            else:
+                item.setForeground(column, color)
 
     def _selection_changed(self) -> None:
         self._update_buttons()

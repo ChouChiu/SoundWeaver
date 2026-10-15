@@ -16,6 +16,7 @@ from pathlib import Path
 
 from dolbytool.core import ffmpeg
 from dolbytool.core.cancel import CancellationToken
+from dolbytool.core.i18n import t
 from dolbytool.core.paths import atomic_output, cache_dir, content_key, file_stamp
 
 MOTION_SUFFIXES = {".mp4", ".m4v", ".mov", ".webm", ".mkv"}
@@ -66,7 +67,7 @@ def _fps(path: Path) -> float:
         rate = stream.get(key, "0/0")
         if rate and not rate.startswith("0") and "/0" not in rate:
             return float(Fraction(rate))
-    raise ffmpeg.FFmpegError("无法读取动态封面的帧率")
+    raise ffmpeg.FFmpegError(t("error.motion_fps"))
 
 
 def side_for(width: int, height: int) -> int:
@@ -99,7 +100,7 @@ def frames(cover: Path, side: int, token: CancellationToken | None = None) -> Pa
         )  # fmt: skip
         count = sum(1 for _ in partial.glob("*.jpg"))
         if not count:
-            raise ffmpeg.FFmpegError("动态封面中没有可用的画面")
+            raise ffmpeg.FFmpegError(t("error.motion_no_frames"))
         (partial / MANIFEST).write_text(json.dumps({"fps": fps, "count": count}))
         partial.rename(folder)
     except BaseException:

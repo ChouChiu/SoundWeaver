@@ -30,8 +30,6 @@ from qfluentwidgets.components.widgets.menu import MenuAnimationType
 from dolbytool.core.i18n import t
 from dolbytool.ui import fluent, widgets
 
-CREDITS_TIP = t("lyrics.credits_tip")
-
 # what the completer matches on: every name of the family, not just the one shown
 _SEARCH_ROLE = Qt.ItemDataRole.UserRole + 1
 
@@ -156,7 +154,10 @@ class FontList(QWidget):
         pick_row.addWidget(add)
         buttons.addLayout(pick_row)
         moves = QHBoxLayout()
-        for icon, tip, step in (("go-up", t("action.move_up"), -1), ("go-down", t("action.move_down"), 1)):
+        for icon, tip, step in (
+            ("go-up", t("action.move_up"), -1),
+            ("go-down", t("action.move_down"), 1),
+        ):
             button = ToolButton(fluent.icon(icon))
             button.setToolTip(tip)
             button.clicked.connect(lambda _=False, step=step: self._move(step))

@@ -14,6 +14,8 @@ export interface RenderPage {
 	ready?(): Promise<boolean>;
 	/** When the content ends. */
 	endTime(): number;
+	/** Time windows [startMs, endMs] where the page has visible content. If undefined, all frames may be visible. */
+	visibleWindows?(): [number, number][];
 }
 
 export interface StageOptions {

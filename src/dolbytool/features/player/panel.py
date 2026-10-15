@@ -16,20 +16,18 @@ from qfluentwidgets import (
 
 from dolbytool.core.cancel import CancellationToken, ProcessingCancelled
 from dolbytool.core.ffmpeg import MAX_FRAME_SIDE, frame_problem
+from dolbytool.core.i18n import t
 from dolbytool.core.paths import work_root
 from dolbytool.core.project import ORIGINAL, PlanContext, Project
 from dolbytool.core.renderer import renderer_problem
 from dolbytool.core.stems import stem_label
 from dolbytool.core.task import Progress, Step
 from dolbytool.features.player.service import (
-    AUDIO_MODES,
-    BACKGROUNDS,
-    CODECS,
-    CONTROLS,
     DEFAULT_QUALITY,
-    LYRIC_SIZES,
     PlayerSpec,
     QueueTrack,
+    available,
+    default_codec,
     player_step,
     player_target,
     preview_spec,
@@ -39,7 +37,7 @@ from dolbytool.features.player.service import (
 from dolbytool.features.source.lyrics import without_number
 from dolbytool.ui import fluent, widgets
 from dolbytool.ui.feature import FeaturePanel
-from dolbytool.ui.fonts import CREDITS_TIP, FontList
+from dolbytool.ui.fonts import FontList
 from dolbytool.ui.video_preview import VideoPreview
 
 logger = logging.getLogger(__name__)
@@ -52,11 +50,6 @@ def _split_artists(text: str) -> tuple[str, ...]:
 
 
 QUALITY_RANGE = {"libx264": (0, 51), "h264_nvenc": (1, 51), "hevc_nvenc": (1, 51), "vp9": (0, 63)}
-ALBUM_MODES = {
-    "tracks": "每首单独的视频",
-    "queue": "整张专辑连续播放",
-    "both": "两者都生成",
-}
 
 
 class PreviewJob(QThread):
@@ -73,7 +66,7 @@ class PreviewJob(QThread):
         self.token = CancellationToken()
 
     def run(self) -> None:
-        progress = Progress(self.progress.emit, "逐帧渲染")
+        progress = Progress(self.progress.emit, t("step.frame_render"))
         try:
             self._render(self.target, self.token, progress.fraction, progress.status)
         except ProcessingCancelled:
@@ -88,20 +81,13 @@ class PreviewJob(QThread):
 class PlayerPanel(FeaturePanel):
     title_key = "player.title"
     description_key = "player.description"
-    _title = "播放器视频"
     icon = "media-playback-start"
-    _description = (
-        "基于 AMLL Prebuilt Player 渲染完整播放器页面：封面、曲目信息、进度条、播放控件、"
-        "流动背景与逐字滚动歌词，横屏 / 竖屏自动切换布局，可混入音频"
-    )
     enabled_key = "do_player"
     enabled_default = False
     needs_audio = False
 
     def __init__(self, settings: QSettings, parent=None) -> None:
         super().__init__(settings, parent)
-        from dolbytool.core.i18n import t
-
         d = PlayerSpec()
 
         # ---- frame and encoding
@@ -116,9 +102,11 @@ class PlayerPanel(FeaturePanel):
             "hevc_nvenc": t("option.encoder.nvenc_hevc"),
             "vp9": t("option.encoder.vp9"),
         }
-        self.codec = self.combo("pl_codec", codecs_labels, d.codec)
+        # a first start takes the GPU encoder where there is one; after that the saved choice
+        codec = d.codec if settings.contains("pl_codec") else default_codec()
+        self.codec = self.combo("pl_codec", codecs_labels, codec)
         self.codec.setToolTip(t("player.codec_tip"))
-        self.quality = self.spin("pl_quality", 0, 63, d.quality)
+        self.quality = self.spin("pl_quality", 0, 63, DEFAULT_QUALITY[codec])
         self.quality.setToolTip(t("player.quality_tip"))
         self.codec.currentIndexChanged.connect(self._codec_changed)
         audio_modes_labels = {
@@ -151,7 +139,7 @@ class PlayerPanel(FeaturePanel):
         self.album_mode = self.combo("pl_album_mode", album_modes_labels, "tracks")
         self.album_mode.setToolTip(t("player.album_mode_tip"))
         self.ui_scale = self.spin("pl_ui_scale", 0, 800, d.ui_scale, " %", step=25)
-        self.ui_scale.setSpecialValueText(t("action.confirm") if False else "自动")
+        self.ui_scale.setSpecialValueText(t("option.auto"))
         self.ui_scale.setToolTip(t("player.ui_scale_tip"))
 
         # ---- background
@@ -170,7 +158,9 @@ class PlayerPanel(FeaturePanel):
         self.bg_color = self.color("pl_color", d.color, t("player.pick_bg_color"))
         self.seed = self.spin("pl_seed", 0, 999999, d.seed)
         self.seed.setToolTip(t("player.seed_tip"))
-        self.light_wave = self.check("pl_light_wave", t("player.light_wave"), d.light_wave, t("player.light_wave_tip"))
+        self.light_wave = self.check(
+            "pl_light_wave", t("player.light_wave"), d.light_wave, t("player.light_wave_tip")
+        )
         self.beat = self.check(
             "pl_beat",
             t("player.beat"),
@@ -190,7 +180,7 @@ class PlayerPanel(FeaturePanel):
         }
         self.lyric_size = self.combo("pl_lyric_size", lyric_size_labels, d.lyric_size)
         self.font_weight = self.spin("pl_font_weight", 0, 1000, d.font_weight, step=100)
-        self.font_weight.setSpecialValueText("默认")
+        self.font_weight.setSpecialValueText(t("option.default"))
         self.letter_spacing = self.spin("pl_letter_spacing", -50, 50, d.letter_spacing, " %em")
         self.word_fade = self.spin("pl_word_fade", 1, 500, d.word_fade, " %", step=5)
         self.word_fade.setToolTip(t("player.word_fade_tip"))
@@ -232,11 +222,16 @@ class PlayerPanel(FeaturePanel):
         self.volume = self.spin("pl_volume", 0, 100, d.volume, " %", step=5)
         self.show_volume.toggled.connect(self._sync_enabled)
         self.bottom = self.check(
-            "pl_bottom", t("player.bottom_buttons"), d.bottom_controls, t("player.bottom_buttons_tip")
+            "pl_bottom",
+            t("player.bottom_buttons"),
+            d.bottom_controls,
+            t("player.bottom_buttons_tip"),
         )
         self.remaining = self.check("pl_remaining", t("player.show_remaining"), d.show_remaining)
         self.instrumental = self.edit(
-            "pl_instrumental", t("player.instrumental_placeholder"), t("player.instrumental_default_text")
+            "pl_instrumental",
+            t("player.instrumental_placeholder"),
+            t("player.instrumental_default_text"),
         )
         self.instrumental.setToolTip(t("player.instrumental_tip"))
         self.quality_tag = self.edit("pl_quality_tag", t("player.quality_tag_placeholder"))
@@ -257,7 +252,9 @@ class PlayerPanel(FeaturePanel):
         self.preview_length = self.seconds(
             "pl_preview_length", 8.0, 1.0, 60.0, tip=t("player.preview_length_tip"), replan=False
         )
-        self.preview_button = PrimaryPushButton(fluent.icon("media-playback-start"), t("action.render_preview"))
+        self.preview_button = PrimaryPushButton(
+            fluent.icon("media-playback-start"), t("action.render_preview")
+        )
         self.preview_button.setToolTip(t("player.preview_button_tip"))
         self.preview_button.clicked.connect(self._preview)
         self.preview_progress = ProgressBar()
@@ -356,8 +353,6 @@ class PlayerPanel(FeaturePanel):
     # ---- the audio mixed in ------------------------------------------------------------
 
     def _fill_audio_tracks(self, project: Project) -> None:
-        from dolbytool.core.i18n import t
-
         self.audio_track.clear()
         for track in project.tracks:
             # the file is named on the inputs page; here it would only crowd the row
@@ -372,7 +367,8 @@ class PlayerPanel(FeaturePanel):
         if index < 0:
             # kept for the tracks that have it; this one falls back to its source
             self.audio_track.addItem(
-                t("player.stem_not_found_fallback", label=stem_label(self._audio_key)), self._audio_key
+                t("player.stem_not_found_fallback", label=stem_label(self._audio_key)),
+                self._audio_key,
             )
             index = self.audio_track.count() - 1
         self.audio_track.setCurrentIndex(index)
@@ -393,10 +389,10 @@ class PlayerPanel(FeaturePanel):
 
     def _info_placeholders(self, project: Project) -> None:
         info = project.info
-        fallback = "留空则使用 TTML 元数据"
+        fallback = t("player.ttml_fallback_placeholder")
         self.title_edit.setPlaceholderText((info and info.title) or fallback)
         self.artist_edit.setPlaceholderText(
-            (info and info.artist) or f"{fallback}，多位艺人用 / 分隔"
+            (info and info.artist) or t("player.artist_fallback_placeholder")
         )
         self.album_edit.setPlaceholderText((info and info.album) or fallback)
 
@@ -472,8 +468,6 @@ class PlayerPanel(FeaturePanel):
     # ---- preview -----------------------------------------------------------------------
 
     def _preview(self) -> None:
-        from dolbytool.core.i18n import t
-
         if self._job is not None:
             self._job.token.cancel()
             return
@@ -497,8 +491,9 @@ class PlayerPanel(FeaturePanel):
         target = work_root() / f"player_preview{spec.suffix}"
 
         def render(out: Path, token, on_fraction, on_status) -> None:
+            use = available(spec, lambda _value, note: on_status(note))
             render_player_video(
-                ttml, cover, audio, out, spec, song, token, on_fraction, on_status, excerpt
+                ttml, cover, audio, out, use, song, token, on_fraction, on_status, excerpt
             )
 
         self._job = PreviewJob(render, target, self)
@@ -516,31 +511,42 @@ class PlayerPanel(FeaturePanel):
         self.preview_status.setText(message)
 
     def _preview_done(self, path: Path | None, error: str) -> None:
-        from dolbytool.core.i18n import t
-
         self._job = None
         self.preview_button.setIcon(fluent.icon("media-playback-start"))
         self.preview_button.setText(t("action.render_preview"))
         self.preview_progress.hide()
+        self.preview_status.setToolTip(error)
         if path is None:
-            self.preview_status.setText(t("player.preview_failed", error=error) if error else t("status.cancelled"))
             if error:
-                logger.error("播放器预览失败：%s", error)
+                logger.error("player preview failed: %s", error)
+                # the first line in the row; all of it in the tooltip and the log
+                first = error.strip().splitlines()[0]
+                self.preview_status.setText(t("player.preview_failed", error=first))
+            else:
+                self.preview_status.setText(t("status.cancelled"))
             return
         self.preview_status.setText("")
         if self._dialog is None:
             self._dialog = VideoPreview(self.window())
         self._dialog.play(path)
 
-    def shutdown(self) -> None:
-        """Cancel a running preview and wait for it, before the window goes away."""
+    def cancel_background(self) -> None:
+        """Stop a running preview; its thread reports back through `_preview_done`."""
         if self._job is not None:
             self._job.token.cancel()
-            self._job.wait(15000)
+
+    def shutdown(self) -> None:
+        """Cancel a running preview and wait for it, before the window goes away.
+
+        Cancelling stops the renderer (it is given ten seconds to exit before it
+        is killed), so the thread ends; the wait covers that and a margin.
+        """
+        if self._job is not None:
+            self._job.token.cancel()
+            if not self._job.wait(20_000):
+                logger.warning("player preview still running at exit")
 
     def problem(self, ctx: PlanContext) -> str | None:
-        from dolbytool.core.i18n import t
-
         too_big = frame_problem(self.width_spin.value(), self.height_spin.value())
         if too_big:
             return too_big
@@ -561,9 +567,9 @@ class PlayerPanel(FeaturePanel):
         return renderer_problem("player.mjs")
 
     def summary(self, ctx: PlanContext) -> str | None:
-        from dolbytool.core.i18n import t
-
-        size = t("player.summary_size", width=self.width_spin.value(), height=self.height_spin.value())
+        size = t(
+            "player.summary_size", width=self.width_spin.value(), height=self.height_spin.value()
+        )
         return size if ctx.project.ttml else t("player.summary_no_lyrics", size=size)
 
     def plan(self, ctx: PlanContext) -> list[Step]:

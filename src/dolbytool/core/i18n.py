@@ -1,16 +1,16 @@
-"""Internationalization (i18n) module for DolbyTool.
+"""Interface strings in Simplified Chinese, Traditional Chinese and English.
 
-Loads localization bundles from JSON resource files in `dolbytool/locales/`:
-- zh_cn.json (Simplified Chinese)
-- zh_tw.json (Traditional Chinese)
-- en.json    (English)
+Each language is one JSON file in `dolbytool/locales/` mapping a dotted key to
+its text, with `str.format` fields where the text takes values.  A key the
+current language lacks falls back to Simplified Chinese, which has them all;
+`scripts/check_locales.py` keeps the three files in step.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Callable
+from functools import cache
 from pathlib import Path
 from typing import Final
 
@@ -30,94 +30,40 @@ LANGUAGE_NAMES: Final = {
 
 LOCALES_DIR: Final = Path(__file__).resolve().parent.parent / "locales"
 
-
-class I18nManager:
-    """Manages language bundles loaded from JSON files and string lookups."""
-
-    def __init__(self, default_lang: str = LANG_ZH_CN, locales_dir: Path = LOCALES_DIR) -> None:
-        self._current_lang = default_lang
-        self._locales_dir = locales_dir
-        self._cache: dict[str, dict[str, str]] = {}
-        self._listeners: list[Callable[[str], None]] = []
-
-    @property
-    def language(self) -> str:
-        return self._current_lang
-
-    def set_language(self, lang: str) -> None:
-        if lang not in SUPPORTED_LANGUAGES:
-            lang = LANG_ZH_CN
-        if self._current_lang != lang:
-            self._current_lang = lang
-            self._load_bundle(lang)
-            for listener in list(self._listeners):
-                try:
-                    listener(lang)
-                except Exception as e:
-                    logger.exception("Error in i18n listener: %s", e)
-
-    def add_listener(self, callback: Callable[[str], None]) -> None:
-        if callback not in self._listeners:
-            self._listeners.append(callback)
-
-    def remove_listener(self, callback: Callable[[str], None]) -> None:
-        if callback in self._listeners:
-            self._listeners.remove(callback)
-
-    def _load_bundle(self, lang: str) -> dict[str, str]:
-        if lang in self._cache:
-            return self._cache[lang]
-        file_path = self._locales_dir / f"{lang}.json"
-        if file_path.is_file():
-            try:
-                content = file_path.read_text(encoding="utf-8")
-                bundle = json.loads(content)
-                if isinstance(bundle, dict):
-                    self._cache[lang] = bundle
-                    return bundle
-            except Exception as e:
-                logger.error("Failed to load locale %s from %s: %s", lang, file_path, e)
-        self._cache[lang] = {}
-        return self._cache[lang]
-
-    def t(self, key: str, **kwargs) -> str:
-        """Translate a key into current language with optional formatting."""
-        bundle = self._load_bundle(self._current_lang)
-        val = bundle.get(key)
-        if val is None:
-            # Fallback to zh_cn if current language has no entry
-            if self._current_lang != LANG_ZH_CN:
-                zh_bundle = self._load_bundle(LANG_ZH_CN)
-                val = zh_bundle.get(key)
-            if val is None:
-                val = key
-
-        if kwargs:
-            try:
-                return val.format(**kwargs)
-            except Exception:
-                return val
-        return val
+_language = LANG_ZH_CN
 
 
-_MANAGER = I18nManager()
+@cache
+def _bundle(lang: str) -> dict[str, str]:
+    path = LOCALES_DIR / f"{lang}.json"
+    try:
+        bundle = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        logger.exception("cannot load the %s strings from %s", lang, path)
+        return {}
+    return bundle
 
 
 def get_language() -> str:
-    return _MANAGER.language
+    return _language
 
 
 def set_language(lang: str) -> None:
-    _MANAGER.set_language(lang)
+    """Switch the language strings are looked up in; an unknown one means Simplified Chinese."""
+    global _language
+    _language = lang if lang in SUPPORTED_LANGUAGES else LANG_ZH_CN
 
 
-def add_language_listener(callback: Callable[[str], None]) -> None:
-    _MANAGER.add_listener(callback)
-
-
-def remove_language_listener(callback: Callable[[str], None]) -> None:
-    _MANAGER.remove_listener(callback)
-
-
-def t(key: str, **kwargs) -> str:
-    return _MANAGER.t(key, **kwargs)
+def t(key: str, **kwargs: object) -> str:
+    """The text of `key` in the current language, its fields filled from `kwargs`."""
+    text = _bundle(_language).get(key) or _bundle(LANG_ZH_CN).get(key)
+    if text is None:
+        logger.warning("no string for %s", key)
+        return key
+    if not kwargs:
+        return text
+    try:
+        return text.format(**kwargs)
+    except (KeyError, IndexError, ValueError):
+        logger.warning("string %s does not take %s", key, sorted(kwargs))
+        return text

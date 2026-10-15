@@ -8,13 +8,12 @@ from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QFileDialog, QVBoxLayout
 
 from dolbytool.core.ffmpeg import MAX_FRAME_SIDE, frame_problem
+from dolbytool.core.i18n import t
 from dolbytool.core.project import PlanContext, Project, Track
 from dolbytool.core.renderer import renderer_problem
 from dolbytool.core.task import Step
 from dolbytool.features.soundfield.service import (
-    COLOR_MODES,
     TRACK_SPEAKERS,
-    VIEWS,
     SoundfieldSpec,
     SoundfieldVideo,
     soundfield_step,
@@ -24,23 +23,18 @@ from dolbytool.features.soundfield.service import (
 from dolbytool.ui import widgets
 from dolbytool.ui.feature import FeaturePanel
 
-GLB_FILTER = "glTF 二进制模型 (*.glb);;所有文件 (*)"
 DEFAULT_TRACKS = ("original",)
 
 
 class SoundfieldPanel(FeaturePanel):
     title_key = "soundfield.title"
     description_key = "soundfield.description"
-    _title = "声场视频"
     icon = "audio-speakers-symbolic"
-    _description = "将全景声动态对象在 3D 空间内的运动轨迹与电平可视化，输出带 Alpha 透明通道的 WebM (VP9) 视频"
     enabled_key = "do_soundfield"
     enabled_default = False
 
     def __init__(self, settings: QSettings, parent=None) -> None:
         super().__init__(settings, parent)
-        from dolbytool.core.i18n import t
-
         self.tracks = widgets.TrackList()
         self.tracks.changed.connect(self.changed)
 
@@ -84,9 +78,7 @@ class SoundfieldPanel(FeaturePanel):
             "object": t("option.color_mode.object"),
         }
         self.color_mode = self.combo("sf_color_mode", color_modes, d.color_mode)
-        self.drop = self.check(
-            "sf_drop", t("soundfield.drop"), d.drop, t("soundfield.drop_tip")
-        )
+        self.drop = self.check("sf_drop", t("soundfield.drop"), d.drop, t("soundfield.drop_tip"))
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -122,16 +114,18 @@ class SoundfieldPanel(FeaturePanel):
 
     def _browse_head(self) -> None:
         current = self._head()
-        from dolbytool.core.i18n import t
-
         start = str(current.parent) if current else str(Path.home())
-        path, _ = QFileDialog.getOpenFileName(self, t("soundfield.dialog_pick_head"), start, t("soundfield.filter_glb"))
+        path, _ = QFileDialog.getOpenFileName(
+            self, t("soundfield.dialog_pick_head"), start, t("soundfield.filter_glb")
+        )
         if path:
             self.head_edit.setText(path)
 
     def _selected(self, project: Project) -> list[Track]:
         keys = self.tracks.keys()
-        return [t for t in project.tracks if t.key in keys and t.key in TRACK_SPEAKERS]
+        return [
+            track for track in project.tracks if track.key in keys and track.key in TRACK_SPEAKERS
+        ]
 
     def spec(self) -> SoundfieldSpec:
         return SoundfieldSpec(
@@ -156,8 +150,6 @@ class SoundfieldPanel(FeaturePanel):
     # ---- hooks -----------------------------------------------------------------------
 
     def refresh(self, project: Project) -> None:
-        from dolbytool.core.i18n import t
-
         checked = self.tracks.keys()
         items = []
         for track in project.tracks:
@@ -170,8 +162,6 @@ class SoundfieldPanel(FeaturePanel):
         self.tracks.set_tracks(items, checked)
 
     def problem(self, ctx: PlanContext) -> str | None:
-        from dolbytool.core.i18n import t
-
         too_big = frame_problem(self.width_spin.value(), self.height_spin.value())
         if too_big:
             return too_big
@@ -186,8 +176,6 @@ class SoundfieldPanel(FeaturePanel):
         return renderer_problem("soundfield.mjs")
 
     def summary(self, ctx: PlanContext) -> str | None:
-        from dolbytool.core.i18n import t
-
         count = len(self._selected(ctx.project))
         return t("soundfield.summary", count=count) if count else None
 
@@ -197,8 +185,8 @@ class SoundfieldPanel(FeaturePanel):
         if audio is None or out is None or info is None:
             return []
         videos = [
-            SoundfieldVideo(t.key, t.label, soundfield_target(out, t.path))
-            for t in self._selected(project)
+            SoundfieldVideo(track.key, track.label, soundfield_target(out, track.path))
+            for track in self._selected(project)
         ]
         return [soundfield_step(audio, videos, self.spec(), info.duration, project.atmos_layout)]
 
