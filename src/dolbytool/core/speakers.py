@@ -13,8 +13,11 @@ note 2); in a 7.X layout they are the side pair and Lb and Rb the back.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from functools import cached_property
+
+logger = logging.getLogger(__name__)
 
 Row = tuple[float, tuple[str, ...]]
 
@@ -151,9 +154,9 @@ DEFAULT_ATMOS = BY_NAME["5.1.4"]
 _FFMPEG = {
     "stereo": "2.0", "2.0": "2.0",
     "5.1": "5.1", "5.1(side)": "5.1",
-    "5.1.2": "5.1.2", "5.1.2(back)": "5.1.2", "5.1.4": "5.1.4", "5.1.6": "5.1.6",
-    "7.1": "7.1", "7.1.2": "7.1.2", "7.1.4": "7.1.4", "7.1.6": "7.1.6",
-    "9.1.2": "9.1.2", "9.1.4": "9.1.4", "9.1.6": "9.1.6",
+    "5.1.2": "5.1.2", "5.1.2(back)": "5.1.2", "5.1.4": "5.1.4",
+    "7.1": "7.1", "7.1.2": "7.1.2", "7.1.4": "7.1.4",
+    "9.1.4": "9.1.4", "9.1.6": "9.1.6",
 }  # fmt: skip
 
 
@@ -170,4 +173,11 @@ def file_layout(ffmpeg_name: str, channels: int) -> SpeakerLayout | None:
     known = BY_NAME.get(_FFMPEG.get(ffmpeg_name, ""))
     if known is not None and len(known.channels) == channels:
         return known
-    return SURROUND_5_1 if channels >= len(SURROUND_5_1.channels) else None
+    if channels < len(SURROUND_5_1.channels):
+        return None
+    logger.warning(
+        "%d-channel layout %r is not one this tool knows: reading its first six channels as 5.1",
+        channels,
+        ffmpeg_name or "unknown",
+    )
+    return SURROUND_5_1

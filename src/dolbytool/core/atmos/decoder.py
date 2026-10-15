@@ -2,7 +2,8 @@
 
 ffmpeg decodes the channel-based core; everything past that is TS 103 420:
 the OAMD and JOC payloads are read from each syncframe, the objects are
-rebuilt in the QMF domain from the core's five main channels, and the room
+rebuilt in the QMF domain from the core's five main channels (JOC downmix
+configurations 0 and 3; the 7.X ones are refused), and the room
 renderer places them.  The core is decoded from the bare elementary stream so
 PCM frame k is syncframe k; the result is then cut to the container's own
 timeline, which an edit list may start a few frames in.
@@ -32,6 +33,7 @@ import soundfile as sf
 
 from dolbytool.core.cancel import CancellationToken
 from dolbytool.core.ffmpeg import run_ffmpeg
+from dolbytool.core.i18n import get_language, t
 from dolbytool.core.paths import cache_dir, content_key, work_root
 from dolbytool.core.pcm import AudioData, create_pcm_audio
 from dolbytool.core.speakers import DEFAULT_ATMOS, SpeakerLayout
@@ -59,7 +61,7 @@ __all__ = ["AtmosDecode", "AtmosError", "decode_atmos", "trace_atmos"]
 
 # How far into the elementary stream the container's first sample may lie.
 _MAX_LEAD_FRAMES = 16
-_MATCH_FRAMES = 4096
+_MATCH_SAMPLES = 4096
 # Stretches per worker, so a slow stretch does not leave the others idle, and
 # the shortest stretch worth the two frames of warm-up each one costs.
 _CHUNKS_PER_WORKER = 3
@@ -164,7 +166,7 @@ class _Decode:
                     token.raise_if_cancelled()
                     payloads = object_payloads(frame.data)
                     if OAMD_PAYLOAD not in payloads or JOC_PAYLOAD not in payloads:
-                        raise AtmosError(f"第 {k} 帧没有对象元数据，不是完整的全景声码流")
+                        raise AtmosError(t("atmos.no_metadata", frame=k))
                     oamd_payloads.append(payloads[OAMD_PAYLOAD])
                     joc_payloads.append(payloads[JOC_PAYLOAD])
                     starts_chunk = (
@@ -174,9 +176,14 @@ class _Decode:
                     try:
                         meta = oamd.decode(payloads[OAMD_PAYLOAD])
                     except BitstreamError as error:
-                        raise AtmosError(f"第 {k} 帧的全景声元数据无法解析：{error}") from error
+                        raise AtmosError(t("atmos.bad_metadata", frame=k, error=error)) from error
                     if renderer is None:
                         renderer = Renderer(len(joc_objects(meta)), self.layout)
+                        if meta.program.isf_objects:
+                            logger.warning(
+                                "%d ISF objects carry no position here and play from the room centre",
+                                meta.program.isf_objects,
+                            )
                         if self.adm_path is not None:
                             adm = AdmFile(
                                 self.adm_path,
@@ -185,11 +192,13 @@ class _Decode:
                                 meta.program,
                                 meta.object_count,
                             )
+                    elif len(joc_objects(meta)) != renderer.current.shape[0]:
+                        raise AtmosError(t("atmos.object_count_changed", frame=k))
                     if adm is not None and (
                         meta.object_count != adm.objects
                         or meta.program.bed_labels != adm.program.bed_labels
                     ):
-                        raise AtmosError("全景声对象布局中途改变，ADM 无法容纳")
+                        raise AtmosError(t("atmos.adm_layout_changed"))
                     if starts_chunk:
                         snapshots.append((oamd_state, renderer.state() if k else None))
                     tracer.metadata(k, meta)
@@ -261,7 +270,9 @@ class _Decode:
     @contextmanager
     def _pool(self) -> Iterator[multiprocessing.pool.Pool]:
         # spawn: the caller may be a thread of a Qt application, which must not fork
-        pool = multiprocessing.get_context("spawn").Pool(self.workers, init_worker)
+        pool = multiprocessing.get_context("spawn").Pool(
+            self.workers, init_worker, (get_language(),)
+        )
         try:
             yield pool
             pool.close()
@@ -273,7 +284,7 @@ class _Decode:
 _TRACE_SUFFIX = ".trace.pickle"
 _KEEP_TRACES = 16
 # bumped whenever the shares a layout gets change, so older traces go unread
-_TRACE_VERSION = 2
+_TRACE_VERSION = 3
 
 
 def _trace_path(source: Path, layout: SpeakerLayout) -> Path:
@@ -292,7 +303,7 @@ def _cached_trace(source: Path, layout: SpeakerLayout) -> ObjectTrace | None:
         logger.warning("atmos: discarding unreadable trace cache %s", path, exc_info=True)
         path.unlink(missing_ok=True)
         return None
-    fits = isinstance(trace, ObjectTrace) and getattr(trace, "speakers", None) == layout.channels
+    fits = isinstance(trace, ObjectTrace) and trace.speakers == layout.channels
     return trace if fits else None
 
 
@@ -330,16 +341,16 @@ def _prepare(source: Path, token: CancellationToken) -> Iterator[tuple[list, Pat
             try:
                 all_frames = list(syncframes(stream.read_bytes()))
             except BitstreamError as error:
-                raise AtmosError(f"E-AC-3 码流无法切帧：{error}") from error
+                raise AtmosError(t("atmos.bad_syncframes", error=error)) from error
             if not all_frames:
-                raise AtmosError("全景声码流中没有音频帧")
+                raise AtmosError(t("atmos.no_frames"))
 
             # Atmos JOC and OAMD metadata are carried in independent substream 0.
             # If dependent substreams (e.g. 7.1) or secondary substreams are present,
             # filter to independent substream 0 so FFmpeg decodes the 5.1 core for JOC reconstruction.
             frames = [f for f in all_frames if f.stream_type == INDEPENDENT and f.substream == 0]
             if not frames:
-                raise AtmosError("全景声码流中没有独立主子流 (substream 0)")
+                raise AtmosError(t("atmos.no_substream"))
             if len(frames) != len(all_frames):
                 logger.info(
                     "atmos: filtered %d frames (dependent/secondary substreams) -> %d independent substream 0 frames",
@@ -353,7 +364,7 @@ def _prepare(source: Path, token: CancellationToken) -> Iterator[tuple[list, Pat
         stream.unlink()
         with sf.SoundFile(core) as pcm, sf.SoundFile(reference) as ref:
             if pcm.channels != CORE_CHANNELS or pcm.frames != len(frames) * FRAME:
-                raise AtmosError(f"核心解码与码流对不上：{pcm.channels} 声道，{pcm.frames} 采样")
+                raise AtmosError(t("atmos.core_mismatch", channels=pcm.channels, frames=pcm.frames))
             start = _container_offset(pcm, ref)
             rate, length = pcm.samplerate, ref.frames
         reference.unlink()
@@ -374,10 +385,10 @@ def _container_offset(pcm: sf.SoundFile, ref: sf.SoundFile) -> int:
     if probe_start is None:
         return 0
     ref.seek(probe_start)
-    probe = ref.read(_MATCH_FRAMES, dtype="float32", always_2d=True)[:, 0]
+    probe = ref.read(_MATCH_SAMPLES, dtype="float32", always_2d=True)[:, 0]
     reach = _MAX_LEAD_FRAMES * FRAME
     pcm.seek(probe_start)
-    span = pcm.read(reach + _MATCH_FRAMES, dtype="float32", always_2d=True)[:, 0]
+    span = pcm.read(reach + _MATCH_SAMPLES, dtype="float32", always_2d=True)[:, 0]
     if span.size < probe.size:
         return 0
     windows = np.lib.stride_tricks.sliding_window_view(span, probe.size)
@@ -385,8 +396,10 @@ def _container_offset(pcm: sf.SoundFile, ref: sf.SoundFile) -> int:
     for offset in np.flatnonzero(windows[:, 0] == probe[0]):
         if np.array_equal(windows[offset], probe):
             return int(offset)
-    # Not bit-identical after all: fall back on the best correlation.
-    offset = int(np.argmax(windows @ probe))
+    # Not bit-identical after all: fall back on the best normalised correlation,
+    # so a loud stretch of the span does not win over the matching one.
+    energy = np.sqrt(np.einsum("ij,ij->i", windows, windows)) + 1e-12
+    offset = int(np.argmax((windows @ probe) / energy))
     logger.warning("atmos: no exact timeline match, correlating (offset %d)", offset)
     return offset
 
@@ -395,9 +408,9 @@ def _loudest_block(ref: sf.SoundFile) -> int | None:
     """Start of the loudest match-sized block in the first minute, None if all silent."""
     ref.seek(0)
     head = ref.read(min(ref.frames, 60 * ref.samplerate), dtype="float32", always_2d=True)[:, 0]
-    usable = head.size - head.size % _MATCH_FRAMES
+    usable = head.size - head.size % _MATCH_SAMPLES
     if usable == 0:
         return None
-    energy = np.square(head[:usable].reshape(-1, _MATCH_FRAMES)).sum(axis=1)
+    energy = np.square(head[:usable].reshape(-1, _MATCH_SAMPLES)).sum(axis=1)
     best = int(np.argmax(energy))
-    return best * _MATCH_FRAMES if energy[best] > 0 else None
+    return best * _MATCH_SAMPLES if energy[best] > 0 else None

@@ -25,7 +25,8 @@ _k = np.arange(BANDS)
 _ANALYSIS = np.exp(1j * np.pi * (_k[:, None] + 0.5) * (_j[None, :] - 0.5) / BANDS)
 # v = Re(N . Q) (clause 7.3 step 2), with the 1/n folded in.  The text of the
 # spec reads (2j - 2n - 1) here, which does not invert the analysis above;
-# (2j - 4n + 1) does, to within rounding, with the delay of DELAY samples.
+# (2j - 4n + 1) does, with the delay of DELAY samples and the prototype's own
+# near-perfect-reconstruction error (about -62 dB, not rounding).
 _SYNTHESIS = (
     np.exp(1j * np.pi / (4 * BANDS) * (2 * _k[None, :] + 1) * (2 * _j[:, None] - 4 * BANDS + 1))
     / BANDS

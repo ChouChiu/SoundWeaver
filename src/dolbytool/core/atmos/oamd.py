@@ -166,7 +166,6 @@ class Frame:
 @dataclass(slots=True)
 class ObjectState:
     gain_db: float = -math.inf
-    priority: float = 0.0
     render: Render = field(default_factory=Render)
 
 
@@ -196,7 +195,10 @@ def _program(bits: BitReader) -> Program:
                     if mask & (1 << (16 - index))
                 )
     if content & 0b0100:
-        isf = ISF_OBJECTS[bits.read(3)]
+        isf_idx = bits.read(3)
+        if isf_idx >= len(ISF_OBJECTS):
+            raise BitstreamError(f"reserved intermediate_spatial_format_idx {isf_idx}")
+        isf = ISF_OBJECTS[isf_idx]
     if content & 0b0010:
         dynamic = bits.read(5)
         if dynamic == 0x1F:
@@ -236,6 +238,8 @@ class OamdDecoder:
         program = _program(bits)
         if program.dynamic_objects < 0:  # dynamic-only program: the rest are dynamic
             program = replace(program, dynamic_objects=count - len(program.bed_labels))
+        if program.anchored > count:
+            raise BitstreamError(f"{program.anchored} bed and ISF objects in a program of {count}")
         while len(self.state) < count:
             self.state.append(ObjectState())
         alternate = bits.flag()
@@ -262,12 +266,13 @@ class OamdDecoder:
 
     def _object_element(self, bits: BitReader, frame: Frame) -> None:
         code = bits.read(2)
-        offset = (0, None, None, None)[code]
-        if code == 1:
+        if code == 0:
+            offset = 0
+        elif code == 1:
             offset = SAMPLE_OFFSETS[bits.read(2)]
         elif code == 2:
             offset = bits.read(5)
-        elif code == 3:
+        else:
             raise BitstreamError("reserved sample_offset_code")
         timing = []
         for _ in range(bits.read(3) + 1):
@@ -290,7 +295,7 @@ class OamdDecoder:
         inactive = bits.flag()
         basic = 0 if inactive else (1 if blk == 0 else bits.read(2))
         if basic == 0:
-            state.gain_db, state.priority = -math.inf, 0.0
+            state.gain_db = -math.inf
         elif basic in (1, 3):
             flags = 0b11 if basic == 1 else bits.read(2)
             if flags & 0b10:
@@ -304,8 +309,8 @@ class OamdDecoder:
                     state.gain_db = float(15 - g if g < 15 else 14 - g)
                 else:  # same as the previous object in this update
                     state.gain_db = self.state[obj - 1].gain_db if obj else 0.0
-            if flags & 0b01:
-                state.priority = 1.0 if bits.flag() else bits.read(5) / 32
+            if flags & 0b01 and not bits.flag():  # object_priority: the renderer has no use for it
+                bits.skip(5)
         render = 0 if inactive or anchored else (1 if blk == 0 else bits.read(2))
         if render == 0:
             state.render = Render()

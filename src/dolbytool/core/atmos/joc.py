@@ -77,6 +77,8 @@ def parse(payload: bytes) -> JocFrame:
     clip_x, clip_y = bits.read(3), bits.read(5)
     clipgain = (1 + clip_y / 32) * 2.0 ** (clip_x - 4)
     seq_count = bits.read(10)
+    if ext_config:
+        raise BitstreamError(f"reserved joc_ext_config_idx {ext_config}")
 
     info = []
     for _ in range(objects):
@@ -103,9 +105,12 @@ def parse(payload: bytes) -> JocFrame:
             for dp in range(dpoints):
                 # Pseudocode 2: one active channel per band, both it and its
                 # value coded as differences from the band below.  None of the
-                # masters at hand use sparse mode, so this path is as the spec
-                # reads, untested against a stream.
+                # masters at hand use sparse mode: the fill value and the band
+                # each value is a difference from are as the spec reads, and
+                # untested against a stream.
                 idx = [bits.read(3)]
+                if idx[0] >= channels:
+                    raise BitstreamError(f"sparse channel {idx[0]} of a {channels}-channel downmix")
                 idx += [_HUFF["IDX", channels].decode(bits) for _ in range(1, bands)]
                 vec = [_HUFF["VEC", quant_idx].decode(bits) for _ in range(bands)]
                 offset = 100 if quant_idx else 50
@@ -123,8 +128,6 @@ def parse(payload: bytes) -> JocFrame:
             steps = np.array(deltas, dtype=np.int64).reshape(dpoints, channels, bands)
             q = (offset + np.cumsum(steps, axis=2)) % nquant
         params.append(ObjectParams(bands, sparse, quant_idx, steep, offsets, q))
-    if ext_config:
-        raise BitstreamError(f"reserved joc_ext_config_idx {ext_config}")
     return JocFrame(dmx_config, channels, objects, clipgain, seq_count, params)
 
 

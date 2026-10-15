@@ -28,18 +28,14 @@ def container_span(index: int, samples: int, first: int, last: int) -> slice:
     return slice(lo - a, max(lo, hi) - a)
 
 
-def speaker_feeds(f: RenderedFrame, lfe: int | None = None) -> np.ndarray:
-    """The render of the frame's span, (speakers, samples) as float32; `lfe` is the LFE's channel."""
-    span = f.span
-    if span.stop - span.start < f.essence.shape[1]:
-        gains = f.gains[:, span, :]
-        essence = f.essence[:, span]
-        speakers = np.einsum("ots,ot->ts", gains, essence)
-        if lfe is not None and 0 <= lfe < speakers.shape[1]:
-            speakers[:, lfe] = f.lfe[span]
-        return speakers.T.astype(np.float32)
+def speaker_feeds(f: RenderedFrame, lfe: int | None) -> np.ndarray:
+    """The render of the frame's span, (speakers, samples) as float32.
 
-    speakers = np.einsum("ots,ot->ts", f.gains, f.essence)
-    if lfe is not None and 0 <= lfe < speakers.shape[1]:
-        speakers[:, lfe] = f.lfe
-    return speakers[span].T.astype(np.float32)
+    `lfe` is the layout's LFE channel, which takes the core's LFE as it is; a
+    layout without one (2.0) leaves the LFE out, as a stereo downmix does.
+    """
+    span = f.span
+    speakers = np.einsum("ots,ot->ts", f.gains[:, span], f.essence[:, span])
+    if lfe is not None:
+        speakers[:, lfe] = f.lfe[span]
+    return speakers.T.astype(np.float32)

@@ -12,12 +12,14 @@ from __future__ import annotations
 
 import ctypes
 import platform
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import soundfile as sf
 
+from dolbytool.core.i18n import set_language, t
 from dolbytool.core.speakers import SpeakerLayout
 
 from . import joc
@@ -35,17 +37,17 @@ CORE_CHANNELS = 6
 _JOC_INPUTS = [0, 1, 2, 4, 5]
 _SURROUNDS = slice(3, 5)
 _LFE = 3
-# joc_dmx_config_idx values per ETSI TS 103 420 Table 47:
-# 0: 5-channel downmix (no phase shift)
-# 1: 7-channel downmix (no phase shift)
-# 2: 7-channel downmix with Lb/Rb 90-degree phase shift
-# 3: 5-channel downmix with Ls/Rs 90-degree phase shift
-# 4: 7-channel downmix with Ls/Rs and Lb/Rb 90-degree phase shift
-SUPPORTED_CONFIGS = (0, 1, 2, 3, 4)
-_PHASE_SHIFTED = (3, 4)
-# The encoder delays surround channels by 90 degrees; a panned source shows up in L
-# and Ls a quarter cycle apart, and multiplying the surround subbands by -j
-# brings it back in phase before the real-valued JOC matrix combines them.
+# joc_dmx_config_idx values this decoder handles (TS 103 420 table 47): a 5.X
+# downmix, plain (0) or with Ls and Rs phase-shifted by 90 degrees (3).  The
+# 7.X downmixes (1, 2, 4) need the two extra channels of the dependent
+# substream, which `eac3.syncframes` does not decode.
+SUPPORTED_CONFIGS = (0, 3)
+_PHASE_SHIFTED = (3,)
+# The encoder puts the surrounds a quarter cycle off the front channels, so a
+# source panned between L and Ls shows up in the two out of phase.  In this
+# QMF bank a 90-degree delay shows up as a factor of -j in every band; the
+# factor here was chosen against real masters, where it brings L and Ls back
+# in phase before the real-valued JOC matrix combines them.
 _UNSHIFT = -1j
 
 
@@ -86,7 +88,7 @@ class _Chunk:
         self.synthesis: Synthesis | None = None
         self.objects = np.zeros((0, 0))  # rebuilt samples not yet rendered
         self.skip = 0
-        self.queue: list[tuple[int, Frame, np.ndarray]] = []  # (frame, metadata, LFE)
+        self.queue: deque[tuple[int, Frame, np.ndarray]] = deque()  # (frame, metadata, LFE)
         self.renderer = Renderer.restore(job.gains, job.layout) if job.gains is not None else None
         self.oamd = OamdDecoder(job.oamd_state)
         self.measured: list[Measure] = []
@@ -104,11 +106,9 @@ class _Chunk:
         try:
             params = joc.parse(self.job.joc[k - self.job.joc_from])
         except BitstreamError as error:
-            raise AtmosError(f"第 {k} 帧的全景声元数据无法解析：{error}") from error
+            raise AtmosError(t("atmos.bad_metadata", frame=k, error=error)) from error
         if params.dmx_config not in SUPPORTED_CONFIGS:
-            raise AtmosError(
-                f"暂不支持这种全景声下混配置（joc_dmx_config_idx={params.dmx_config}）"
-            )
+            raise AtmosError(t("atmos.unsupported_downmix", config=params.dmx_config))
         return params
 
     def read(self, k: int) -> np.ndarray:
@@ -124,7 +124,7 @@ class _Chunk:
             try:
                 meta = self.oamd.decode(job.oamd[k - job.start])
             except BitstreamError as error:
-                raise AtmosError(f"第 {k} 帧的全景声元数据无法解析：{error}") from error
+                raise AtmosError(t("atmos.bad_metadata", frame=k, error=error)) from error
             params = self.params(k)
             core = self.read(k)
             self.queue.append((k, meta, core[_LFE]))
@@ -135,7 +135,7 @@ class _Chunk:
             # Run silence through to flush the rest of the last frame out of the filter bank.
             self.rebuild(self.params(job.total - 1), np.zeros((len(_JOC_INPUTS), FRAME)))
         if self.queue:
-            raise AtmosError("全景声解码没有对齐到帧边界")
+            raise AtmosError(t("atmos.misaligned"))
         if self.adm is not None:
             self.adm.close()
         if self.speakers is not None:
@@ -159,23 +159,21 @@ class _Chunk:
             self.synthesis = Synthesis(params.objects)
             self.objects = np.zeros((params.objects, 0))
         elif params.objects != self.objects.shape[0]:
-            raise AtmosError("全景声对象数中途改变，暂不支持")
+            raise AtmosError(t("atmos.joc_object_count_changed"))
         q = self.analysis(downmix)
         if params.dmx_config in _PHASE_SHIFTED:
             q[_SURROUNDS] *= _UNSHIFT
-        if params.dmx_config in (2, 4) and q.shape[0] >= 7:
-            q[5:7] *= _UNSHIFT
         rebuilt = self.synthesis(self.joc.reconstruct(params, q) * params.clipgain)
         rebuilt, self.skip = rebuilt[:, self.skip :], 0
         self.objects = np.concatenate([self.objects, rebuilt], axis=1)
         while self.queue and self.objects.shape[1] >= FRAME:
-            self.render(*self.queue.pop(0))
+            self.render(*self.queue.popleft())
 
     def render(self, k: int, meta: Frame, lfe: np.ndarray) -> None:
         if self.renderer is None:
             self.renderer = Renderer(self.objects.shape[0], self.job.layout)
         if len(joc_objects(meta)) != self.objects.shape[0]:
-            raise AtmosError("全景声对象元数据与 JOC 对象数对不上")
+            raise AtmosError(t("atmos.object_mismatch"))
         gains = self.renderer.gains(meta, FRAME)
         job = self.job
         f = RenderedFrame(
@@ -201,13 +199,14 @@ class _Chunk:
 _M_TRIM_THRESHOLD, _M_MMAP_THRESHOLD = -1, -3
 
 
-def init_worker() -> None:
-    """Keep freed arrays in the worker's heap.
+def init_worker(language: str) -> None:
+    """Speak the app's language, and keep freed arrays in the worker's heap.
 
     Every frame allocates and frees arrays of a few hundred kB; glibc maps the
     larger ones afresh and hands freed memory straight back, so a fresh worker
     took a page fault per 4 kB touched, a tenth of its time spent in the kernel.
     """
+    set_language(language)
     if platform.libc_ver()[0] == "glibc":
         libc = ctypes.CDLL(None)
         libc.mallopt(_M_MMAP_THRESHOLD, 256 << 20)

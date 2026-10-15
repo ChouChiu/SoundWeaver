@@ -67,8 +67,8 @@ _BED_CHANNELS = {
     "Rrs": ("RoomCentricRightRearSurround", "RC_Rrs", (1.0, -1.0, 0.0)),
     "Lts": ("RoomCentricLeftTopSurround", "RC_Lts", (-1.0, 0.0, 1.0)),
     "Rts": ("RoomCentricRightTopSurround", "RC_Rts", (1.0, 0.0, 1.0)),
-    # Table 2-14: Dolby Atmos Master ADM Profile specifies (-1.0, -1.0, 0.0) for both RC_Ls/RC_Rs
-    # and RC_Lrs/RC_Rrs in room-centric Cartesian space (MediaInfo conforms via alias tolerance).
+    # Table 2-14 of the Dolby Atmos Master ADM Profile puts the 5.X surrounds RC_Ls/RC_Rs
+    # at the back corners, where the 7.X rear pair RC_Lrs/RC_Rrs also stands.
     "Ls": ("RoomCentricLeftSurround", "RC_Ls", (-1.0, -1.0, 0.0)),
     "Rs": ("RoomCentricRightSurround", "RC_Rs", (1.0, -1.0, 0.0)),
 }
@@ -126,7 +126,7 @@ def _bed(labels: tuple[str, ...]) -> tuple[str, dict[int, str]]:
         fits = {index: _assignment(labels[index], seven, backs) for index in held}
         if all(channel in channels for channel in fits.values()):
             return name, fits  # type: ignore[return-value]
-    raise AssertionError("7.1.2 holds every bed channel it took")
+    raise AssertionError("unreachable: the largest bed set holds every channel taken")
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,7 +170,7 @@ def _timecode(seconds: float) -> str:
 
 
 def _number(value: float) -> str:
-    """A position in decimal without leading zeros (section 2.1), and no negative zero."""
+    """A position as a plain decimal with four places (section 2.1), and no negative zero."""
     return f"{value + 0.0:.4f}".replace("-0.0000", "0.0000")
 
 

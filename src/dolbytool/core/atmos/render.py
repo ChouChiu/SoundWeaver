@@ -3,10 +3,11 @@
 A room panner: every speaker sits in a row of the unit room (TS 103 420
 room-anchored coordinates), and an object is panned with constant power along
 x within a row, along y between the two rows around it, and along z between
-the floor and the ceiling.  This is the allocentric panner of ITU-R BS.2127
-clause 7.3.6 for a point source.  A layout with a single row of heights takes
-every elevated object on that row; one without heights folds them to the
-floor.
+the floor and the ceiling.  It follows the separable idea of the allocentric
+panner of ITU-R BS.2127 clause 7.3.6, but assumes the speakers of a row are
+evenly spaced and ignores object size.  A layout with a single row of heights
+takes every elevated object on that row; one without heights folds them to
+the floor.
 
 To a layout without heights the stream's trims apply (`_trim`), as they do
 when Dolby's encoder renders the objects to the 5.1 core.
@@ -50,6 +51,8 @@ def _rows(y: float, rows: tuple[Row, ...]) -> list[tuple[float, tuple[str, ...]]
     y = min(rows[-1][0], max(rows[0][0], y))
     i = next(i for i in range(len(rows) - 1) if y <= rows[i + 1][0])
     (near, a_names), (far, b_names) = rows[i], rows[i + 1]
+    if far <= near:
+        raise ValueError(f"speaker rows at y={near} and y={far} are not in front-to-back order")
     a, b = _pair((y - near) / (far - near))
     return [(a, a_names), (b, b_names)]
 
@@ -86,97 +89,68 @@ def _trim(layout: SpeakerLayout, g: np.ndarray, z: float, trim: Levels | None) -
     return g * factor
 
 
+# Speaker groups the zone constraints of TS 103 420 (zone_constraints_idx) name.
+# Not checked against a master that uses them: none of the test material does.
+_SCREEN = {"L", "R", "C"}
+_SURROUND_PAIRS = {"Ls", "Rs", "Lb", "Rb"}
+
+
 @lru_cache(maxsize=64)
 def _zone_mask(layout: SpeakerLayout, zone: int) -> np.ndarray:
-    """Allowed speaker mask for zone_constraints_idx (ETSI TS 103 420 Table 20 & Table A.7)."""
-    mask = np.ones(len(layout.channels), dtype=bool)
-    if zone == 0:
-        mask.flags.writeable = False
-        return mask
+    """Which speakers an object of zone constraint `zone` may use; read-only."""
     backs = layout.has("Lb")
-    screen = {"L", "R", "C"}
+    # in a 5.X layout Ls and Rs are the back of the room, in a 7.X one the sides
     side = ({"Ls", "Rs"} if backs else set()) | {"Lw", "Rw"}
-    back = {"Lb", "Rb"} | ({"Ls", "Rs"} if not backs else set())
-    surround = {"Ls", "Rs", "Lb", "Rb"}
-    lfe_set = {"LFE"} if layout.has("LFE") else set()
-
-    if zone == 1:  # Back excluded
-        for name in back:
-            if name in layout.index:
-                mask[layout.index[name]] = False
-    elif zone == 2:  # Side excluded
-        for name in side:
-            if name in layout.index:
-                mask[layout.index[name]] = False
-    elif zone == 3:  # Centre-and-back included
-        allowed = {"C"} | back | set(layout.heights) | lfe_set
-        for name in layout.channels:
-            if name not in allowed:
-                mask[layout.index[name]] = False
-    elif zone == 4:  # Screen only
-        allowed = screen | set(layout.heights) | lfe_set
-        for name in layout.channels:
-            if name not in allowed:
-                mask[layout.index[name]] = False
-    elif zone == 5:  # Surround only
-        allowed = surround | set(layout.heights) | lfe_set
-        for name in layout.channels:
-            if name not in allowed:
-                mask[layout.index[name]] = False
+    back = {"Lb", "Rb"} if backs else {"Ls", "Rs"}
+    names = set(layout.channels)
+    heights = set(layout.heights)
+    allowed = {
+        1: names - back,
+        2: names - side,
+        3: {"C"} | back | heights,
+        4: _SCREEN | heights,
+        5: _SURROUND_PAIRS | heights,
+    }.get(zone, names)
+    mask = np.array([name in allowed for name in layout.channels])
     mask.flags.writeable = False
     return mask
 
 
-def _place_spread(
-    layout: SpeakerLayout, x: float, y: float, z: float, size: tuple[float, float, float]
-) -> np.ndarray:
-    w, d, h = size
-    if not (w > 0 or d > 0 or h > 0):
-        return _place(layout, x, y, z)
-    # ITU-R BS.2127 clause 7.3.7: distribute energy across the extent of the object
-    hx, hy, hz = w * 0.5, d * 0.5, h * 0.5
-    offsets = []
-    if hx > 0:
-        offsets.extend([(max(0.0, x - hx), y, z), (min(1.0, x + hx), y, z)])
-    if hy > 0:
-        offsets.extend([(x, max(0.0, y - hy), z), (x, min(1.0, y + hy), z)])
-    if hz > 0:
-        offsets.extend([(x, y, max(0.0, z - hz)), (x, y, min(1.0, z + hz))])
-    g_center = _place(layout, x, y, z)
-    if not offsets:
-        return g_center
-    spread_factor = min(1.0, max(w, d, h))
-    w_center = 1.0 - 0.5 * spread_factor
-    w_periph = (0.5 * spread_factor) / len(offsets)
-    energy = w_center * (g_center**2)
-    for px, py, pz in offsets:
-        energy += w_periph * (_place(layout, px, py, pz) ** 2)
-    total = energy.sum()
-    return np.sqrt(energy / total) if total > 0 else g_center
+def _nearest(layout: SpeakerLayout, mask: np.ndarray, x: float, y: float, z: float) -> np.ndarray:
+    """All of the object on the allowed speaker closest to it."""
+    positions = {s: p for s, p in layout.positions.items() if mask[layout.index[s]]}
+    nearest = min(
+        positions, key=lambda s: sum((p - q) ** 2 for p, q in zip(positions[s], (x, y, z)))
+    )
+    g = np.zeros(len(layout.channels))
+    g[layout.index[nearest]] = 1.0
+    return g
 
 
 @lru_cache(maxsize=4096)
 def object_gains(layout: SpeakerLayout, render: Render, trim: Levels | None = None) -> np.ndarray:
+    """Speaker gains of one object update; shared, so read-only.
+
+    A zone constraint takes the excluded speakers out and scales what is left
+    back to the object's power; an object that falls wholly on excluded
+    speakers moves to the nearest allowed one instead of going silent.
+    """
     x, y, z = render.position
     if not render.elevation:
         z = 0.0
     mask = _zone_mask(layout, render.zone)
+    if not mask.any():
+        # the layout has none of the zone's speakers: ignore the constraint
+        mask = _zone_mask(layout, 0)
     if render.snap:
-        positions = layout.positions
-        candidates = [s for s in positions if mask[layout.index[s]]] or list(positions.keys())
-        nearest = min(
-            candidates, key=lambda s: sum((p - q) ** 2 for p, q in zip(positions[s], (x, y, z)))
-        )
-        g = np.zeros(len(layout.channels))
-        g[layout.index[nearest]] = 1.0
+        g = _nearest(layout, mask, x, y, z)
     else:
-        g = _place_spread(layout, x, y, z, render.size)
-        if render.zone != 0:
-            g = g * mask
-            power = np.sum(g**2)
-            if power > 0:
-                g = g / np.sqrt(power)
-    return _trim(layout, g, z, trim)
+        g = _place(layout, x, y, z) * mask
+        power = np.sum(g**2)
+        g = g / np.sqrt(power) if power > 0 else _nearest(layout, mask, x, y, z)
+    g = _trim(layout, g, z, trim)
+    g.flags.writeable = False
+    return g
 
 
 @lru_cache(maxsize=256)
@@ -284,8 +258,8 @@ class Renderer:
 
     def _envelope(self, o: int, events, samples: int, env: np.ndarray | None) -> None:
         current, target = self.current[o], self.target[o]
-        settled = self.remaining[o] == 0 or (current is target or np.array_equal(current, target))
-        if settled and all(g is current or np.array_equal(g, current) for _, _, g in events):
+        settled = self.remaining[o] == 0 or np.array_equal(current, target)
+        if settled and all(np.array_equal(g, current) for _, _, g in events):
             # nothing moves this frame: every sample holds the current gains
             if env is not None:
                 env[:] = current
@@ -328,4 +302,6 @@ class Renderer:
 def joc_objects(frame: Frame) -> list[int]:
     """OAMD indices of the objects JOC carries: all but the LFE channels, which bypass it."""
     labels = frame.program.bed_labels
-    return [i for i in range(frame.object_count) if i >= len(labels) or not labels[i].startswith("LFE")]
+    return [
+        i for i in range(frame.object_count) if i >= len(labels) or not labels[i].startswith("LFE")
+    ]

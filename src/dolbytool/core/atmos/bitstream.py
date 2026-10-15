@@ -16,6 +16,8 @@ class BitReader:
 
     def __init__(self, data: bytes, bit_pos: int = 0, bit_end: int | None = None) -> None:
         end = len(data) * 8 if bit_end is None else bit_end
+        if not 0 <= bit_pos <= end <= len(data) * 8:
+            raise BitstreamError(f"bits {bit_pos}..{end} lie outside {len(data)} bytes")
         first, last = bit_pos >> 3, (end + 7) >> 3
         # positions stay absolute in `data`; only the bytes in [pos, end) are converted
         self._value = int.from_bytes(data[first:last], "big")
@@ -46,6 +48,8 @@ class BitReader:
         return value - (1 << n) if value >> (n - 1) else value
 
     def skip(self, n: int) -> None:
+        if self.pos + n > self.end:
+            raise BitstreamError("skip past the end of the field")
         self.pos += n
 
     def read_bytes(self, count: int) -> bytes:
@@ -61,7 +65,11 @@ class BitReader:
             value = (value << n) + (1 << n)
 
     def variable_bits_max(self, n: int, max_groups: int) -> int:
-        """TS 103 420 clause 5.5.1: variable_bits capped at `max_groups` groups."""
+        """TS 103 420 clause 5.5.1: variable_bits capped at `max_groups` groups.
+
+        Line for line the spec's pseudocode, whose loop checks the cap only after
+        reading a group, so up to `max_groups + 1` groups are read.
+        """
         value = self.read(n)
         groups = 1
         more = self.flag()
