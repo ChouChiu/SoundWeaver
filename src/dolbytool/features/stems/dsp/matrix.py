@@ -17,8 +17,8 @@ from dolbytool.core.pcm import BLOCK_FRAMES, AudioData
 
 logger = logging.getLogger(__name__)
 
-# Every layout of `core.speakers` starts this way, as WAVE_FORMAT_EXTENSIBLE
-# orders it; the rest of its channels are found by name.
+# Every surround layout of `core.speakers` (six channels and up) starts this
+# way; the rest of its channels are found by name.
 FRONT_LEFT, FRONT_RIGHT, FRONT_CENTER, LOW_FREQUENCY = range(4)
 # channel indices on each side of the room, (left, right)
 Sides = tuple[Sequence[int], Sequence[int]]
@@ -32,8 +32,10 @@ LFE_DOWNMIX_COEFFICIENT = 10.0 ** (10.0 / 20.0) / 2.0
 # may be.  An encoder band-limits the LFE on its own, and the filter delays it
 # against the mains - 3.7 ms on an E-AC-3 master, which puts 100 Hz, the body
 # of a kick, in opposite phase, so adding it as it stands cancels the punch.
+# The search stays within one period at the top of the band: a wider one finds
+# the same match a whole cycle off, which is in phase at one frequency only.
 LFE_BAND_HZ = (20.0, 120.0)
-LFE_MAX_LAG_SECONDS = 0.02
+LFE_MAX_LAG_SECONDS = 0.008
 # Long enough to resolve the LFE band in a few bins; one block holds sixteen.
 _LAG_FRAME = 16_384
 # The level a stem is held under, so a stem that would pass full scale is
@@ -197,8 +199,7 @@ def downmix_into(
     where a bound from the channel peaks would hold the whole group down for a
     coincidence that never happens.
     """
-    centre = source.samples[FRONT_CENTER] if source.channels > FRONT_CENTER else None
-    _fold_into(destination, source, centre, sides, token, lfe_lag, front=True)
+    _fold_into(destination, source, source.samples[FRONT_CENTER], sides, token, lfe_lag)
 
 
 def downmix_instrumental_into(
@@ -208,31 +209,13 @@ def downmix_instrumental_into(
     token: CancellationToken,
     lfe_lag: int = 0,
 ) -> None:
-    """Fold a surround master to stereo instrumental (BS.775 without the centre lead vocal)."""
-    _fold_into(destination, source, None, sides, token, lfe_lag, front=True)
+    """The fold-down of `downmix_into` without the centre channel, where the lead vocal is.
 
-
-def surround_into(
-    destination: AudioData,
-    source: AudioData,
-    shared_centre: AudioData,
-    surrounds: Sides,
-    token: CancellationToken,
-    lfe_lag: int = 0,
-) -> None:
-    """The surrounds (any backs among them) and the LFE, with what of the centre they share.
-
-    The surrounds alone are ambience twenty decibels under the kick, and the
-    LFE is where that kick is.  The centre carries the lead and the backing
-    vocals in one channel; the backing vocals are the part a mix spreads to
-    the rear as well, so the centre comes in as `shared_centre` - its share
-    predicted from the surrounds - rather than as it stands.  The front pair
-    stays out: it is where the lead leaks.  The sum can pass full scale; the
-    caller holds it under with `fit_group`.
+    Only the discrete centre is left out: whatever of the vocal the master
+    also puts in the front pair (a wide or spread object, a reverb return)
+    stays in.
     """
-    _fold_into(
-        destination, source, shared_centre.samples[0], surrounds, token, lfe_lag, front=False
-    )
+    _fold_into(destination, source, None, sides, token, lfe_lag)
 
 
 def _fold_into(
@@ -242,28 +225,17 @@ def _fold_into(
     sides: Sides,
     token: CancellationToken,
     lfe_lag: int,
-    *,
-    front: bool,
 ) -> None:
     left_side, right_side = list(sides[0]), list(sides[1])
-    has_lfe = source.channels > LOW_FREQUENCY
-    lfe = source.samples[LOW_FREQUENCY] if has_lfe else None
+    lfe = source.samples[LOW_FREQUENCY]
     for start in range(0, destination.frames, BLOCK_FRAMES):
         token.raise_if_cancelled()
         end = min(start + BLOCK_FRAMES, destination.frames)
         block = source.samples[:, start:end]
-        shared = (
-            LFE_DOWNMIX_COEFFICIENT * _shifted(lfe, start, end, lfe_lag)
-            if lfe is not None
-            else 0.0
-        )
+        shared = LFE_DOWNMIX_COEFFICIENT * _shifted(lfe, start, end, lfe_lag)
         if centre is not None:
             shared = shared + DOWNMIX_COEFFICIENT * centre[start:end]
-        left = shared + DOWNMIX_COEFFICIENT * block[left_side].sum(axis=0)
-        right = shared + DOWNMIX_COEFFICIENT * block[right_side].sum(axis=0)
-        if front:
-            left += block[FRONT_LEFT]
-            right += block[FRONT_RIGHT]
+        left = block[FRONT_LEFT] + shared + DOWNMIX_COEFFICIENT * block[left_side].sum(axis=0)
+        right = block[FRONT_RIGHT] + shared + DOWNMIX_COEFFICIENT * block[right_side].sum(axis=0)
         destination.samples[0, start:end] = left
         destination.samples[1, start:end] = right
-

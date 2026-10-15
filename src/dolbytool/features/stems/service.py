@@ -7,6 +7,7 @@ from pathlib import Path
 
 from dolbytool.core.atmos import decode_atmos
 from dolbytool.core.cancel import CancellationToken
+from dolbytool.core.i18n import t
 from dolbytool.core.pcm import load_audio
 from dolbytool.core.speakers import DEFAULT_ATMOS, SpeakerLayout
 from dolbytool.core.stems import StemKind, stem_label, stem_path
@@ -38,14 +39,14 @@ def split_stems(
     if atmos:
         decoded = decode_atmos(
             source, token,
-            lambda f: report(round(f * _ATMOS_DECODE), f"解码全景声 {f:.0%}"),
+            lambda f: report(round(f * _ATMOS_DECODE), t("step.decode_atmos_progress", percent=f)),
             layout=speakers or DEFAULT_ATMOS, speakers=bool(kinds), adm=adm,
         )  # fmt: skip
         audio, start = decoded.speakers, _ATMOS_DECODE
     else:
         if adm is not None:
-            raise ValueError("ADM BWF 只能从杜比全景声音轨生成")
-        report(0, "解码音频")
+            raise ValueError(t("error.adm_needs_atmos"))
+        report(0, t("step.decode_audio"))
         audio, start = load_audio(source, token), _DECODE
     if audio is None:
         return []
@@ -54,9 +55,6 @@ def split_stems(
             audio, source, output_dir, kinds, crossover_hz, token, report, start, speakers
         )
     return list(clipped(peaks))
-
-
-from dolbytool.core.i18n import t
 
 
 def split_step(
@@ -84,8 +82,7 @@ def split_step(
             report=report,
         )
         names = [stem_label(k) for k in kinds] + (["ADM BWF"] if adm is not None else [])
-        return "、".join(names) + "".join(f"；{note}" for note in notes)
+        return t("common.clause_sep").join([t("common.list_sep").join(names), *notes])
 
     targets = tuple(stem_path(source, output_dir, k) for k in kinds) + ((adm,) if adm else ())
     return Step(t("step.stems_split"), run, targets)
-

@@ -1,4 +1,4 @@
-"""Stem kinds, which ones each channel layout splits into, and their Chinese names.
+"""Stem kinds, which ones each channel layout splits into, and their display names.
 
 Shared by every feature that lists tracks; the split itself lives in
 `features/stems`.
@@ -9,6 +9,7 @@ from __future__ import annotations
 from enum import StrEnum
 from pathlib import Path
 
+from dolbytool.core.i18n import t
 from dolbytool.core.speakers import SpeakerLayout
 
 
@@ -73,23 +74,27 @@ def layout_for(channels: int, atmos: bool = False) -> StemLayout:
 
 
 def surround_stems(speakers: SpeakerLayout) -> tuple[StemKind, ...]:
-    """What a discrete master of `speakers` splits into: every pair it has, then the folds."""
-    kinds = [StemKind.FRONT]
-    if speakers.has("C"):
-        kinds.append(StemKind.CENTER)
-    if speakers.has("Ls", "Rs"):
-        kinds.append(StemKind.SURROUND)
-    if speakers.has("LFE"):
-        kinds.append(StemKind.LFE)
-    kinds.append(StemKind.INSTRUMENTAL)
-    if speakers.has("C"):
-        kinds.append(StemKind.FRONT_NO_CENTER)
+    """What a discrete master of `speakers` splits into: every pair it has, then the folds.
+
+    Every surround layout has L, R, C, LFE and a surround pair.  A layout with
+    one height pair (x.1.2) has the height fold and nothing else overhead,
+    since the fold of one pair is that pair.
+    """
+    kinds = [
+        StemKind.FRONT,
+        StemKind.CENTER,
+        StemKind.SURROUND,
+        StemKind.LFE,
+        StemKind.INSTRUMENTAL,
+        StemKind.FRONT_NO_CENTER,
+    ]
     if speakers.has("Lb", "Rb"):
         kinds.append(StemKind.BACK)
     if speakers.has("Lw", "Rw"):
         kinds.append(StemKind.WIDE)
     if speakers.heights:
         kinds.append(StemKind.HEIGHT)
+    if len(speakers.heights) > 2:
         if speakers.has("Tfl", "Tfr", "Tbl", "Tbr"):
             kinds += [StemKind.HEIGHT_FRONT, StemKind.HEIGHT_REAR]
         if speakers.has("Tsl", "Tsr"):
@@ -101,7 +106,11 @@ def surround_stems(speakers: SpeakerLayout) -> tuple[StemKind, ...]:
 def layout_stems(layout: StemLayout, speakers: SpeakerLayout | None) -> tuple[StemKind, ...]:
     if layout is StemLayout.MONO:
         return _MONO_STEMS
-    if layout is StemLayout.STEREO or speakers is None or len(speakers.channels) < SURROUND_CHANNELS:
+    if (
+        layout is StemLayout.STEREO
+        or speakers is None
+        or len(speakers.channels) < SURROUND_CHANNELS
+    ):
         return _STEREO_STEMS
     return surround_stems(speakers)
 
@@ -111,60 +120,8 @@ def stem_path(source: Path, output_dir: Path, kind: StemKind) -> Path:
 
 
 def stem_label(kind: str) -> str:
-    from dolbytool.core.i18n import t
-
-    key = f"stem.{kind}"
-    res = t(key)
-    return res if res != key else STEM_NAMES.get(kind, kind)
+    return t(f"stem.{kind}")
 
 
 def stem_hint(kind: str) -> str:
-    from dolbytool.core.i18n import t
-
-    key = f"stem.hint.{kind}"
-    res = t(key)
-    return res if res != key else STEM_HINTS.get(kind, "")
-
-
-STEM_NAMES = {
-    "surround": "环绕声道",
-    "back": "后环绕声道",
-    "wide": "前宽声道",
-    "center": "中置声道",
-    "lfe": "低频效果 (LFE)",
-    "front": "前置主声道",
-    "front_no_center": "前置声道（消除中置）",
-    "height": "顶部声道缩混",
-    "height_front": "顶部前置声道",
-    "height_rear": "顶部后置声道",
-    "height_side": "顶部侧置声道",
-    "downmix": "立体声下混",
-    "low": "低频段",
-    "mid_band": "中频段",
-    "high": "高频段",
-    "instrumental": "伴奏信号",
-    "side": "侧边差分 (L-R)",
-    "mid": "中间共模 (L+R)",
-}
-
-STEM_HINTS = {
-    "surround": "左/右离散环绕声道 (Ls / Rs)",
-    "back": "左/右后环绕声道 (Lb / Rb)",
-    "wide": "左/右前宽声道 (Lw / Rw)",
-    "center": "中置独立声道",
-    "lfe": "超低音声道 (Low-Frequency Effects)",
-    "front": "左/右前置主声道",
-    "front_no_center": "左/右前置声道（相干抵消中置成分）",
-    "height": "全部顶部声道的立体声缩混",
-    "height_front": "左/右顶部前置声道 (Tfl / Tfr)",
-    "height_rear": "左/右顶部后置声道 (Tbl / Tbr)",
-    "height_side": "左/右顶部侧置声道 (Tsl / Tsr)",
-    "downmix": "全声道立体声下混 (Stereo Downmix)",
-    "low": "分频点以下频段信号",
-    "mid_band": "分频点至 4 kHz 频段信号",
-    "high": "分频点以上频段信号",
-    "instrumental": "消除中置后的立体声伴奏",
-    "side": "左右声道差分信号 (Side)",
-    "mid": "左右声道求和信号 (Mid)",
-}
-
+    return t(f"stem.hint.{kind}")

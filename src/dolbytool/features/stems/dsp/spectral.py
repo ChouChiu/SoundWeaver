@@ -24,15 +24,11 @@ def _frames(values: np.ndarray, n_fft: int, hop: int) -> np.ndarray:
 
 
 def stft(signal: np.ndarray, n_fft: int = 2048, hop: int = 512) -> np.ndarray:
-    """librosa-compatible centered STFT returned as [frames, bins]."""
+    """Centred STFT, reflect-padded by half a frame at each end, as [frames, bins]."""
     source = np.asarray(signal)
     real_dtype = np.dtype(np.float32 if source.dtype == np.float32 else np.float64)
     values = np.asarray(source, dtype=real_dtype)
-    # reflect padding needs at least two samples
-    if values.size == 1:
-        padded = np.pad(values, (n_fft // 2, n_fft // 2), mode="edge")
-    else:
-        padded = np.pad(values, (n_fft // 2, n_fft // 2), mode="reflect")
+    padded = np.pad(values, (n_fft // 2, n_fft // 2), mode="reflect")
     remainder = (padded.size - n_fft) % hop
     if remainder:
         padded = np.pad(padded, (0, hop - remainder), mode="reflect")

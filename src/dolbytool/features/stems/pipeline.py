@@ -15,7 +15,10 @@ from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import numpy as np
+
 from dolbytool.core.cancel import CancellationToken
+from dolbytool.core.i18n import t
 from dolbytool.core.pcm import AudioData, create_pcm_audio, write_wav
 from dolbytool.core.speakers import SURROUND_5_1, SpeakerLayout
 from dolbytool.core.stems import (
@@ -31,8 +34,8 @@ from dolbytool.features.stems.dsp import (
     cancel_centre_from_front,
     copy_channels_into,
     difference,
-    downmix_into,
     downmix_instrumental_into,
+    downmix_into,
     fit_group,
     height_into,
     lfe_lag,
@@ -46,6 +49,7 @@ from dolbytool.features.stems.dsp.matrix import (
     FRONT_LEFT,
     FRONT_RIGHT,
     LOW_FREQUENCY,
+    channel_peaks,
 )
 
 logger = logging.getLogger(__name__)
@@ -83,7 +87,7 @@ class _Writer:
         done, label = len(self.peaks), stem_label(kind)
 
         def at(fraction: float) -> None:
-            self.report(self._value(done + 0.7 * fraction), f"渲染{label}")
+            self.report(self._value(done + 0.7 * fraction), t("stems.rendering", label=label))
 
         at(0.0)
         return at
@@ -91,7 +95,7 @@ class _Writer:
     def write(self, kind: StemKind, audio: AudioData) -> None:
         if kind not in self.wanted:
             return
-        self.report(self._value(len(self.peaks) + 0.7), f"写入{stem_label(kind)}")
+        self.report(self._value(len(self.peaks) + 0.7), t("stems.writing", label=stem_label(kind)))
         path = stem_path(self.source, self.output_dir, kind)
         self.peaks[kind] = write_wav(path, audio, self.token)
         logger.info("wrote the %s stem: %s", kind.value, path)
@@ -106,14 +110,23 @@ def _surround(
 ) -> None:
     """A discrete surround master, decoded channel by channel.
 
-    Nothing here is estimated except the leak of the centre channel into the
-    front pair: the ambience, the lead and the sub are separate channels on the
-    master, which is why this path is worth taking when a file offers it.  The
-    backs, wides and heights a layout has come out as their own stems, and
-    every one of them goes into the fold-down.
+    Nothing here is estimated but the leak of the centre channel into the
+    front pair and how far the LFE lags the mains: the ambience, the lead and
+    the sub are separate channels on the master, which is why this path is
+    worth taking when a file offers it.  The backs, wides and heights a layout
+    has come out as their own stems, and every one of them goes into the
+    fold-down.  The channel stems are the master's channels as they stand; only
+    the folds move the LFE into phase.
     """
     frames, rate, depth = source.frames, source.sample_rate, source.bit_depth
     ch = speakers.index
+    # every surround layout opens L R C LFE, which the matrices index directly
+    assert (ch["L"], ch["R"], ch["C"], ch["LFE"]) == (
+        FRONT_LEFT,
+        FRONT_RIGHT,
+        FRONT_CENTER,
+        LOW_FREQUENCY,
+    ), speakers
 
     def pair(left: str) -> tuple[int, int]:
         return ch[left], ch["R" + left[1:] if left[0] == "L" else left[:-1] + "r"]
@@ -126,11 +139,7 @@ def _surround(
         return create_pcm_audio(channels, frames, rate, depth)
 
     bands = (StemKind.DOWNMIX, StemKind.LOW, StemKind.HIGH)
-    lag = (
-        lfe_lag(source, token)
-        if speakers.has("LFE") and out.any(StemKind.INSTRUMENTAL, *bands)
-        else 0
-    )
+    lag = lfe_lag(source, token) if out.any(StemKind.INSTRUMENTAL, *bands) else 0
 
     def copy(kind: StemKind, channels: tuple[int, ...]) -> None:
         if kind in out:
@@ -140,12 +149,9 @@ def _surround(
                 out.write(kind, audio)
 
     copy(StemKind.FRONT, (FRONT_LEFT, FRONT_RIGHT))
-    if speakers.has("C"):
-        copy(StemKind.CENTER, (FRONT_CENTER,))
-    if speakers.has("Ls"):
-        copy(StemKind.SURROUND, pair("Ls"))
-    if speakers.has("LFE"):
-        copy(StemKind.LFE, (LOW_FREQUENCY,))
+    copy(StemKind.CENTER, (FRONT_CENTER,))
+    copy(StemKind.SURROUND, pair("Ls"))
+    copy(StemKind.LFE, (LOW_FREQUENCY,))
     if speakers.has("Lb"):
         copy(StemKind.BACK, pair("Lb"))
     if speakers.has("Lw"):
@@ -158,7 +164,7 @@ def _surround(
             fit_group((instrumental,), token)
             out.write(StemKind.INSTRUMENTAL, instrumental)
 
-    if StemKind.FRONT_NO_CENTER in out and speakers.has("C"):
+    if StemKind.FRONT_NO_CENTER in out:
         with buffer(2) as cleaned:
             cancel_centre_from_front(
                 source, cleaned, (FRONT_LEFT, FRONT_RIGHT), FRONT_CENTER, token,
@@ -235,8 +241,15 @@ def _mono(source: AudioData, out: _Writer, crossover: float, token: Cancellation
 
     Three complementary bands rather than three filters: the presence band is
     the difference of the two low-passes, so the three add back up to the
-    recording instead of overlapping around each corner.
+    recording instead of overlapping around each corner.  A crossover at or
+    above the presence corner would turn that difference upside down, so it is
+    held below it.
     """
+    if crossover >= PRESENCE_HZ:
+        logger.warning(
+            "crossover %.0f Hz held under the %.0f Hz presence band", crossover, PRESENCE_HZ
+        )
+        crossover = PRESENCE_HZ / 2
     out.rendering(out.wanted[0])
     with ExitStack() as owned:
         presence, low, middle, high = (
@@ -288,13 +301,17 @@ def split(
     wanted = tuple(k for k in layout_stems(layout, speakers) if k in kinds)
     if not wanted:
         logger.warning(
-            "所选分轨 %s 不属于当前音频的声道布局 (%s, channels=%d)",
+            "none of the stems %s belong to this layout (%s, %d channels)",
             [k.value for k in kinds],
             speakers or layout,
             audio.channels,
         )
         return {}
     logger.info("%d channels: splitting as %s into %s", audio.channels, speakers or layout, wanted)
+    if layout is StemLayout.STEREO and audio.channels > 2:
+        logger.warning("%d channels: only the first two are split, as stereo", audio.channels)
+    if not np.isfinite(channel_peaks(audio, token)).all():
+        raise ValueError(t("stems.non_finite"))
     output_dir.mkdir(parents=True, exist_ok=True)
     out = _Writer(source, output_dir, wanted, token, report, start)
     if speakers is not None:
@@ -308,4 +325,4 @@ def clipped(peaks: dict[StemKind, float]) -> Iterator[str]:
     """A note for every stem that reached full scale and was clipped on write."""
     for kind, peak in peaks.items():
         if peak > 1.0:
-            yield f"{stem_label(kind)}峰值 {20 * math.log10(peak):+.2f} dBFS，写入时削波"
+            yield t("stems.clipped", label=stem_label(kind), db=20 * math.log10(peak))

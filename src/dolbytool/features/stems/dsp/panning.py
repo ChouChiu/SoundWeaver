@@ -67,18 +67,6 @@ BASS_PROTECT_EDGE_HZ = 200.0
 # is unbounded; flooring the divisor against the loudest bin bounds it whatever
 # the recording's level, which an absolute epsilon cannot do.
 TRANSFER_FLOOR = 1e-6
-# How long the fit that predicts the centre from the surrounds averages over:
-# forty-one frames is about half a second at 44.1 kHz, long enough that a
-# two-input fit does not explain noise by chance and short enough to follow a
-# backing line that enters for one chorus.  The loading keeps the 2x2 solve
-# bounded when the surrounds are near silent or carry one signal on both sides.
-SHARED_SMOOTHING_FRAMES = 41
-SHARED_LOADING = 1e-3
-# A two-input fit over that window explains 2/K of any centre by chance, K
-# being the independent observations in it.  Hann frames at a quarter hop
-# overlap, so K is fewer than the frames: 41 of them measured 22 on white
-# noise, a ratio of 1.86.
-_SHARED_OBSERVATIONS = SHARED_SMOOTHING_FRAMES / 1.86
 _EPSILON = 1e-12
 
 ProgressFraction = Callable[[float], None]
@@ -258,7 +246,6 @@ def _front_transfer(
     bins = N_FFT // 2 + 1
     cross = np.zeros((2, bins), dtype=np.complex128)
     auto_centre = np.zeros(bins)
-    auto_front = np.zeros((2, bins))
     for block in block_plan(source.frames, source.sample_rate):
         token.raise_if_cancelled()
         centre = stft(
@@ -273,22 +260,14 @@ def _front_transfer(
                 N_FFT,
                 HOP,
             )
-            auto_front[row] += np.sum(np.abs(spectrum) ** 2, axis=0)
             cross[row] += np.sum(spectrum * np.conj(centre), axis=0)
-
-    raw_transfer = cross / (auto_centre + TRANSFER_FLOOR * auto_centre.max() + _EPSILON)
-    # Bounded magnitude (<= -3 dB) and coherence gating:
-    # A center bleed into front can never exceed unity or inject uncorrelated arrangement energy.
-    coherence = np.clip(np.abs(cross) ** 2 / (auto_front * auto_centre + _EPSILON), 0.0, 1.0)
-    mag = np.clip(np.abs(raw_transfer), 0.0, 0.70710678)
-    transfer = mag * np.exp(1j * np.angle(raw_transfer)) * coherence
+    transfer = cross / (auto_centre + TRANSFER_FLOOR * auto_centre.max() + _EPSILON)
     logger.info(
         "centre leaks into the front pair at up to %.3f, %.4f on average",
         float(np.abs(transfer).max()),
         float(np.abs(transfer).mean()),
     )
     return transfer
-
 
 
 def cancel_centre_from_front(
@@ -320,67 +299,5 @@ def cancel_centre_from_front(
             destination.samples[row, block.start : block.stop] += window * cleaned.astype(
                 np.float32, copy=False
             )
-        if report is not None:
-            report((index + 1) / len(plan))
-
-
-def share_centre_with_surrounds(
-    source: AudioData,
-    destination: AudioData,
-    centre_channel: int,
-    surrounds: tuple[int, int],
-    token: CancellationToken,
-    report: ProgressFraction | None = None,
-) -> None:
-    """Write the part of the centre channel the surrounds can predict.
-
-    A surround mix puts the lead in the centre and its backing vocals in the
-    centre and the rear, so the lead and the backing share one channel and no
-    matrix parts them.  What does part them is where else each one is: per bin,
-    over half a second, a least-squares filter from the two surrounds to the
-    centre keeps what the rear carries too and leaves what only the centre
-    does.  This is the time-varying cousin of `_front_transfer`, which can hold
-    one ratio for a whole song because a leak does not come and go; a backing
-    line does.
-    """
-    plan = block_plan(source.frames, source.sample_rate)
-    for index, block in enumerate(plan):
-        token.raise_if_cancelled()
-        centre, left, right = (
-            stft(
-                np.asarray(source.samples[channel, block.start : block.stop], dtype=np.float32),
-                N_FFT,
-                HOP,
-            )
-            for channel in (centre_channel, *surrounds)
-        )
-
-        def average(values: np.ndarray) -> np.ndarray:
-            return _smooth(values, SHARED_SMOOTHING_FRAMES)
-
-        auto_left = np.maximum(average(np.abs(left) ** 2), 0.0)
-        auto_right = np.maximum(average(np.abs(right) ** 2), 0.0)
-        loading = SHARED_LOADING * (auto_left + auto_right) + _EPSILON
-        auto_left += loading
-        auto_right += loading
-        cross = average(left * np.conj(right))
-        centre_left = average(centre * np.conj(left))
-        centre_right = average(centre * np.conj(right))
-        determinant = auto_left * auto_right - np.abs(cross) ** 2
-        gain_left = (centre_left * auto_right - centre_right * np.conj(cross)) / determinant
-        gain_right = (centre_right * auto_left - centre_left * cross) / determinant
-        # The fit explains part of a loud lead by chance: without this, a lead
-        # the surrounds never carry still comes through only 18 dB down.
-        # Removing the expected chance share (adjusted multiple coherence) and
-        # scaling the prediction to what remains lets it fall to zero.
-        explained = (np.conj(gain_left) * centre_left + np.conj(gain_right) * centre_right).real
-        explained = np.clip(explained / (average(np.abs(centre) ** 2) + _EPSILON), 0.0, 1.0)
-        scale = _SHARED_OBSERVATIONS / (_SHARED_OBSERVATIONS - 2.0)
-        adjusted = np.clip(1.0 - (1.0 - explained) * scale, 0.0, 1.0)
-        keep = np.sqrt(adjusted / (explained + _EPSILON))
-        shared = istft(keep * (gain_left * left + gain_right * right), HOP, block.frames)
-        destination.samples[0, block.start : block.stop] += _crossfade(block) * shared.astype(
-            np.float32, copy=False
-        )
         if report is not None:
             report((index + 1) / len(plan))
