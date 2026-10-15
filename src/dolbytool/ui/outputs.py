@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QSize, Qt, Signal
 from PySide6.QtWidgets import QAbstractItemView, QGridLayout, QListWidgetItem, QWidget
 from qfluentwidgets import CaptionLabel, IconWidget, ListWidget, StrongBodyLabel, SwitchButton
 
@@ -75,8 +75,18 @@ class OutputList(ListWidget):
             item = QListWidgetItem(self)
             item.setSizeHint(row.sizeHint())
             self.setItemWidget(item, row)
+            row.installEventFilter(self)
             self.rows.append(row)
         self.currentRowChanged.connect(self.selected)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        # The rows cover the viewport, so it never sees the mouse move and the
+        # list's own hover (from `entered`) stays on whichever row the cursor
+        # last reached through a gap; each row reports its own entry instead.
+        if event.type() == QEvent.Type.Enter and watched in self.rows:
+            self._setHoverRow(self.rows.index(watched))
+            self.viewport().update()
+        return super().eventFilter(watched, event)
 
     def resizeEvent(self, event) -> None:
         # list mode keeps each item at its hinted width; stretch the rows to the viewport
