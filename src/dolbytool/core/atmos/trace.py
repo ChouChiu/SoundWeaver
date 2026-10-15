@@ -1,7 +1,7 @@
 """Object trajectories and levels, for drawing the sound field rather than rendering it.
 
 Only dynamic objects are traced: beds sit on their speakers and ISF objects
-carry no position.  Times are seconds on the container's timeline, the same
+on their rings, neither of them moving.  Times are seconds on the container's timeline, the same
 one the rendered speaker feeds and every video are cut to.
 
 The positions follow from the metadata alone and are collected in syncframe

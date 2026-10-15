@@ -89,10 +89,13 @@ def _trim(layout: SpeakerLayout, g: np.ndarray, z: float, trim: Levels | None) -
     return g * factor
 
 
-# Speaker groups the zone constraints of TS 103 420 (zone_constraints_idx) name.
-# Not checked against a master that uses them: none of the test material does.
+# The horizontal zones of zone_constraints_idx (TS 103 420 table 20) by speaker,
+# as table A.7 assigns them: Ls and Rs are surround speakers, and also the back
+# zone in a 5.X layout or the side zone otherwise; Lb and Rb are back only; the
+# heights are the Top-Bottom zone, which only b_enable_elevation constrains.
+# None of the test material uses zones.
 _SCREEN = {"L", "R", "C"}
-_SURROUND_PAIRS = {"Ls", "Rs", "Lb", "Rb"}
+_SURROUND = {"Ls", "Rs"}
 
 
 @lru_cache(maxsize=64)
@@ -109,7 +112,7 @@ def _zone_mask(layout: SpeakerLayout, zone: int) -> np.ndarray:
         2: names - side,
         3: {"C"} | back | heights,
         4: _SCREEN | heights,
-        5: _SURROUND_PAIRS | heights,
+        5: _SURROUND | heights,
     }.get(zone, names)
     mask = np.array([name in allowed for name in layout.channels])
     mask.flags.writeable = False
@@ -245,11 +248,16 @@ class Renderer:
         backs = "Lb" in labels
         for o, meta_index in enumerate(joc_objects(frame)):
             source = labels[meta_index] if meta_index < len(labels) else None
+            # warp_mode adjusts object_position_Y, which only dynamic objects carry
+            dynamic = meta_index >= frame.program.anchored
             trim = None if self.layout.top else frame.trim.levels(self.layout.name, meta_index)
             events = []
             for u in frame.updates[meta_index]:
                 if u.active and u.gain_db != -math.inf:
-                    render = u.render.warped(frame.trim) if source is None else source
+                    if source is not None:
+                        render = source
+                    else:
+                        render = u.render.warped(frame.trim) if dynamic else u.render
                     g = _target(self.layout, render, u.gain_db, backs, trim)
                 else:
                     g = self.silent

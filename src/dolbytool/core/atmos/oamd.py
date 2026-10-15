@@ -20,7 +20,17 @@ BED_GROUPS_STD = (
     ("L", "R"), ("C",), ("LFE",), ("Ls", "Rs"), ("Lb", "Rb"),
     ("Tfl", "Tfr"), ("Tsl", "Tsr"), ("Tbl", "Tbr"), ("Lw", "Rw"), ("LFE2",),
 )  # fmt: skip
-ISF_OBJECTS = (4, 8, 10, 14, 15, 30)
+# intermediate_spatial_format_idx (table 11b): objects per stacked ring, in the
+# MULZ order the objects come in: middle, upper, lower, zenith
+ISF_RINGS = ((3, 1, 0, 0), (5, 3, 0, 0), (7, 3, 0, 0), (9, 5, 0, 0), (7, 5, 3, 0), (15, 9, 5, 1))
+ISF_OBJECTS = tuple(sum(rings) for rings in ISF_RINGS)
+# Heights of the rings in room coordinates.  TS 103 420 gives only how many
+# objects each ring holds; these, and the spacing below, follow Dolby's ISF
+# description (US 10861467): rings at heights around the listener, M1 straight
+# ahead, M2 to its left, the objects of a ring evenly spaced.  The middle ring
+# is at ear level, the upper one at the ceiling; the lower one sits below the
+# floor (and folds onto it) and the zenith overhead.
+_RING_HEIGHTS = (0.0, 1.0, -1.0, 1.0)
 SAMPLE_OFFSETS = (8, 16, 18, 24)
 RAMP_DURATIONS = (32, 64, 128, 256, 320, 480, 1000, 1001, 1024, 1600, 1601, 1602, 1920, 2000, 2002, 2048)  # fmt: skip
 DISTANCE_FACTORS = (1.1, 1.3, 1.6, 2.0, 2.5, 3.2, 4.0, 5.0, 6.3, 7.9, 10.0, 12.6, 15.8, 20.0, 25.1, 50.1)  # fmt: skip
@@ -148,11 +158,39 @@ class Program:
     bed_labels: tuple[str, ...]  # one speaker label per bed object
     isf_objects: int
     dynamic_objects: int
+    # objects per ISF ring (ISF_RINGS), empty without ISF objects
+    isf_rings: tuple[int, ...] = ()
 
     @property
     def anchored(self) -> int:
         """Objects with no object_render_info: beds and ISF."""
         return len(self.bed_labels) + self.isf_objects
+
+    def isf_position(self, index: int) -> tuple[float, float, float] | None:
+        """Room position of OAMD object `index` when it is an ISF object, else None."""
+        k = index - len(self.bed_labels)
+        if not 0 <= k < self.isf_objects:
+            return None
+        for count, z in zip(self.isf_rings, _RING_HEIGHTS, strict=True):
+            if k < count:
+                return _ring_position(k, count, z)
+            k -= count
+        raise AssertionError("unreachable: the rings hold every ISF object")
+
+
+def _ring_position(k: int, count: int, z: float) -> tuple[float, float, float]:
+    """Object `k` of a ring of `count`, from straight ahead towards the left, on the room's walls.
+
+    The direction is carried out from the centre to the walls of the unit room,
+    as an object panned there in room-anchored coordinates would be; a ring of
+    one (the zenith) is the centre itself.
+    """
+    if count == 1:
+        return 0.5, 0.5, z
+    azimuth = 2 * math.pi * k / count  # anticlockwise seen from above: 90 degrees is the left
+    left, front = math.sin(azimuth), math.cos(azimuth)
+    reach = max(abs(left), abs(front))
+    return 0.5 - 0.5 * left / reach, 0.5 - 0.5 * front / reach, z
 
 
 @dataclass(slots=True)
@@ -176,6 +214,7 @@ def _program(bits: BitReader) -> Program:
         return Program(("LFE",) if lfe else (), 0, -1)
     content = bits.read(4)
     isf = dynamic = 0
+    rings: tuple[int, ...] = ()
     if content & 0b1000:  # bed objects
         bits.skip(1)  # b_bed_chan_distribute
         instances = bits.read(3) + 2 if bits.flag() else 1
@@ -198,7 +237,7 @@ def _program(bits: BitReader) -> Program:
         isf_idx = bits.read(3)
         if isf_idx >= len(ISF_OBJECTS):
             raise BitstreamError(f"reserved intermediate_spatial_format_idx {isf_idx}")
-        isf = ISF_OBJECTS[isf_idx]
+        isf, rings = ISF_OBJECTS[isf_idx], ISF_RINGS[isf_idx]
     if content & 0b0010:
         dynamic = bits.read(5)
         if dynamic == 0x1F:
@@ -207,7 +246,7 @@ def _program(bits: BitReader) -> Program:
     if content & 0b0001:
         size = bits.read(4) + 1
         bits.skip(size * 8)  # reserved_data and its padding, in bytes
-    return Program(tuple(labels), isf, dynamic)
+    return Program(tuple(labels), isf, dynamic, rings)
 
 
 OamdState = tuple[list[ObjectState], Trim]
@@ -285,12 +324,17 @@ class OamdDecoder:
             bits.skip(5)
         for obj in range(frame.object_count):
             anchored = obj < frame.program.anchored
+            # an ISF object sits where its ring puts it, whatever the update
+            fixed = frame.program.isf_position(obj)
             for blk, (start, ramp) in enumerate(timing):
-                frame.updates[obj].append(self._info_block(bits, obj, blk, anchored, start, ramp))
+                frame.updates[obj].append(
+                    self._info_block(bits, frame, obj, blk, anchored, start, ramp, fixed)
+                )
 
     def _info_block(
-        self, bits: BitReader, obj: int, blk: int, anchored: bool, start: int, ramp: int
-    ) -> Update:
+        self, bits: BitReader, frame: Frame, obj: int, blk: int, anchored: bool,
+        start: int, ramp: int, fixed: tuple[float, float, float] | None,
+    ) -> Update:  # fmt: skip
         state = self.state[obj]
         inactive = bits.flag()
         basic = 0 if inactive else (1 if blk == 0 else bits.read(2))
@@ -307,12 +351,15 @@ class OamdDecoder:
                 elif gain_idx == 2:
                     g = bits.read(6)
                     state.gain_db = float(15 - g if g < 15 else 14 - g)
-                else:  # same as the previous object in this update
-                    state.gain_db = self.state[obj - 1].gain_db if obj else 0.0
+                else:  # the previous object's in this update block, 0 dB for the first (table 18)
+                    state.gain_db = frame.updates[obj - 1][blk].gain_db if obj else 0.0
             if flags & 0b01 and not bits.flag():  # object_priority: the renderer has no use for it
                 bits.skip(5)
         render = 0 if inactive or anchored else (1 if blk == 0 else bits.read(2))
-        if render == 0:
+        if fixed is not None:
+            x, y, z = fixed
+            state.render = Render(x_bits=62 * x, y_bits=62 * y, z_bits=15 * z)
+        elif render == 0:
             state.render = Render()
         elif render in (1, 3):
             state.render = self._render_info(bits, state.render, blk, render)

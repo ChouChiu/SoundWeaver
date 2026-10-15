@@ -5,7 +5,8 @@ the profile's channel configurations that holds them (table 2-21), with the
 channels the stream does not carry left silent.  A bed channel no
 configuration has (the wides, the front and rear heights, a second LFE, a
 repeat from another bed instance) is written as an Objects track pinned where
-that speaker stands.  ISF and dynamic objects follow, one Objects track each.
+that speaker stands.  ISF objects follow, each pinned where its ring puts it, then
+the dynamic objects, one Objects track each.
 Each object's own gain, with its ramps, is applied to its audio, so the file
 needs no gain metadata and renders the same mix.
 
@@ -152,7 +153,9 @@ def _tracks(program: Program, objects: int) -> tuple[str, tuple[_Track, ...], tu
         if index not in assigned
     )
     rest = tuple(
-        _Track(index, f"ISF {index}" if index < program.anchored else f"Object {index}")
+        _Track(index, f"ISF {index}", pinned=position)
+        if (position := program.isf_position(index)) is not None
+        else _Track(index, f"Object {index}")
         for index in range(len(labels), objects)
     )
     return name, bed, pinned + rest

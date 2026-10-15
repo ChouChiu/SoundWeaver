@@ -180,10 +180,10 @@ class _Decode:
                     if renderer is None:
                         renderer = Renderer(len(joc_objects(meta)), self.layout)
                         if meta.program.isf_objects:
-                            logger.warning(
-                                "%d ISF objects carry no position here and play from the room centre",
-                                meta.program.isf_objects,
-                            )
+                            logger.info(
+                                "%d ISF objects on rings %s", meta.program.isf_objects,
+                                meta.program.isf_rings,
+                            )  # fmt: skip
                         if self.adm_path is not None:
                             adm = AdmFile(
                                 self.adm_path,
@@ -284,7 +284,7 @@ class _Decode:
 _TRACE_SUFFIX = ".trace.pickle"
 _KEEP_TRACES = 16
 # bumped whenever the shares a layout gets change, so older traces go unread
-_TRACE_VERSION = 3
+_TRACE_VERSION = 4
 
 
 def _trace_path(source: Path, layout: SpeakerLayout) -> Path:

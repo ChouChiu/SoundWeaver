@@ -104,10 +104,10 @@ def parse(payload: bytes) -> JocFrame:
             q = np.empty((dpoints, channels, bands), dtype=np.int64)
             for dp in range(dpoints):
                 # Pseudocode 2: one active channel per band, both it and its
-                # value coded as differences from the band below.  None of the
-                # masters at hand use sparse mode: the fill value and the band
-                # each value is a difference from are as the spec reads, and
-                # untested against a stream.
+                # value coded as differences from the band below; the other
+                # channels hold the offset (50 or 100, not the dequantiser's
+                # centre: the spec's own value).  Checked line by line against
+                # TS 103 420 V1.2.1; none of the masters at hand use sparse mode.
                 idx = [bits.read(3)]
                 if idx[0] >= channels:
                     raise BitstreamError(f"sparse channel {idx[0]} of a {channels}-channel downmix")
