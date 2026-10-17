@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+import multiprocessing
 import sys
 from pathlib import Path
 
+# Required for PyInstaller frozen executables on Windows:
+# Intercept worker processes spawned by multiprocessing before initializing Qt GUI.
+multiprocessing.freeze_support()
+if getattr(sys, "frozen", False):
+    multiprocessing.set_executable(sys.executable)
+
 
 def main() -> int:
+    multiprocessing.freeze_support()
     from dolbytool.core.logs import setup_logging
 
     setup_logging()
@@ -65,20 +73,26 @@ def main() -> int:
     from dolbytool.features.source.service import kind_of
 
     window = MainWindow()
-    args = [Path(a).expanduser() for a in sys.argv[1:]]
-    audio = [a for a in args if kind_of(a) == "audio"]
+    args = [Path(a).expanduser() for a in sys.argv[1:] if not a.startswith("-")]
+    audio = [a for a in args if a.is_file() and kind_of(a) == "audio"]
     if any(a.is_dir() for a in args) or len(audio) > 1:
         # a folder or several tracks: a batch (an album, for a folder)
         window.add_batch(args)
     else:
-        if args:
+        if audio:
+            window.set_audio(audio[0])
+            non_audio = [a for a in args if a != audio[0]]
+            if non_audio:
+                window.set_cover(non_audio[0])
+        elif args and args[0].is_file():
             window.set_audio(args[0])
-        if len(args) > 1:
-            window.set_cover(args[1])
+            if len(args) > 1 and args[1].is_file():
+                window.set_cover(args[1])
     window.show()
     interrupt = InterruptHandler(app, window.close_without_asking)  # noqa: F841 - lives with the loop
     return app.exec()
 
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     sys.exit(main())
