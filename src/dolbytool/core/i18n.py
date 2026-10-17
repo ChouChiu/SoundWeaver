@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 from functools import cache
 from pathlib import Path
 from typing import Final
@@ -28,7 +29,34 @@ LANGUAGE_NAMES: Final = {
     LANG_EN: "English",
 }
 
-LOCALES_DIR: Final = Path(__file__).resolve().parent.parent / "locales"
+
+def _find_locales_dir() -> Path:
+    candidates: list[Path] = []
+    if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            candidates.append(Path(meipass) / "dolbytool" / "locales")
+            candidates.append(Path(meipass) / "locales")
+        exe_dir = Path(sys.executable).resolve().parent
+        candidates.append(exe_dir / "_internal" / "dolbytool" / "locales")
+        candidates.append(exe_dir / "_internal" / "locales")
+        candidates.append(exe_dir / "dolbytool" / "locales")
+        candidates.append(exe_dir / "locales")
+    candidates.append(Path(__file__).resolve().parent.parent / "locales")
+    try:
+        from importlib import resources
+
+        candidates.append(Path(str(resources.files("dolbytool") / "locales")))
+    except (ImportError, TypeError, OSError) as error:
+        logger.debug("cannot resolve locales via importlib.resources: %s", error)
+
+    for candidate in candidates:
+        if (candidate / f"{LANG_ZH_CN}.json").is_file():
+            return candidate
+    return candidates[0]
+
+
+LOCALES_DIR: Final = _find_locales_dir()
 
 _language = LANG_ZH_CN
 
@@ -36,6 +64,16 @@ _language = LANG_ZH_CN
 @cache
 def _bundle(lang: str) -> dict[str, str]:
     path = LOCALES_DIR / f"{lang}.json"
+    if not path.is_file() and getattr(sys, "frozen", False):
+        for candidate in [
+            getattr(sys, "_MEIPASS", None) and Path(sys._MEIPASS) / "dolbytool" / "locales",
+            getattr(sys, "_MEIPASS", None) and Path(sys._MEIPASS) / "locales",
+            Path(sys.executable).resolve().parent / "_internal" / "dolbytool" / "locales",
+            Path(sys.executable).resolve().parent / "locales",
+        ]:
+            if candidate and (candidate / f"{lang}.json").is_file():
+                path = candidate / f"{lang}.json"
+                break
     try:
         bundle = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):

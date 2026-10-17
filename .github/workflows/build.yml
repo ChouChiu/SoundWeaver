@@ -49,6 +49,8 @@ jobs:
             --name dolbytool \
             --paths src \
             --exclude-module tkinter \
+            --collect-data dolbytool \
+            --add-data "src/dolbytool/locales:dolbytool/locales" \
             --add-data "renderer/dist:renderer/dist" \
             src/dolbytool/__main__.py
 
@@ -56,6 +58,9 @@ jobs:
         run: |
           test -f dist/dolbytool/${{ matrix.exe }}
           test -f dist/dolbytool/_internal/renderer/dist/render.mjs
+          test -f dist/dolbytool/_internal/dolbytool/locales/zh_cn.json
+          test -f dist/dolbytool/_internal/dolbytool/locales/en.json
+          test -f dist/dolbytool/_internal/dolbytool/locales/zh_tw.json
 
       - name: Pack (Linux)
         if: runner.os == 'Linux'
