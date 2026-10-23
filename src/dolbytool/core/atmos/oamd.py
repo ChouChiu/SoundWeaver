@@ -167,16 +167,19 @@ def _trim_config(bits: BitReader) -> Levels | None:
         return DEFAULT_TRIM
     if bits.flag():  # b_disable_trim
         return None
-    present = bits.read(5)  # trim_balance_presence[4..0]
+    # trim_balance_presence: against the bit-weight order above, the last bit
+    # read gates the centre trim, as truehdd reads it; the first-read order
+    # overruns the element on streams that carry custom trims
+    present = bits.read(5)
     levels: dict[str, float] = {}
     for flag, name, table in (
-        (0b10000, "centre", _CENTRE_TRIMS),
-        (0b01000, "surround", _TRIMS),
+        (0b00001, "centre", _CENTRE_TRIMS),
+        (0b00010, "surround", _TRIMS),
         (0b00100, "height", _TRIMS),
     ):
         if present & flag and (db := table[bits.read(4)]) is not None:
             levels[name] = db
-    for flag in (0b00010, 0b00001):  # the balances: a direction bit and an amount
+    for flag in (0b01000, 0b10000):  # the balances: a direction bit and an amount
         if present & flag:
             bits.skip(5)
     return replace(DEFAULT_TRIM, **levels)
