@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 CODEC_NAME = "ac4"
 # bumped whenever decoding changes what a cached file holds
-_CACHE_VERSION = 2
+_CACHE_VERSION = 3
 _CACHE_SUFFIX = ".ac4.flac"
 _KEEP = 16
 # Table 83: frames per second of each frame_rate_index, at 48 kHz

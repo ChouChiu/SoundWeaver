@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections import deque
 
 import numpy as np
 
@@ -19,6 +20,12 @@ logger = logging.getLogger(__name__)
 
 # the order channels come out in: WAVE's (and ffmpeg's) for the layouts AC-4 codes
 CHANNEL_ORDER = ("L", "R", "C", "LFE", "Lb", "Rb", "Ls", "Rs", "Lw", "Rw", "Tfl", "Tfr")
+# Table 188 (TS 103 190-1 clause 5.6), per frame_length: the PCM delay d_pcm in samples
+# and the control data delay d_ctrl in frames that line the QMF tools' data up with the signal
+ALIGNMENT = {
+    1920: (288, 1), 2048: (352, 1), 1536: (96, 1), 960: (960, 2),
+    1024: (1056, 2), 768: (672, 2), 512: (1312, 4), 384: (864, 4),
+}  # fmt: skip
 
 
 IMS_VERSION = 2
@@ -52,6 +59,9 @@ class FrameDecoder:
         self.ajoc_state = ajoc.AjocState()
         self.reconstructor: ajoc.Reconstructor | None = None
         self.payload: ajoc.AjocPayload | None = None
+        # frame alignment: the PCM held back by d_pcm, and the last frames' QMF tool data
+        self.held: dict[str, np.ndarray] = {}
+        self.controls: deque[tuple[Element, ajoc.AjocPayload | None]] = deque()
 
     def toc(self, frame: bytes) -> Toc:
         return read_toc(frame)
@@ -82,7 +92,9 @@ class FrameDecoder:
         if info.kind == "ajoc":
             self.ajoc_state.group_timing = None
             if group.oamd_index is not None and toc.substream_sizes:
-                at = toc.data_start + toc.payload_base + sum(toc.substream_sizes[: group.oamd_index])
+                at = (
+                    toc.data_start + toc.payload_base + sum(toc.substream_sizes[: group.oamd_index])
+                )
                 stop = at + toc.substream_sizes[group.oamd_index]
                 ajoc.oamd_substream(BitReader(frame, at * 8, stop * 8), self.ajoc_state)
             element, self.payload = ajoc.audio_data_ajoc(
@@ -101,7 +113,13 @@ class FrameDecoder:
 
     def decode(self, frame: bytes) -> dict[str, np.ndarray]:
         """PCM per channel; for A-JOC per object ("o0", "o1", ...) and "LFE", with the
-        objects' metadata in `payload`."""
+        objects' metadata in `payload`.
+
+        Through the QMF tools the frame alignment of clause 5.6 applies: the
+        signal is held back by d_pcm and each frame's tool data (A-JOC's and its
+        object metadata among them) by d_ctrl frames, so `payload` is then the
+        one of d_ctrl frames ago, which the returned samples go with.
+        """
         toc = read_toc(frame)
         element = self.element(frame, toc)
         out = {}
@@ -111,7 +129,17 @@ class FrameDecoder:
                 transform = self.transforms[name] = Imdct(toc.frame_length)
             out[name] = transform(track.spectrum, track.windows)
         if element.qmf or self.delay or self.payload is not None:
+            pcm_delay, ctrl_delay = ALIGNMENT[toc.frame_length]
+            for name, x in out.items():
+                y = np.concatenate([self.held.get(name, np.zeros(pcm_delay)), x])
+                out[name], self.held[name] = y[: len(x)], y[len(x) :]
+            self.controls.append((element, self.payload))
+            # until d_ctrl frames have gone by, the first frame's data stands in
+            element, self.payload = (
+                self.controls.popleft() if len(self.controls) > ctrl_delay else self.controls[0]
+            )
             out = self._qmf(element, out, toc.frame_length)
+            self.delay += pcm_delay
         return out
 
     def _qmf(
