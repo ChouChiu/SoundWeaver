@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from fractions import Fraction
 from functools import lru_cache
@@ -27,7 +27,8 @@ from dolbytool.core.i18n import t
 from dolbytool.core.paths import atomic_output, cache_dir, content_key, file_stamp, work_root
 from dolbytool.core.speakers import BY_NAME
 
-from .frame import CHANNEL_ORDER, FrameDecoder, coded_channel_mode
+from .frame import CHANNEL_ORDER, coded_channel_mode
+from .parallel import Decoded, FrameError, decode_frames
 from .toc import SYNC, SYNC_CRC, read_toc, sync_frames
 
 logger = logging.getLogger(__name__)
@@ -212,32 +213,36 @@ def _decode(
         _render(frames, target, token, on_fraction)
         return
     coded_rate, rate = _rates(read_toc(frames[0]))
-    decoder = FrameDecoder()
     resampler = Resampler(Fraction(rate) / coded_rate, len(info.channels))
     # the QMF tools delay the output; it is trimmed off the start and made up at the end
     trimmed = 0
     with sf.SoundFile(
         target, "w", samplerate=rate, channels=len(info.channels), format="FLAC", subtype="PCM_24"
     ) as out:
-        for k, frame in enumerate(frames):
+        for k, decoded in enumerate(checked_frames(frames, token)):
             if k % 64 == 0:
                 token.raise_if_cancelled()
                 on_fraction(k / len(frames))
-            try:
-                pcm = decoder.decode(frame)
-            except BitstreamError as error:
-                raise Ac4Error(t("ac4.bad_frame", frame=k, error=error)) from error
+            pcm = decoded.pcm
             if set(pcm) != set(info.channels):
                 raise Ac4Error(t("ac4.layout_changed", frame=k))
             block = np.stack([pcm[name] for name in info.channels]) / 32768.0
-            if trimmed < decoder.delay:
-                cut = min(decoder.delay - trimmed, block.shape[1])
+            if trimmed < decoded.delay:
+                cut = min(decoded.delay - trimmed, block.shape[1])
                 block, trimmed = block[:, cut:], trimmed + cut
             out.write(np.clip(resampler.push(block), -1.0, 1.0).T)
         resampler.push(np.zeros((len(info.channels), trimmed)))
         out.write(np.clip(resampler.finish(), -1.0, 1.0).T)
     on_fraction(1.0)
     logger.info("ac4: decoded %d frames, %s at %d Hz", len(frames), "/".join(info.channels), rate)
+
+
+def checked_frames(frames: list[bytes], token: CancellationToken) -> Iterator[Decoded]:
+    """`parallel.decode_frames`, a frame that will not decode reported as an Ac4Error."""
+    try:
+        yield from decode_frames(frames, token)
+    except FrameError as error:
+        raise Ac4Error(t("ac4.bad_frame", frame=error.index, error=error.error)) from error
 
 
 class Resampler:

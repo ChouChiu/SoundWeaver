@@ -19,7 +19,6 @@ from pathlib import Path
 import numpy as np
 
 from dolbytool.core.atmos.adm import AdmFile, adm_block, pcm24
-from dolbytool.core.atmos.bitstream import BitstreamError
 from dolbytool.core.atmos.oamd import Frame
 from dolbytool.core.atmos.render import Renderer, joc_objects
 from dolbytool.core.atmos.sinks import RenderedFrame, speaker_feeds
@@ -30,8 +29,7 @@ from dolbytool.core.paths import work_root
 from dolbytool.core.pcm import AudioData, create_pcm_audio
 from dolbytool.core.speakers import SpeakerLayout
 
-from .decoder import Ac4Error, Resampler, _rates, stream_bytes
-from .frame import FrameDecoder
+from .decoder import Ac4Error, Resampler, _rates, checked_frames, stream_bytes
 from .toc import read_toc, sync_frames
 
 logger = logging.getLogger(__name__)
@@ -172,21 +170,16 @@ def render_objects(
             put_adm(adm_tracks.push(adm_block(f, adm_file.sources)))
 
     feeder = _Objects(n, layout, sink)
-    decoder = FrameDecoder()
     try:
-        for k, frame in enumerate(frames):
+        for k, decoded in enumerate(checked_frames(frames, token)):
             if k % 32 == 0:
                 token.raise_if_cancelled()
                 on_fraction(k / len(frames))
-            try:
-                pcm = decoder.decode(frame)
-            except BitstreamError as error:
-                raise Ac4Error(t("ac4.bad_frame", frame=k, error=error)) from error
-            if decoder.payload is None:
+            meta = decoded.metadata
+            if meta is None:
                 raise Ac4Error(t("ac4.layout_changed", frame=k))
-            meta = decoder.payload.metadata
             tracer.metadata(k, meta)
-            feeder.push(k, meta, pcm, decoder.delay)
+            feeder.push(k, meta, decoded.pcm, decoded.delay)
         feeder.flush()
         if out is not None:
             put(feeds.finish())

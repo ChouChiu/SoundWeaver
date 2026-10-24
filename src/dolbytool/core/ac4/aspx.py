@@ -815,6 +815,36 @@ def process(
     return out
 
 
+@dataclass(slots=True)
+class Cursor:
+    """Where a channel's noise and sine table indices stand (pseudocodes 103 and 105).
+
+    They run on across I-frames, so a decoder started on a later one takes them
+    from `advance`d copies that went through every frame before.
+    """
+
+    noise: int = 0
+    sine: int = 0
+    first: bool = True
+    reset: bool = True
+
+    def advance(self, width: int, slots: int) -> None:
+        """One A-SPX interval of `slots` QMF slots over `width` subbands, as `process` steps."""
+        if slots:
+            self.noise = ((0 if self.reset else self.noise) + width * slots) % 512
+            self.sine = ((1 if self.first else (self.sine + 1) % 4) + slots - 1) % 4
+        self.first = self.reset = False
+
+    def restore(self, ch: AspxChannel) -> None:
+        ch.noise_cursor, ch.sine_cursor = self.noise, self.sine
+        ch.first, ch.master_reset = self.first, self.reset
+
+
+def interval(ch: AspxChannel, f: AspxFrame) -> tuple[int, int]:
+    """The subbands and QMF slots `process` fills from noise and sines for this interval."""
+    return ch.bands.width, (f.sig_borders[-1] - f.sig_borders[0]) * ch.ts_in_ats
+
+
 def decode_channels(
     pairs: list[tuple[AspxChannel, AspxFrame]], qs: list[np.ndarray]
 ) -> list[np.ndarray]:

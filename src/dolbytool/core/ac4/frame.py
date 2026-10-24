@@ -62,6 +62,9 @@ class FrameDecoder:
         # frame alignment: the PCM held back by d_pcm, and the last frames' QMF tool data
         self.held: dict[str, np.ndarray] = {}
         self.controls: deque[tuple[Element, ajoc.AjocPayload | None]] = deque()
+        # for a decoder started on a later I-frame: A-SPX's noise and sine table positions
+        # (aspx.Cursor) as decoding from the start would have them on its first frame
+        self.resume: dict[str, aspx.Cursor] | None = None
 
     def toc(self, frame: bytes) -> Toc:
         return read_toc(frame)
@@ -135,9 +138,14 @@ class FrameDecoder:
                 out[name], self.held[name] = y[: len(x)], y[len(x) :]
             self.controls.append((element, self.payload))
             # until d_ctrl frames have gone by, the first frame's data stands in
-            element, self.payload = (
-                self.controls.popleft() if len(self.controls) > ctrl_delay else self.controls[0]
-            )
+            if len(self.controls) > ctrl_delay:
+                element, self.payload = self.controls.popleft()
+                if self.resume is not None:
+                    for name, cursor in self.resume.items():
+                        cursor.restore(self.tools.channel(name))
+                    self.resume = None
+            else:
+                element, self.payload = self.controls[0]
             out = self._qmf(element, out, toc.frame_length)
             self.delay += pcm_delay
         return out
