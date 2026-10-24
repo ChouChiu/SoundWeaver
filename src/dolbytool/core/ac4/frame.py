@@ -4,17 +4,21 @@ from __future__ import annotations
 
 import logging
 from collections import deque
+from dataclasses import replace
 
 import numpy as np
 
 from dolbytool.core.atmos.bitstream import BitReader, BitstreamError
+from dolbytool.core.atmos.oamd import Frame, Trim
 from dolbytool.core.atmos.qmf import BANDS, DELAY, Analysis, Synthesis
+from dolbytool.core.atmos.render import Renderer
+from dolbytool.core.speakers import LAYOUTS, SpeakerLayout
 
-from . import acpl, ajoc, aspx
+from . import acpl, ajoc, aspx, oamd
 from .asf import Noise
 from .elements import Element, Reader, Tools, audio_data
 from .imdct import Imdct
-from .toc import Toc, read_toc
+from .toc import DYN, SubstreamGroup, Toc, read_toc
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +34,40 @@ ALIGNMENT = {
 
 IMS_VERSION = 2
 STEREO = 1
+# the A-SPX positions (FrameDecoder.resume) of the extra objects' substream go by this
+EXTRA = "extra:"
+# objs_to_channel_mode (clause 6.2.3.3) for the counts supported: the channels that
+# hold the object essences, in their order
+_OBJS_CHANNELS = {1: ("C",), 2: ("L", "R")}
+
+
+def _check_size(bits: BitReader, audio_start: int, size: int) -> None:
+    if bits.pos - audio_start > size * 8:
+        raise BitstreamError(
+            f"audio data overran its {size} bytes by {bits.pos - audio_start - size * 8} bits"
+        )
+
+
+def _joined(meta: Frame, extra: Frame) -> Frame:
+    """An A-JOC frame's metadata with the extra objects after its own, as dynamic objects."""
+    n = meta.object_count
+    program = replace(
+        meta.program, dynamic_objects=meta.program.dynamic_objects + extra.object_count
+    )
+    exempt = meta.trim.exempt | {n + i for i in extra.trim.exempt}
+    return Frame(
+        n + extra.object_count, program, meta.updates + extra.updates,
+        replace(meta.trim, exempt=frozenset(exempt)),
+    )  # fmt: skip
+
+
+def _layout_of(channels: dict[str, np.ndarray]) -> SpeakerLayout:
+    """The speaker layout of a channel coded presentation's channels, its LFE aside."""
+    names = set(channels) - {"LFE"}
+    for layout in LAYOUTS:
+        if set(layout.channels) - {"LFE"} == names:
+            return layout
+    raise BitstreamError(f"no speaker layout to render objects to for {'/'.join(channels)}")
 
 
 def coded_channel_mode(presentation_version: int, channel_mode: int) -> int:
@@ -60,17 +98,37 @@ class FrameDecoder:
         self.reconstructor: ajoc.Reconstructor | None = None
         self.payload: ajoc.AjocPayload | None = None
         # frame alignment: the PCM held back by d_pcm, and the last frames' QMF tool data
+        # (with the extra objects' metadata of a channel coded presentation)
         self.held: dict[str, np.ndarray] = {}
-        self.controls: deque[tuple[Element, ajoc.AjocPayload | None]] = deque()
+        self.controls: deque[tuple[Element, ajoc.AjocPayload | None, Frame | None]] = deque()
         # for a decoder started on a later I-frame: A-SPX's noise and sine table positions
-        # (aspx.Cursor) as decoding from the start would have them on its first frame
+        # (aspx.Cursor) as decoding from the start would have them on its first frame;
+        # those of the extra objects' substream are named with EXTRA before them
         self.resume: dict[str, aspx.Cursor] | None = None
+        # the presentation's second substream group, object coded but not A-JOC (the
+        # dialogue of a presentation that sets its own dialogue level): a decoder of its own,
+        # the element it read from this frame, and its metadata as the output goes with it
+        self.extra: FrameDecoder | None = None
+        self.extra_element: Element | None = None
+        self.extra_meta: Frame | None = None
+        self.renderer: Renderer | None = None
+        # as the extra decoder: its objects' OAMD state, and what this frame's said
+        self.is_extra = False
+        self.objects: oamd.Objects | None = None
+        self.timing = oamd.Timing(())
+        self.meta: Frame | None = None
+        self.essences: tuple[str, ...] = ()
 
     def toc(self, frame: bytes) -> Toc:
         return read_toc(frame)
 
     def element(self, frame: bytes, toc: Toc | None = None) -> Element:
-        """The audio of the first presentation's channel coded substream, before the transform."""
+        """The audio of the first presentation's first substream, before the transform.
+
+        The objects of a second substream group are read alongside by `extra`:
+        an A-JOC payload takes them on as further objects, and a channel
+        coded presentation has them rendered into its channels by `decode`.
+        """
         toc = toc or read_toc(frame)
         if not toc.presentations:
             raise BitstreamError("the frame has no presentation")
@@ -79,19 +137,8 @@ class FrameDecoder:
         info = group.substreams[0]
         if not group.channel_coded and info.kind != "ajoc":
             raise BitstreamError("object coded substreams are only supported A-JOC coded")
-        start = toc.data_start + toc.payload_base + sum(toc.substream_sizes[: info.index])
-        end = start + toc.substream_sizes[info.index] if toc.substream_sizes else len(frame)
-        bits = BitReader(frame, start * 8, min(end, len(frame)) * 8)
-        size = bits.read(15)
-        if bits.flag():
-            size += bits.variable_bits(7) << 15
+        bits, size, reader = self._reader(frame, toc, info)
         audio_start = bits.pos
-        if self.tools is None or self.tools.frame_len != toc.frame_length:
-            self.tools = Tools(toc.frame_length, toc.fs_index == 1)
-        reader = Reader(
-            bits, toc.frame_length, info.iframe or toc.iframe_global, Noise(toc.sequence_counter),
-            self.tools,
-        )  # fmt: skip
         if info.kind == "ajoc":
             self.ajoc_state.group_timing = None
             if group.oamd_index is not None and toc.substream_sizes:
@@ -107,11 +154,80 @@ class FrameDecoder:
             mode = coded_channel_mode(presentation.version, info.channel_mode)
             element = audio_data(reader, mode, info.add_ch_base)
             self.payload = None
-        if bits.pos - audio_start > size * 8:
-            raise BitstreamError(
-                f"audio data overran its {size} bytes by {bits.pos - audio_start - size * 8} bits"
-            )
+        _check_size(bits, audio_start, size)
         self.channel_mode = info.channel_mode
+        extra = presentation.groups[1:]
+        if extra:
+            if len(extra) > 1:
+                raise BitstreamError("a presentation of more than two substream groups")
+            if self.extra is None:
+                self.extra = FrameDecoder()
+                self.extra.is_extra = True
+            self.extra_element = self.extra._objects_element(frame, toc, toc.groups[extra[0]])
+            if self.payload is not None:
+                self.payload.metadata = _joined(self.payload.metadata, self.extra.meta)
+        elif self.extra is not None:
+            raise BitstreamError("the presentation's extra objects went away")
+        return element
+
+    def _reader(self, frame: bytes, toc: Toc, info) -> tuple[BitReader, int, Reader]:
+        """The bits of substream `info` past its audio_size, that size, and a Reader on them."""
+        if not toc.substream_sizes and self.is_extra:
+            raise BitstreamError("an object substream without a substream_index_table")
+        start = toc.data_start + toc.payload_base + sum(toc.substream_sizes[: info.index])
+        end = start + toc.substream_sizes[info.index] if toc.substream_sizes else len(frame)
+        bits = BitReader(frame, start * 8, min(end, len(frame)) * 8)
+        size = bits.read(15)
+        if bits.flag():
+            size += bits.variable_bits(7) << 15
+        if self.tools is None or self.tools.frame_len != toc.frame_length:
+            self.tools = Tools(toc.frame_length, toc.fs_index == 1)
+        reader = Reader(
+            bits, toc.frame_length, info.iframe or toc.iframe_global, Noise(toc.sequence_counter),
+            self.tools,
+        )  # fmt: skip
+        return bits, size, reader
+
+    def _objects_element(self, frame: bytes, toc: Toc, group: SubstreamGroup) -> Element:
+        """audio_data_objs (clause 6.2.3.2) of an object substream, and its group's
+        oamd_substream (clause 6.2.2.4) into `meta`.
+
+        Its objects are coded as the channels of objs_to_channel_mode; the
+        order of the object essences is that of the channels in the element.
+        """
+        info = group.substreams[0]
+        if len(group.substreams) > 1 or info.kind != "obj":
+            raise BitstreamError(
+                "a second substream group is only supported as one object substream"
+            )
+        if len(info.objects) not in _OBJS_CHANNELS or any(
+            kind != DYN or lfe for kind, lfe in info.objects
+        ):
+            raise BitstreamError(f"{len(info.objects)} object essences are not supported yet")
+        if group.oamd_index is None:
+            raise BitstreamError("object essences without an oamd_substream")
+        bits, size, reader = self._reader(frame, toc, info)
+        audio_start = bits.pos
+        element = audio_data(reader, len(info.objects) - 1)  # mono or stereo
+        _check_size(bits, audio_start, size)
+        iframe = info.iframe or toc.iframe_global
+        if self.objects is None or iframe:
+            types, program = oamd.program_for(info.objects, (), None, False)
+            trim = self.objects.trim if self.objects is not None else Trim()
+            self.objects = oamd.Objects(types, program, trim=trim)
+        at = toc.data_start + toc.payload_base + sum(toc.substream_sizes[: group.oamd_index])
+        b = BitReader(frame, at * 8, (at + toc.substream_sizes[group.oamd_index]) * 8)
+        if b.flag():  # b_oamd_common_data_present
+            trim = oamd.read_common(b)
+            if trim is not None:
+                self.objects.trim = trim
+        if b.flag():  # b_oamd_timing_present
+            self.timing = oamd.read_timing(b)
+        if toc.presentations[0].alternative:
+            raise BitstreamError("alternative object properties are not supported yet")
+        # oamd_dyndata_multi: every object of the group is coded here, none A-JOC coded
+        self.meta = oamd.read_dyndata(b, self.objects, self.timing, iframe, False)
+        self.essences = _OBJS_CHANNELS[len(info.objects)]
         return element
 
     def decode(self, frame: bytes) -> dict[str, np.ndarray]:
@@ -121,31 +237,67 @@ class FrameDecoder:
         Through the QMF tools the frame alignment of clause 5.6 applies: the
         signal is held back by d_pcm and each frame's tool data (A-JOC's and its
         object metadata among them) by d_ctrl frames, so `payload` is then the
-        one of d_ctrl frames ago, which the returned samples go with.
+        one of d_ctrl frames ago, which the returned samples go with.  A
+        presentation with extra objects goes through the banks throughout, as
+        their decoder does, so the two come out with one delay.
         """
         toc = read_toc(frame)
         element = self.element(frame, toc)
+        out = self._pcm(toc, element)
+        if self.extra is not None:
+            objects = self.extra._pcm(toc, self.extra_element)
+            if self.extra.delay != self.delay:
+                raise BitstreamError("the extra objects came out with a delay of their own")
+            essences = [objects[name] for name in self.extra.essences]
+            if self.payload is not None:
+                first = self.payload.upmix
+                out.update({f"o{first + i}": x for i, x in enumerate(essences)})
+            else:
+                self._mix(out, essences, toc.frame_length)
+        return out
+
+    def _mix(self, out: dict[str, np.ndarray], essences: list[np.ndarray], frame_len: int) -> None:
+        """The extra objects rendered into the presentation's own channels."""
+        layout = _layout_of(out)
+        if self.renderer is None:
+            self.renderer = Renderer(len(essences), layout)
+        gains = self.renderer.gains(self.extra_meta, frame_len)[..., :-1]
+        mixed = np.einsum("ots,ot->st", gains, np.stack(essences))
+        for name, x in zip(layout.channels, mixed, strict=True):
+            if name in out:
+                out[name] = out[name] + x
+
+    def _pcm(self, toc: Toc, element: Element) -> dict[str, np.ndarray]:
         out = {}
         for name, track in element.channels.items():
             transform = self.transforms.get(name)
             if transform is None:
                 transform = self.transforms[name] = Imdct(toc.frame_length)
             out[name] = transform(track.spectrum, track.windows)
-        if element.qmf or self.delay or self.payload is not None:
+        banks = self.is_extra or self.extra is not None
+        if element.qmf or self.delay or self.payload is not None or banks:
             pcm_delay, ctrl_delay = ALIGNMENT[toc.frame_length]
             for name, x in out.items():
                 y = np.concatenate([self.held.get(name, np.zeros(pcm_delay)), x])
                 out[name], self.held[name] = y[: len(x)], y[len(x) :]
-            self.controls.append((element, self.payload))
+            meta = self.extra.meta if self.extra is not None else None
+            self.controls.append((element, self.payload, meta))
             # until d_ctrl frames have gone by, the first frame's data stands in
             if len(self.controls) > ctrl_delay:
-                element, self.payload = self.controls.popleft()
+                element, self.payload, self.extra_meta = self.controls.popleft()
                 if self.resume is not None:
                     for name, cursor in self.resume.items():
-                        cursor.restore(self.tools.channel(name))
+                        if not name.startswith(EXTRA):
+                            cursor.restore(self.tools.channel(name))
+                    if self.extra is not None:
+                        self.extra.resume = {
+                            name.removeprefix(EXTRA): cursor
+                            for name, cursor in self.resume.items()
+                            if name.startswith(EXTRA)
+                        }
                     self.resume = None
             else:
-                element, self.payload = self.controls[0]
+                element, self.payload, self.extra_meta = self.controls[0]
             out = self._qmf(element, out, toc.frame_length)
             self.delay += pcm_delay
         return out

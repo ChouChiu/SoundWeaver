@@ -31,7 +31,7 @@ from dolbytool.core.cancel import CancellationToken
 from dolbytool.core.i18n import get_language
 
 from . import aspx
-from .frame import ALIGNMENT, FrameDecoder
+from .frame import ALIGNMENT, EXTRA, FrameDecoder
 from .toc import read_toc
 
 # frames per stretch, frames decoded before it from an I-frame, and stretches a
@@ -246,10 +246,10 @@ def decode_frames(frames: list[bytes], token: CancellationToken) -> Iterator[Dec
 def _iframe(frame: bytes) -> bool:
     try:
         toc = read_toc(frame)
-        group = toc.groups[toc.presentations[0].groups[0]]
+        groups = [toc.groups[g] for g in toc.presentations[0].groups]
     except (BitstreamError, IndexError):
         return False
-    return toc.iframe_global or all(info.iframe for info in group.substreams)
+    return toc.iframe_global or all(info.iframe for g in groups for info in g.substreams)
 
 
 def _parse(frames: list[bytes], skip: int) -> list[tuple[dict[str, tuple[int, int]], Frame | None]]:
@@ -268,6 +268,11 @@ def _parse(frames: list[bytes], skip: int) -> list[tuple[dict[str, tuple[int, in
         if k >= skip:
             tools = decoder.tools
             intervals = {n: aspx.interval(tools.channel(n), f) for n, f in element.aspx.items()}
+            if decoder.extra is not None:
+                tools, extra = decoder.extra.tools, decoder.extra_element
+                intervals.update(
+                    (EXTRA + n, aspx.interval(tools.channel(n), f)) for n, f in extra.aspx.items()
+                )
             payload = decoder.payload
             out.append((intervals, payload.metadata if payload is not None else None))
     return out
