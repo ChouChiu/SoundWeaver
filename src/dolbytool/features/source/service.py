@@ -15,7 +15,19 @@ from dolbytool.core.motion import MOTION_SUFFIXES, is_motion
 from dolbytool.core.paths import atomic_output, cache_dir, content_key, natural_key
 from dolbytool.features.source import lyrics
 
-AUDIO_SUFFIXES = {".m4a", ".mp4", ".mka", ".mkv", ".ec3", ".eac3", ".ac3", ".thd", ".wav", ".flac"}
+AUDIO_SUFFIXES = {
+    ".m4a",
+    ".mp4",
+    ".mka",
+    ".mkv",
+    ".ec3",
+    ".eac3",
+    ".ac3",
+    ".ac4",
+    ".thd",
+    ".wav",
+    ".flac",
+}
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 TTML_SUFFIXES = {".ttml"}
 # Cover art an album folder usually carries, best first

@@ -13,7 +13,7 @@ from dataclasses import dataclass, replace
 from functools import cache
 from pathlib import Path
 
-from dolbytool.core import ffmpeg, motion
+from dolbytool.core import ac4, ffmpeg, motion
 from dolbytool.core.cancel import CancellationToken
 from dolbytool.core.i18n import t
 from dolbytool.core.paths import atomic_output, work_root
@@ -178,6 +178,9 @@ def render_player_video(
     elif cover:
         args += ["--cover", str(cover)]
     if audio:
+        if ac4.is_ac4(audio):
+            on_status(t("step.decode_ac4"))
+            audio = ac4.decoded_path(audio, token)
         args += ["--audio", str(audio), "--audio-mode", spec.audio_mode]
         if spec.beat and spec.background == "mesh":
             args.append("--beat")
@@ -292,10 +295,9 @@ def render_queue(
         if _needs_audio(spec):
             on_status(t("step.concat_album_audio"))
             listing = Path(scratch) / "audio.txt"
+            sources = [ac4.readable(track.audio, token) for track in tracks]
             listing.write_text(
-                "".join(
-                    "file '{}'\n".format(str(track.audio).replace("'", "'\\''")) for track in tracks
-                ),
+                "".join("file '{}'\n".format(str(path).replace("'", "'\\''")) for path in sources),
                 encoding="utf-8",
             )
             audio = Path(scratch) / "queue.mka"

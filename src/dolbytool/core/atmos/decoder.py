@@ -1,6 +1,8 @@
 """A Dolby Atmos (E-AC-3 JOC) track, decoded and rendered to a speaker layout.
 
-ffmpeg decodes the channel-based core; everything past that is TS 103 420:
+An AC-4 track (A-JOC) is decoded by `core.ac4` and joins at the renderer.
+
+For E-AC-3, ffmpeg decodes the channel-based core; everything past that is TS 103 420:
 the OAMD and JOC payloads are read from each syncframe, the objects are
 rebuilt in the QMF domain from the core's five main channels (JOC downmix
 configurations 0 and 3; the 7.X ones are refused), and the room
@@ -94,6 +96,12 @@ def decode_atmos(
     BWF.  The object trace always comes along: it is cached, so a sound field
     video of the same file needs no second decode.
     """
+    from dolbytool.core import ac4  # ac4 builds on this package's modules
+
+    if ac4.is_ac4(source):
+        trace, out = ac4.decode_objects(source, token, on_fraction, layout, speakers, adm)
+        _store_trace(source, layout, trace)
+        return AtmosDecode(trace, out, layout)
     with _prepare(source, token) as (frames, core, rate, first, length):
         out = create_pcm_audio(len(layout.channels), length, rate) if speakers else None
         try:

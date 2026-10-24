@@ -5,9 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from dolbytool.core import ffmpeg
+from dolbytool.core import ac4, ffmpeg
 from dolbytool.core.i18n import t
-from dolbytool.core.speakers import SpeakerLayout, file_layout
+from dolbytool.core.speakers import LAYOUTS, SpeakerLayout, file_layout
 from dolbytool.core.stems import StemLayout, layout_for
 
 
@@ -92,13 +92,17 @@ def probe_audio(path: Path) -> AudioInfo:
     """Layout, length and embedded cover of the first audio stream; raises FFmpegError if unusable."""
     data = ffmpeg.probe(path)
     stream = ffmpeg.first_audio_stream(data)
-    channels = int(stream.get("channels", 0))
+    ac4_info = _ac4_info(path) if ac4.is_ac4_stream(stream) else None
+    # a bare AC-4 stream has no channel count before decoding; the TOC gives it below
+    channels = int(stream.get("channels", 0)) if ac4_info is None else 1
     if channels < 1:
         raise ffmpeg.FFmpegError(t("error.no_channel_count"))
     try:
         seconds = float(data["format"]["duration"])
     except (KeyError, ValueError) as error:
-        raise ffmpeg.FFmpegError(t("error.no_duration", name=path.name)) from error
+        if ac4_info is None or ac4_info.duration is None:
+            raise ffmpeg.FFmpegError(t("error.no_duration", name=path.name)) from error
+        seconds = ac4_info.duration
     if seconds <= 0:
         raise ffmpeg.FFmpegError(t("error.zero_duration"))
     cover = next(
@@ -107,17 +111,49 @@ def probe_audio(path: Path) -> AudioInfo:
     )
     atmos = _is_atmos(stream)
     tags = _tags(data, stream)
+    codec = str(stream.get("codec_long_name") or stream.get("codec_name") or "")
+    speakers = None if atmos else file_layout(str(stream.get("channel_layout", "")), channels)
+    if ac4_info is not None:
+        channels, codec, speakers, atmos = _ac4_layout(ac4_info)
     return AudioInfo(
         channels,
         seconds,
         atmos=atmos,
-        codec=str(stream.get("codec_long_name") or stream.get("codec_name") or ""),
-        sample_rate=int(stream.get("sample_rate") or 0),
+        codec=codec,
+        sample_rate=ac4_info.sample_rate if ac4_info else int(stream.get("sample_rate") or 0),
         cover_stream=cover,
         title=tags.get("title", ""),
         artist=tags.get("artist", "") or tags.get("album_artist", ""),
         album=tags.get("album", ""),
         disc=_number(tags.get("disc", "")),
         track=_number(tags.get("track", "")),
-        speakers=None if atmos else file_layout(str(stream.get("channel_layout", "")), channels),
+        speakers=speakers,
     )
+
+
+def _ac4_info(path: Path) -> ac4.Ac4Info:
+    try:
+        return ac4.describe(path)
+    except ac4.Ac4Error as error:
+        raise ffmpeg.FFmpegError(str(error)) from error
+
+
+def _ac4_layout(info: ac4.Ac4Info) -> tuple[int, str, SpeakerLayout | None, bool]:
+    """Channels, codec name, speakers and Dolby Atmos-ness of what the AC-4 decoder makes of a track.
+
+    ffprobe has no AC-4 decoder, so its channel count is the container's word;
+    the first frame's own table of contents says what decoding gives.  A-JOC
+    objects count as Dolby Atmos, with the 5.1 render as their core.
+    """
+    if info.objects:
+        return len(info.channels), "AC-4 A-JOC", None, True
+    # as `file_layout` does, a layout only for a discrete surround master
+    speakers = next(
+        (
+            layout
+            for layout in LAYOUTS
+            if layout.channels == info.channels and len(layout.channels) >= 6
+        ),
+        None,
+    )
+    return len(info.channels), "AC-4 IMS" if info.ims else "AC-4", speakers, False

@@ -103,7 +103,12 @@ def load_audio(path: Path, token: CancellationToken) -> AudioData:
 
 def decode_audio(path: Path, token: CancellationToken) -> AudioData:
     """Decode with ffmpeg straight into a scratch file, used in place as interleaved float32."""
+    # ac4 reaches this module through the Atmos package, so it is imported here
+    from dolbytool.core import ac4
+
     stream = ffmpeg.first_audio_stream(ffmpeg.probe(path))
+    if ac4.is_ac4_stream(stream):
+        return read_audio(ac4.decoded_path(path, token), token)
     channels, rate = int(stream["channels"]), int(stream["sample_rate"])
     scratch = _scratch()
     try:

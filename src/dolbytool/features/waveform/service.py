@@ -15,6 +15,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from dolbytool.core import ac4
 from dolbytool.core.cancel import CancellationToken
 from dolbytool.core.ffmpeg import duration, run_ffmpeg
 from dolbytool.core.i18n import t
@@ -75,6 +76,7 @@ def render_waveform_video(
     on_fraction: Callable[[float], None] = lambda _f: None,
 ) -> None:
     on_fraction(0.0)
+    audio = ac4.readable(audio, token)
     # yuv420p needs even dimensions
     spec = replace(spec, screen_width=spec.screen_width // 2 * 2, height=spec.height // 2 * 2)
     seconds = duration(audio)
