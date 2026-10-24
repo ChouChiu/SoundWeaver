@@ -128,6 +128,10 @@ def band_of_subband(bands_id: int) -> np.ndarray:
     return np.asarray(_GROUP_BAND[bands_id])[group]
 
 
+# the ducker's 15 bands as a [band, subband] sum
+_DUCK_BANDS = (band_of_subband(0)[None, :] == np.arange(15)[:, None]).astype(float)
+
+
 @dataclass(frozen=True, slots=True)
 class AcplConfig:
     bands_id: int
@@ -245,20 +249,20 @@ class Module:
         return y
 
     def duck(self, u: np.ndarray) -> np.ndarray:
-        """Pseudocodes 112 to 114, slot by slot."""
-        bands = band_of_subband(0)
-        out = u.copy()
-        for ts in range(u.shape[1]):
-            energy = np.bincount(bands, weights=np.abs(u[:, ts]) ** 2, minlength=15)
-            peak = np.where(
-                0.76592833836465 * self.peak < energy, energy, 0.76592833836465 * self.peak
-            )
-            smooth = 0.75 * self.smooth + 0.25 * energy
-            diff = 0.75 * self.diff + 0.25 * (peak - energy)
-            gain = np.where(1.5 * diff > smooth, smooth / (1.5 * (diff + 1e-9)), 1.0)
-            self.peak, self.smooth, self.diff = peak, smooth, diff
-            out[:, ts] *= gain[bands]
-        return out
+        """Pseudocodes 112 to 114: every slot's band energies at once, then the
+        peak held slot by slot and the two smoothers run as one-pole filters."""
+        if not u.shape[1]:
+            return u.copy()
+        energy = _DUCK_BANDS @ (u.real**2 + u.imag**2)  # [band, slot]
+        peak = np.empty_like(energy)
+        held = self.peak
+        for ts in range(energy.shape[1]):
+            held = peak[:, ts] = np.maximum(0.76592833836465 * held, energy[:, ts])
+        smooth, _ = lfilter([0.25], [1, -0.75], energy, axis=1, zi=0.75 * self.smooth[:, None])
+        diff, _ = lfilter([0.25], [1, -0.75], peak - energy, axis=1, zi=0.75 * self.diff[:, None])
+        gain = np.where(1.5 * diff > smooth, smooth / (1.5 * (diff + 1e-9)), 1.0)
+        self.peak, self.smooth, self.diff = peak[:, -1].copy(), smooth[:, -1], diff[:, -1]
+        return u * gain[band_of_subband(0)]
 
 
 def _interpolate(

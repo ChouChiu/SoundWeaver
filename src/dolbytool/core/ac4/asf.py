@@ -307,16 +307,19 @@ def _read_lines(b: BitReader, cb: int, out: np.ndarray, start: int, stop: int) -
             out[k : k + dim] = symbols[sym]
             k += dim
         return
+    if cb != ESCAPE_CODEBOOK:
+        count = -(-(stop - start) // dim)
+        out[start : start + count * dim] = hcb.decode_signed(b, count, symbols)
+        return
     decode, read = hcb.decode, b.read
     while k < stop:
         lines = symbols[decode(b)]
         for i, q in enumerate(lines):
             if q and read(1):
                 lines = lines[:i] + (-q,) + lines[i + 1 :]
-        if cb == ESCAPE_CODEBOOK:
-            lines = tuple(
-                (_ext_decode(b) if q > 0 else -_ext_decode(b)) if abs(q) == 16 else q for q in lines
-            )
+        lines = tuple(
+            (_ext_decode(b) if q > 0 else -_ext_decode(b)) if abs(q) == 16 else q for q in lines
+        )
         out[k : k + dim] = lines
         k += dim
 

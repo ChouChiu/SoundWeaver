@@ -365,10 +365,10 @@ class Reconstructor:
         targets = self.targets(frame)
         slots = x.shape[2]
         starts = {start: dp for dp, (start, _) in enumerate(frame.points)}
-        dry = np.empty((slots, *self.dry.shape))
-        wet = np.empty((slots, *self.wet.shape))
-        pre = np.empty((slots, *self.pre.shape))
-        for ts in range(slots):
+        # runs of slots whose matrices are base + step * (1, 2, ...), or base alone
+        runs = []
+        ts = 0
+        while ts < slots:
             dp = starts.get(ts)
             if dp is not None:
                 # a new ramp starts here and takes its first step in this slot
@@ -378,19 +378,39 @@ class Reconstructor:
                 )
                 self.ramp.remaining = length
                 self.final = targets[dp]
-            if self.ramp.remaining > 0:
-                self.ramp.remaining -= 1
+            # up to the next data point: the ramp's steps, then the values it ended on
+            stop = min([s for s in starts if ts < s < slots], default=slots)
+            ramp = min(self.ramp.remaining, stop - ts)
+            current = (self.dry, self.wet, self.pre)
+            if ramp:
+                runs.append((ts, ts + ramp, current, self.steps))
+                self.ramp.remaining -= ramp
                 if self.ramp.remaining == 0:
-                    self.dry, self.wet, self.pre = (m.copy() for m in self.final)
+                    current = tuple(m.copy() for m in self.final)
                 else:
-                    self.dry = self.dry + self.steps[0]
-                    self.wet = self.wet + self.steps[1]
-                    self.pre = self.pre + self.steps[2]
-            dry[ts], wet[ts], pre[ts] = self.dry, self.wet, self.pre
+                    current = tuple(c + step * ramp for c, step in zip(current, self.steps))
+                self.dry, self.wet, self.pre = current
+            if ts + ramp < stop:
+                runs.append((ts + ramp, stop, current, None))
+            ts = stop
         # decorrelator inputs, the decorrelated and ducked signals, then the two matrices
-        z = np.einsum("tocs,cst->ost", dry, x)
+        z = _mix(runs, 0, x)
         if self.decorr:
-            u = np.einsum("tdcs,cst->dst", pre, x)
+            u = _mix(runs, 2, x)
             y = np.stack([m.duck(m.decorrelate(u[d])) for d, m in enumerate(self.modules)])
-            z += np.einsum("tods,dst->ost", wet, y)
+            z += _mix(runs, 1, y)
         return z
+
+
+def _mix(runs: list, which: int, x: np.ndarray) -> np.ndarray:
+    """x (inputs, 64, slots) through matrix `which` (outputs, inputs, 64) of every run."""
+    out = np.empty((runs[0][2][which].shape[0], *x.shape[1:]), dtype=complex)
+    for start, stop, base, steps in runs:
+        # real matrices on the real and imaginary parts side by side, a product per subband
+        v = np.ascontiguousarray(x[:, :, start:stop]).view(float).transpose(1, 0, 2)
+        z = np.matmul(base[which].transpose(2, 0, 1), v)
+        if steps is not None:
+            ramp = np.repeat(np.arange(1, stop - start + 1), 2)
+            z += ramp * np.matmul(steps[which].transpose(2, 0, 1), v)
+        out[:, :, start:stop] = np.ascontiguousarray(z.transpose(1, 0, 2)).view(complex)
+    return out

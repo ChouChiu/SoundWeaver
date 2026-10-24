@@ -141,3 +141,36 @@ class Huffman:
             raise BitstreamError("read past the end of the field")
         bits.pos = pos
         return out
+
+    def decode_signed(
+        self, bits: BitReader, count: int, symbols: list[tuple[int, ...]]
+    ) -> list[int]:
+        """`count` codes for tuples of `symbols`, each followed by a sign bit per nonzero
+        magnitude (1 for negative), flattened; unrolled like `decode_run`."""
+        table, tree, width = self._table, self._tree, self._width
+        value, limit, pos = bits._value, bits._limit, bits.pos
+        mask = (1 << width) - 1
+        out = []
+        for _ in range(count):
+            shift = limit - pos - width
+            peek = (value >> shift if shift >= 0 else value << -shift) & mask
+            leaf, symbol, used = table[peek]
+            pos += used
+            while not leaf:
+                if pos >= limit:
+                    raise BitstreamError("read past the end of the field")
+                node = tree[symbol][(value >> (limit - pos - 1)) & 1]
+                pos += 1
+                leaf, symbol = node <= 0, (-node - 1 if node <= 0 else node)
+            for q in symbols[symbol]:
+                if q:
+                    pos += 1
+                    if pos > limit:
+                        raise BitstreamError("read past the end of the field")
+                    if (value >> (limit - pos)) & 1:
+                        q = -q
+                out.append(q)
+        if pos > bits.end:
+            raise BitstreamError("read past the end of the field")
+        bits.pos = pos
+        return out

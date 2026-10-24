@@ -650,6 +650,30 @@ def _preflatten(low: np.ndarray, sbx: int, ts0: int, ts1: int) -> np.ndarray:
     return 10 ** ((fit - env.mean()) / 20)
 
 
+@cache
+def _patch_map(nb: Bands) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Per subband the HF generator fills: where it copies from, itself, and its chirp group."""
+    source, target = [], []
+    sb_high = nb.sbx
+    for count, start in zip(nb.patch_count, nb.patch_start):
+        for i in range(count):
+            if sb_high + i >= SUBBANDS:
+                break
+            source.append(start + i)
+            target.append(sb_high + i)
+        sb_high += count
+    target = np.array(target, dtype=int)
+    group = np.searchsorted(nb.noise, target, side="right") - 1
+    return np.array(source, dtype=int), target, np.clip(group, 0, len(nb.noise) - 2)
+
+
+@cache
+def _groups(table: tuple[int, ...]) -> tuple[np.ndarray, np.ndarray]:
+    """For subbands table[0] up to table[-1]: the group of each, and a [group, subband] sum."""
+    index = np.repeat(np.arange(len(table) - 1), np.diff(table))
+    return index, (index[None, :] == np.arange(len(table) - 1)[:, None]).astype(float)
+
+
 def process(
     ch: AspxChannel, f: AspxFrame, q: np.ndarray, sig_scf: list[np.ndarray],
     noise_scf: list[np.ndarray],
@@ -675,21 +699,20 @@ def process(
         chirps[g] = 0.0 if new < 0.015625 else new
     gain_vec = _preflatten(low, sbx, ts0, ts1) if config.preflat else None
     high = np.zeros((SUBBANDS, slots + hfgen), dtype=complex)
-    noise_group = np.searchsorted(nb.noise, np.arange(SUBBANDS), side="right") - 1
     t = np.arange(ts0, ts1)
-    sb_high = sbx
-    for count, start in zip(nb.patch_count, nb.patch_start):
-        for i in range(count):
-            p, target = start + i, sb_high + i
-            if target >= SUBBANDS:
-                break
-            c = chirps[min(max(noise_group[target], 0), len(chirps) - 1)]
-            n = t + HFADJ
-            value = ext[p, n] + c * alpha0[p] * ext[p, n - 2] + c * c * alpha1[p] * ext[p, n - 4]
-            if gain_vec is not None:
-                value = value / gain_vec[p]
-            high[target, t] = value
-        sb_high += count
+    source, target, group = _patch_map(nb)
+    if source.size:
+        c = chirps[group]
+        rows = ext[source]
+        n = t + HFADJ
+        value = (
+            rows[:, n]
+            + (c * alpha0[source])[:, None] * rows[:, n - 2]
+            + (c * c * alpha1[source])[:, None] * rows[:, n - 4]
+        )
+        if gain_vec is not None:
+            value = value / gain_vec[source][:, None]
+        high[target, ts0:ts1] = value
     # Pseudocode 90: estimated envelopes over the A-SPX range
     est = np.zeros((width, n_env))
     tables = [nb.high if r else nb.low for r in f.freq_res]
@@ -701,36 +724,39 @@ def process(
             est[:, env] = energy[sbx : sbx + width] / span
         else:
             table = tables[env]
-            for g in range(len(table) - 1):
-                e = energy[table[g] : table[g + 1]].sum() / (table[g + 1] - table[g]) / span
-                est[table[g] - sbx : table[g + 1] - sbx, env] = e
+            index, sums = _groups(table)
+            e = sums @ energy[table[0] : table[-1]] / np.diff(table) / span
+            est[table[0] - sbx : table[-1] - sbx, env] = e[index]
     # Pseudocode 91: scale factors per subband
     scf_sig = np.zeros((width, n_env))
     scf_noise = np.zeros((width, n_env))
     noise_env = 0
+    noise_index = _groups(nb.noise)[0]
     for env in range(n_env):
         table = tables[env]
-        for g in range(len(table) - 1):
-            scf_sig[table[g] - sbx : table[g + 1] - sbx, env] = sig_scf[env][g]
+        scf_sig[table[0] - sbx : table[-1] - sbx, env] = np.asarray(sig_scf[env])[_groups(table)[0]]
         if f.num_noise > 1 and f.sig_borders[env] == f.noise_borders[noise_env + 1]:
             noise_env += 1
-        for g in range(len(nb.noise) - 1):
-            scf_noise[nb.noise[g] - sbx : nb.noise[g + 1] - sbx, env] = noise_scf[noise_env][g]
+        scf_noise[nb.noise[0] - sbx : nb.noise[-1] - sbx, env] = np.asarray(noise_scf[noise_env])[
+            noise_index
+        ]
     # Pseudocodes 92 and 93: sinusoids
     p_sine_at_end = 0 if ch.prev_tsg_ptr == ch.prev_num_env else -1
     sine = np.zeros((width, n_env), dtype=bool)
-    for env in range(n_env):
-        for g in range(len(nb.high) - 1):
-            lo, hi = nb.high[g] - sbx, nb.high[g + 1] - sbx
-            mid = (lo + hi) // 2
-            if env >= f.tsg_ptr or p_sine_at_end == 0 or ch.prev_sine[mid]:
-                sine[mid, env] = bool(f.harmonics[g])
+    high_borders = np.asarray(nb.high) - sbx
+    mid = (high_borders[:-1] + high_borders[1:]) // 2
+    sent = np.asarray(f.harmonics[: len(mid)], dtype=bool)
+    if p_sine_at_end == 0:
+        sine[mid] = sent[:, None]
+    else:
+        sine[mid] = sent[:, None] & ((np.arange(n_env) >= f.tsg_ptr) | ch.prev_sine[mid][:, None])
     area = np.zeros((width, n_env), dtype=bool)
     for env in range(n_env):
         table = tables[env]
-        for g in range(len(table) - 1):
-            lo, hi = table[g] - sbx, table[g + 1] - sbx
-            area[lo:hi, env] = sine[lo:hi, env].any()
+        index, sums = _groups(table)
+        area[table[0] - sbx : table[-1] - sbx, env] = (
+            sums @ sine[table[0] - sbx : table[-1] - sbx, env] > 0
+        )[index]
     # Pseudocode 94 and 95
     factor = scf_sig / (1 + scf_noise)
     sine_lev = np.sqrt(factor * sine)
@@ -747,21 +773,19 @@ def process(
     if config.limiter:
         # Pseudocodes 96 to 101
         lim = nb.limiter
+        index, sums = _groups(lim)
+        lo, hi = lim[0] - sbx, lim[-1] - sbx
         max_gain = np.zeros((width, n_env))
-        for g in range(len(lim) - 1):
-            lo, hi = lim[g] - sbx, lim[g + 1] - sbx
-            ratio = np.sqrt(scf_sig[lo:hi].sum(0) / (1e-12 + est[lo:hi].sum(0))) * 1.41254
-            max_gain[lo:hi] = np.minimum(ratio, 1e5)[None, :]
+        ratio = np.sqrt(sums @ scf_sig[lo:hi] / (1e-12 + sums @ est[lo:hi])) * 1.41254
+        max_gain[lo:hi] = np.minimum(ratio, 1e5)[index]
         with np.errstate(divide="ignore", invalid="ignore"):
             limited_noise = np.minimum(noise_lev, np.nan_to_num(noise_lev * max_gain / gain))
         gain_lim = np.minimum(gain, max_gain)
         boost = np.zeros((width, n_env))
-        for g in range(len(lim) - 1):
-            lo, hi = lim[g] - sbx, lim[g + 1] - sbx
-            nom = 1e-12 + scf_sig[lo:hi].sum(0)
-            den = 1e-12 + (est[lo:hi] * gain_lim[lo:hi] ** 2).sum(0) + (sine_lev[lo:hi] ** 2).sum(0)
-            den = den + np.where(noise_on[lo:hi], limited_noise[lo:hi] ** 2, 0).sum(0)
-            boost[lo:hi] = np.minimum(np.sqrt(nom / den), 1.584893192)[None, :]
+        nom = 1e-12 + sums @ scf_sig[lo:hi]
+        den = 1e-12 + sums @ (est[lo:hi] * gain_lim[lo:hi] ** 2) + sums @ (sine_lev[lo:hi] ** 2)
+        den = den + sums @ np.where(noise_on[lo:hi], limited_noise[lo:hi] ** 2, 0)
+        boost[lo:hi] = np.minimum(np.sqrt(nom / den), 1.584893192)[index]
         gain, noise_lev, sine_lev = gain_lim * boost, limited_noise * boost, sine_lev * boost
     # Pseudocodes 102 to 108
     y = np.zeros((SUBBANDS, slots + hfgen), dtype=complex)
