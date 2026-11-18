@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
+import math
 import struct
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 import numpy as np
 import soundfile as sf
@@ -19,6 +20,8 @@ from soundweaver.core.pcm import AudioData, read_audio
 
 AV3A_SUFFIXES = (".av3a", ".avs3a")
 VVM1_MAGIC = 0x314D5656
+_VVM1_HEADER = struct.Struct("<6I")
+_VVM1_FIELDS = 5
 FRAME_SAMPLES = 1024
 
 _SAMPLING_RATES = (
@@ -140,6 +143,8 @@ def find_binaural_renderer() -> str | None:
 
 
 def _bits(data: bytes, start: int, count: int) -> int:
+    if start + count > len(data) * 8:
+        raise Av3aError("Truncated Audio Vivid AATF header.")
     value = 0
     for i in range(count):
         pos = start + i
@@ -206,6 +211,11 @@ def parse_aatf_header(data: bytes) -> Av3aHeader:
                 raise Av3aError(f"Unsupported Audio Vivid object bitrate index: {obj_idx}")
             bitrate += obj_br * object_count
 
+    resolution = _bits(data, pos, 2)
+    pos += 2
+    if resolution > 2:
+        raise Av3aError(f"Invalid Audio Vivid resolution index: {resolution}")
+
     if profile == 0 or profile == 2:
         br_idx = _bits(data, pos, 4)
         pos += 4
@@ -214,13 +224,9 @@ def parse_aatf_header(data: bytes) -> Av3aHeader:
         if bitrate <= 0:
             raise Av3aError(f"Unsupported Audio Vivid bitrate index: {br_idx}")
 
-    resolution = _bits(data, pos, 2)
-    pos += 2
-    if resolution > 2:
-        raise Av3aError(f"Invalid Audio Vivid resolution index: {resolution}")
-    pos += 8 if profile else 12  # low-level / NN / frame metadata bits
+    pos += 8  # 8-bit AATF CRC
     header_bytes = (pos + 7) // 8
-    payload_bytes = max(0, int((bitrate * FRAME_SAMPLES + sample_rate * 4) // (sample_rate * 8)) - header_bytes)
+    payload_bytes = max(0, math.ceil((int(bitrate / sample_rate * FRAME_SAMPLES) - header_bytes * 8) / 8.0))
     return Av3aHeader(
         profile=profile,
         nn_type=nn_type,
@@ -242,7 +248,7 @@ def is_av3a_file(path: Path) -> bool:
     if suf in AV3A_SUFFIXES:
         with path.open("rb") as f:
             head = f.read(2)
-        return len(head) >= 2 and head[0] == 0xFF and (head[1] & 0xFE) == 0xF2
+        return head in (b"\xff\xf2", b"\xff\xf3")
     if suf in (".ts", ".m2ts"):
         return mp4.has_ts_pes_sync(path, sync=b"\xff\xf2")
     if suf in (".mp4", ".m4a", ".m4v", ".mov"):
@@ -302,25 +308,30 @@ def stream_av3a(
     source_pcm_path: Path | None = None,
     binary: str | None = None,
     on_stderr: Callable[[str], None] | None = None,
+    token: CancellationToken | None = None,
 ) -> NativePcmStream:
     """Open a real-time float32 PCM stream from `vivid stream` (with optional VVM1 telemetry sidecar)."""
     exe = _require_decoder(binary)
     cmd = [exe, "stream", str(path), target_order]
     if timeline_path is not None and source_pcm_path is not None:
         cmd.extend([str(timeline_path), str(source_pcm_path)])
-    return NativePcmStream(cmd, on_stderr=on_stderr)
+    return NativePcmStream(cmd, on_stderr=on_stderr, token=token)
 
 
 def read_vvm1_header(path: Path) -> VvmTimelineHeader | None:
     """Read the 24-byte header of a `.vvm1` binary telemetry file if complete."""
-    if not path.exists() or path.stat().st_size < 24:
+    try:
+        with path.open("rb") as f:
+            return _vvm1_header(f.read(_VVM1_HEADER.size))
+    except FileNotFoundError:
         return None
-    with path.open("rb") as f:
-        raw = f.read(24)
-    if len(raw) < 24:
+
+
+def _vvm1_header(raw: bytes) -> VvmTimelineHeader | None:
+    if len(raw) != _VVM1_HEADER.size:
         return None
-    magic, rate, bed, objs, cfg, flen = struct.unpack("<6I", raw)
-    if magic != VVM1_MAGIC:
+    magic, rate, bed, objs, cfg, flen = _VVM1_HEADER.unpack(raw)
+    if magic != VVM1_MAGIC or rate <= 0 or flen <= 0:
         return None
     return VvmTimelineHeader(rate, bed, objs, cfg, flen)
 
@@ -330,18 +341,37 @@ def read_vvm1_frame(
     header: VvmTimelineHeader,
     frame_index: int,
 ) -> np.ndarray | None:
-    """Return shape `(bed + objects, 5)` float32 `[x, y, z, peak, jump]` for `frame_index`, or None."""
-    total_ch = header.bed_channels + header.object_count
-    stride = total_ch * 5 * 4
-    offset = 24 + max(0, frame_index) * stride
-    if not path.exists() or path.stat().st_size < offset + stride:
+    """Return shape `(bed + objects, 5)` float32 `[x, y, z, peak, jump]` or None."""
+    channels = header.bed_channels + header.object_count
+    stride = channels * _VVM1_FIELDS * 4
+    try:
+        with path.open("rb") as f:
+            f.seek(_VVM1_HEADER.size + max(0, frame_index) * stride)
+            raw = f.read(stride)
+    except FileNotFoundError:
         return None
-    with path.open("rb") as f:
-        f.seek(offset)
-        raw = f.read(stride)
-    if len(raw) < stride:
+    if len(raw) != stride:
         return None
-    return np.frombuffer(raw, dtype="<f4").reshape(total_ch, 5).copy()
+    return np.frombuffer(raw, dtype="<f4").reshape(channels, _VVM1_FIELDS).copy()
+
+
+def read_vvm1_timeline(path: Path) -> tuple[VvmTimelineHeader | None, np.ndarray | None]:
+    """Read complete telemetry frames from a decoder sidecar."""
+    try:
+        with path.open("rb") as f:
+            header = _vvm1_header(f.read(_VVM1_HEADER.size))
+            if header is None:
+                return None, None
+            channels = header.bed_channels + header.object_count
+            if not channels:
+                return header, None
+            values = np.fromfile(f, dtype="<f4")
+    except FileNotFoundError:
+        return None, None
+    stride = channels * _VVM1_FIELDS
+    length = values.size // stride * stride
+    frames = values[:length].reshape(-1, channels, _VVM1_FIELDS) if length else None
+    return header, frames
 
 
 def encode_av3a(
@@ -499,11 +529,11 @@ def extract_elementary_stream(mp4_path: Path, out_av3a: Path) -> bool:
 
 __all__ = [
     "AV3A_SUFFIXES",
+    "CONFIG_CHANNEL_ORDER",
+    "FRAME_SAMPLES",
     "Av3aError",
     "Av3aHeader",
     "Av3aInfo",
-    "CONFIG_CHANNEL_ORDER",
-    "FRAME_SAMPLES",
     "VvmTimelineHeader",
     "decode_av3a",
     "encode_av3a",
@@ -516,6 +546,7 @@ __all__ = [
     "probe_av3a",
     "read_vvm1_frame",
     "read_vvm1_header",
+    "read_vvm1_timeline",
     "render_binaural_audio",
     "render_binaural_file",
     "stream_av3a",

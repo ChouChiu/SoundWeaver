@@ -184,13 +184,24 @@ _FFMPEG = {
 }  # fmt: skip
 
 
+_DEFAULT_BY_CHANNELS = {
+    6: "5.1",
+    8: "7.1",
+    10: "5.1.4",
+    12: "7.1.4",
+    14: "7.1.6",
+    16: "9.1.6",
+    24: "22.2",
+}
+
+
 def atmos_layout(name: str) -> SpeakerLayout:
     """The render layout called `name`, the default for a name no longer offered."""
     return BY_NAME.get(name, DEFAULT_ATMOS)
 
 
 def file_layout(ffmpeg_name: str, channels: int) -> SpeakerLayout | None:
-    """The layout of a multichannel file: what ffprobe names it, else its first six as 5.1.
+    """The layout of a multichannel file: what ffprobe names it, else canonical layout by count.
 
     None below six channels, where there is no discrete surround master to read.
     """
@@ -199,6 +210,10 @@ def file_layout(ffmpeg_name: str, channels: int) -> SpeakerLayout | None:
         return known
     if channels < len(SURROUND_5_1.channels):
         return None
+    if not ffmpeg_name or ffmpeg_name == "unknown":
+        inferred = BY_NAME.get(_DEFAULT_BY_CHANNELS.get(channels, ""))
+        if inferred is not None:
+            return inferred
     logger.warning(
         "%d-channel layout %r is not one this tool knows: reading its first six channels as 5.1",
         channels,

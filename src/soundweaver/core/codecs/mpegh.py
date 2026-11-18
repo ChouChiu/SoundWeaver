@@ -6,9 +6,9 @@ import json
 import math
 import subprocess
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 from soundweaver.core import mp4
 from soundweaver.core.cancel import CancellationToken
@@ -80,6 +80,15 @@ class CicpLayout:
     @property
     def channel_names(self) -> tuple[str, ...]:
         return tuple(s.name for s in self.speakers)
+
+    @property
+    def binaural_names(self) -> tuple[str, ...]:
+        """Speaker names disambiguated for `vivid_binaural` (bottom-front `Cb/Lb/Rb` -> `Bfc/Bfl/Bfr`)."""
+        bottom = {"Cb": "Bfc", "Lb": "Bfl", "Rb": "Bfr"}
+        return tuple(
+            bottom[s.name] if s.elevation_deg < 0 and s.name in bottom else s.name
+            for s in self.speakers
+        )
 
 
 @dataclass(frozen=True)
@@ -172,6 +181,7 @@ def _ffprobe_duration_rate(path: Path) -> tuple[int, float]:
                 "json",
                 str(path),
             ],
+            check=False,
             capture_output=True,
             text=True,
             timeout=15.0,
@@ -188,12 +198,14 @@ def _ffprobe_duration_rate(path: Path) -> tuple[int, float]:
     return (sr, dur)
 
 
-def probe_mpegh(path: Path, *, cicp: int = 13, binary: str | None = None) -> MpeghInfo:
+def probe_mpegh(
+    path: Path, *, cicp: int = 13, binary: str | None = None, measure_duration: bool = True,
+) -> MpeghInfo:
     """Probe sample rate, target layout channel count, and duration of an MPEG-H file."""
     layout = cicp_layout(cicp)
     container = "MHAS" if path.suffix.lower() in MPEGH_SUFFIXES else "MP4 MPEG-H"
     sr, dur = _ffprobe_duration_rate(path)
-    if sr <= 0 or dur <= 0.0:
+    if measure_duration and (sr <= 0 or dur <= 0.0):
         exe = binary or find_decoder()
         if exe and path.suffix.lower() in MPEGH_SUFFIXES:
             stream = stream_mpegh(path, cicp=cicp, binary=exe)
@@ -255,6 +267,7 @@ def stream_mpegh(
     cicp: int = 13,
     binary: str | None = None,
     on_stderr: Callable[[str], None] | None = None,
+    token: CancellationToken | None = None,
 ) -> NativePcmStream:
     """Open a real-time float32 PCM stream from `ia_mpeghd_testbench -stream:1`."""
     exe = binary or find_decoder()
@@ -271,19 +284,19 @@ def stream_mpegh(
         f"-cicp:{cicp_layout(cicp).index}",
         "-stream:1",
     ]
-    return NativePcmStream(cmd, on_stderr=on_stderr)
+    return NativePcmStream(cmd, on_stderr=on_stderr, token=token)
 
 
 __all__ = [
     "CICP_22_2_REMAP",
     "CICP_LAYOUTS",
-    "CicpLayout",
-    "CicpSpeaker",
     "MPEGH_SAMPLE_ENTRIES",
     "MPEGH_SUFFIXES",
+    "SUPPORTED_CICP",
+    "CicpLayout",
+    "CicpSpeaker",
     "MpeghError",
     "MpeghInfo",
-    "SUPPORTED_CICP",
     "cicp_layout",
     "decode_mpegh",
     "find_decoder",

@@ -4,21 +4,21 @@ from __future__ import annotations
 
 import logging
 import math
-import tempfile
 import threading
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 from PySide6.QtCore import QIODevice, QObject, Qt, QTimer, Signal, Slot
-from PySide6.QtMultimedia import QAudioFormat, QAudioSink, QMediaDevices
+from PySide6.QtMultimedia import QAudio, QAudioFormat, QAudioSink, QMediaDevices
 
-from soundweaver.core.atmos import ObjectTrace, PreparedADM, decode_atmos, is_adm_bwf
-from soundweaver.core.audio import AudioInfo, load_audio, probe_audio
-from soundweaver.core.cancel import CancellationToken
-from soundweaver.core.codecs import av3a, mpegh
-from soundweaver.core.paths import work_root
-from soundweaver.core.pcm import DEFAULT_BIT_DEPTH, AudioData, read_audio
+from soundweaver.core.atmos import ObjectTrace
+from soundweaver.core.audio import AudioInfo
+from soundweaver.core.cancel import CancellationToken, ProcessingCancelled
+from soundweaver.core.codecs import mpegh
+from soundweaver.core.codecs.av3a import VvmTimelineHeader, read_vvm1_frame
+from soundweaver.core.playback_mix import cap_stream_peak, monitor_gain
+from soundweaver.core.playback_source import PlaybackOptions, PlaybackSource, prepare_playback
 from soundweaver.core.speakers import DEFAULT_ATMOS, SpeakerLayout
 
 logger = logging.getLogger(__name__)
@@ -79,6 +79,15 @@ class ObjectSnapshot:
     active: bool
 
 
+@dataclass(frozen=True, slots=True)
+class _LoadRequest:
+    path: Path
+    start_at: float
+    auto_play: bool
+    options: PlaybackOptions
+    token: CancellationToken
+
+
 class _PCMBufferDevice(QIODevice):
     """Pull-mode QIODevice backed by PlaybackEngine."""
 
@@ -90,7 +99,7 @@ class _PCMBufferDevice(QIODevice):
         return True
 
     def atEnd(self) -> bool:
-        return False
+        return self._engine.at_end
 
     def readData(self, maxlen: int) -> bytes:
         frames = maxlen // 8
@@ -102,7 +111,7 @@ class _PCMBufferDevice(QIODevice):
         return 0
 
     def bytesAvailable(self) -> int:
-        return 32768 + super().bytesAvailable()
+        return self._engine.readable_frames * 8 + super().bytesAvailable()
 
 
 class PlaybackEngine(QObject):
@@ -114,7 +123,10 @@ class PlaybackEngine(QObject):
     position_changed = Signal(float)
     meters_updated = Signal(list, list)  # (channel_dbs, object_snapshots)
     track_finished = Signal()
-    _ready_to_play = Signal()
+    track_cleared = Signal()
+    buffering_changed = Signal(bool)
+    _source_ready = Signal(object)
+    _source_failed = Signal(object, str)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -125,19 +137,14 @@ class PlaybackEngine(QObject):
         self._active_channels: tuple[str, ...] = DEFAULT_ATMOS.channels
         self._fold = fold_matrix(self._active_channels)
 
-        self._audio: AudioData | None = None
-        self._binaural_audio: AudioData | None = None
-        self._adm: PreparedADM | None = None
-        self._temp_dir: tempfile.TemporaryDirectory[str] | None = None
-        self._trace: ObjectTrace | None = None
-        self._vvm1_header: av3a.VvmTimelineHeader | None = None
-        self._vvm1_frames: np.ndarray | None = None  # shape (n_frames, total_ch, 5)
-        self._info: AudioInfo | None = None
+        self._source: PlaybackSource | None = None
+        self._pending_source: PlaybackSource | None = None
         self._path: Path | None = None
         self._sample_rate = 48000
         self._total_frames = 0
         self._cursor = 0
         self._playing = False
+        self._buffering = False
         self._volume = 1.0
         self._muted_ch: set[int] = set()
         self._soloed_ch: set[int] = set()
@@ -145,7 +152,7 @@ class PlaybackEngine(QObject):
         self._soloed_obj: set[int] = set()
         self._last_ch_dbs: list[float] = []
         self._last_objs: list[ObjectSnapshot] = []
-        self._decode_token: CancellationToken | None = None
+        self._request: _LoadRequest | None = None
 
         self._sink: QAudioSink | None = None
         self._io = _PCMBufferDevice(self)
@@ -154,7 +161,8 @@ class PlaybackEngine(QObject):
         self._meter_timer = QTimer(self)
         self._meter_timer.setInterval(50)  # 20 Hz
         self._meter_timer.timeout.connect(self._emit_telemetry)
-        self._ready_to_play.connect(self._start_sink, Qt.ConnectionType.QueuedConnection)
+        self._source_ready.connect(self._accept_source, Qt.ConnectionType.QueuedConnection)
+        self._source_failed.connect(self._reject_source, Qt.ConnectionType.QueuedConnection)
 
     @property
     def layout(self) -> SpeakerLayout:
@@ -174,11 +182,36 @@ class PlaybackEngine(QObject):
 
     @property
     def info(self) -> AudioInfo | None:
-        return self._info
+        return self._source.info if self._source else None
 
     @property
     def is_playing(self) -> bool:
         return self._playing
+
+    @property
+    def is_loading(self) -> bool:
+        return self._request is not None
+
+    @property
+    def readable_frames(self) -> int:
+        with self._lock:
+            if self._source is not None and self._source.progress is not None:
+                frames, _, _ = self._source.progress.state()
+                return max(0, frames - self._cursor)
+            return self._total_frames - self._cursor
+
+    @property
+    def at_end(self) -> bool:
+        with self._lock:
+            if self._source is not None and self._source.progress is not None:
+                frames, eof, _ = self._source.progress.state()
+                return eof and self._cursor >= frames
+            return self._cursor >= self._total_frames
+
+    def _set_buffering(self, buffering: bool) -> None:
+        if buffering != self._buffering:
+            self._buffering = buffering
+            self.buffering_changed.emit(buffering)
 
     @property
     def duration(self) -> float:
@@ -202,24 +235,34 @@ class PlaybackEngine(QObject):
             self._fold = fold_matrix(self._active_channels)
             self._muted_ch.clear()
             self._soloed_ch.clear()
-        if self._path is not None and self._info is not None and self._info.atmos and self._adm is None and not self._info.is_av3a:
+        if self._reload_pending():
+            return
+        source = self._source
+        if (
+            self._path is not None and source is not None
+            and source.info.atmos and source.adm is None and not source.info.is_av3a
+        ):
             self.load(self._path, start_at=self.position, auto_play=self._playing)
 
     def set_cicp(self, cicp: int) -> None:
         with self._lock:
             self._cicp = cicp
-            if self._info is not None and self._info.is_mpegh:
+            if self.info is not None and self.info.is_mpegh:
                 self._active_channels = mpegh.cicp_layout(cicp).channel_names
                 self._fold = fold_matrix(self._active_channels)
             self._muted_ch.clear()
             self._soloed_ch.clear()
-        if self._path is not None and self._info is not None and self._info.is_mpegh:
+        if self._reload_pending():
+            return
+        if self._path is not None and self.info is not None and self.info.is_mpegh:
             self.load(self._path, start_at=self.position, auto_play=self._playing)
 
     def set_binaural(self, enabled: bool) -> None:
         if self._binaural == enabled:
             return
         self._binaural = enabled
+        if self._reload_pending():
+            return
         if self._path is not None:
             self.load(self._path, start_at=self.position, auto_play=self._playing)
 
@@ -254,137 +297,111 @@ class PlaybackEngine(QObject):
         with self._lock:
             return set(self._muted_obj), set(self._soloed_obj)
 
+    def _reload_pending(self) -> bool:
+        request = self._request
+        if request is None:
+            return False
+        self.load(request.path, request.start_at, request.auto_play)
+        return True
+
     def load(self, path: Path, start_at: float = 0.0, auto_play: bool = True) -> None:
         self.stop()
-        if self._decode_token is not None:
-            self._decode_token.cancel()
+        with self._lock:
+            if self._source is not None and self._source.progress is not None:
+                self._source.close()
+                self._source = None
+                self._total_frames = 0
+        self._set_buffering(True)
         token = CancellationToken()
-        self._decode_token = token
         self._path = path
+        options = PlaybackOptions(self._layout, self._cicp, self._binaural)
+        request = _LoadRequest(path, start_at, auto_play, options, token)
+        self._request = request
 
         def worker() -> None:
             try:
-                info = probe_audio(path)
-                token.raise_if_cancelled()
-                adm: PreparedADM | None = None
-                temp_dir: tempfile.TemporaryDirectory[str] | None = None
-                audio: AudioData | None = None
-                bin_audio: AudioData | None = None
-                trace: ObjectTrace | None = None
-                vvm1_header: av3a.VvmTimelineHeader | None = None
-                vvm1_frames: np.ndarray | None = None
-                active_channels = self._layout.channels
-
-                if is_adm_bwf(path):
-                    adm = PreparedADM(path)
-                    if self._binaural and av3a.find_binaural_renderer():
-                        temp_dir = tempfile.TemporaryDirectory(dir=work_root())
-                        bin_wav = Path(temp_dir.name) / "binaural.wav"
-                        av3a.render_binaural_file(path, bin_wav, token=token)
-                        bin_audio = read_audio(bin_wav, token)
-                elif info.is_av3a:
-                    temp_dir = tempfile.TemporaryDirectory(dir=work_root())
-                    tmp = Path(temp_dir.name)
-                    tl_path = tmp / "timeline.vvm1"
-                    pcm_path = tmp / "source.f32"
-                    raw_bin = tmp / "stream.f32"
-                    stream = av3a.stream_av3a(path, "source", tl_path, pcm_path)
-                    chunks = []
-                    try:
-                        while True:
-                            token.raise_if_cancelled()
-                            blk = stream.read_frames(8192)
-                            if blk.shape[0] == 0:
-                                break
-                            chunks.append(blk)
-                    finally:
-                        stream.close()
-                    stacked = np.vstack(chunks) if chunks else np.zeros((0, stream.channels), dtype=np.float32)
-                    stacked.tofile(raw_bin)
-                    if stacked.shape[0] > 0:
-                        mm = np.memmap(raw_bin, dtype=np.float32, mode="r", shape=stacked.shape)
-                        audio = AudioData(mm.T, stream.sample_rate, DEFAULT_BIT_DEPTH, raw_bin)
-                    else:
-                        audio = AudioData(np.zeros((stream.channels, 0), dtype=np.float32), stream.sample_rate)
-                    vvm1_header = av3a.read_vvm1_header(tl_path)
-                    if vvm1_header is not None:
-                        tot = vvm1_header.bed_channels + vvm1_header.object_count
-                        raw_tl = tl_path.read_bytes()[24:]
-                        nf = len(raw_tl) // (tot * 5 * 4) if tot > 0 else 0
-                        if nf > 0:
-                            vvm1_frames = np.frombuffer(raw_tl[: nf * tot * 5 * 4], dtype="<f4").reshape(nf, tot, 5).copy()
-                    active_channels = info.bed_channels or tuple(f"Ch {i + 1}" for i in range(audio.channels))
-                    if self._binaural and av3a.find_binaural_renderer() and (info.hoa_order > 0 or audio.channels >= 4):
-                        bin_audio = av3a.render_binaural_audio(
-                            audio,
-                            speakers=None if info.hoa_order > 0 else active_channels[: len(info.bed_channels) or audio.channels],
-                            hoa_order=info.hoa_order,
-                            token=token,
-                        )
-                elif info.is_mpegh:
-                    audio = mpegh.decode_mpegh(path, token, cicp=self._cicp)
-                    active_channels = mpegh.cicp_layout(self._cicp).channel_names[: audio.channels]
-                    if self._binaural and av3a.find_binaural_renderer() and audio.channels >= 4:
-                        bin_audio = av3a.render_binaural_audio(audio, speakers=active_channels, token=token)
-                elif info.atmos:
-                    temp_dir = tempfile.TemporaryDirectory(dir=work_root())
-                    adm_path = Path(temp_dir.name) / "decoded_adm.wav"
-                    decoded = decode_atmos(
-                        path, token, lambda _f: None, layout=self._layout, speakers=False, adm=adm_path
-                    )
-                    trace = decoded.trace
-                    if adm_path.is_file():
-                        adm = PreparedADM(adm_path)
-                        if self._binaural and av3a.find_binaural_renderer():
-                            bin_wav = Path(temp_dir.name) / "binaural.wav"
-                            av3a.render_binaural_file(adm_path, bin_wav, token=token)
-                            bin_audio = read_audio(bin_wav, token)
-                    else:
-                        decoded = decode_atmos(path, token, lambda _f: None, layout=self._layout, speakers=True)
-                        audio = decoded.speakers
-                else:
-                    audio = load_audio(path, token)
-                    if info.speakers is not None:
-                        active_channels = info.speakers.channels
-                    else:
-                        active_channels = tuple(f"Ch {i + 1}" for i in range(audio.channels))
-
-                token.raise_if_cancelled()
+                source = prepare_playback(request.path, request.options, request.token, request.start_at)
+            except ProcessingCancelled:
+                return
+            except Exception as error:
                 with self._lock:
-                    self._info = info
-                    if self._adm is not None:
-                        self._adm.close()
-                    self._adm = adm
-                    if self._temp_dir is not None:
-                        self._temp_dir.cleanup()
-                    self._temp_dir = temp_dir
-                    self._trace = trace
-                    self._vvm1_header = vvm1_header
-                    self._vvm1_frames = vvm1_frames
-                    if self._audio is not None:
-                        self._audio.cleanup()
-                    self._audio = audio
-                    if self._binaural_audio is not None:
-                        self._binaural_audio.cleanup()
-                    self._binaural_audio = bin_audio
-                    self._active_channels = active_channels
-                    self._fold = fold_matrix(active_channels)
-                    self._sample_rate = adm.sample_rate if adm else (audio.sample_rate if audio else 48000)
-                    self._total_frames = adm.frame_count if adm else (audio.frames if audio else 0)
-                    self._cursor = min(self._total_frames, max(0, int(start_at * self._sample_rate)))
-                    self._muted_ch.clear()
-                    self._soloed_ch.clear()
-                    self._muted_obj.clear()
-                    self._soloed_obj.clear()
-                self.track_loaded.emit(path, info)
-                if auto_play:
-                    self._ready_to_play.emit()
-            except Exception as exc:
-                if not token.is_cancelled():
-                    logger.warning("Playback load failed: %s", exc)
-                    self.load_failed.emit(str(exc))
+                    if not token.cancelled:
+                        logger.exception("Playback load failed for %s", path)
+                        self._source_failed.emit(request, str(error) or type(error).__name__)
+                return
+
+            with self._lock:
+                if not token.cancelled:
+                    self._pending_source = source
+                    self._source_ready.emit(request)
+                    return
+            source.close()
 
         threading.Thread(target=worker, daemon=True).start()
+
+    @Slot(object, str)
+    def _reject_source(self, request: _LoadRequest, message: str) -> None:
+        if request is self._request:
+            self._request = None
+            self._set_buffering(False)
+            self.load_failed.emit(message)
+
+    @Slot(object)
+    def _accept_source(self, request: _LoadRequest) -> None:
+        if request is not self._request:
+            return
+        with self._lock:
+            source, self._pending_source = self._pending_source, None
+            assert source is not None
+            previous, self._source = self._source, source
+            self._request = None
+            self._active_channels = self._layout.channels if source.adm else source.channels
+            self._fold = fold_matrix(self._active_channels)
+            if source.adm is not None:
+                self._sample_rate, self._total_frames = source.adm.sample_rate, source.adm.frame_count
+            elif source.buffer is not None:
+                self._sample_rate = source.buffer.sample_rate
+                frames, eof, _ = source.buffer.state()
+                estimate = round(source.info.duration * self._sample_rate)
+                self._total_frames = frames if eof else max(estimate, frames)
+            elif source.audio is not None:
+                self._sample_rate, self._total_frames = source.audio.sample_rate, source.audio.frames
+            else:
+                self._sample_rate, self._total_frames = 48000, 0
+            self._cursor = min(self._total_frames, max(0, int(request.start_at * self._sample_rate)))
+            self.clear_ms()
+            self._last_ch_dbs, self._last_objs = [], []
+        if previous is not None:
+            previous.close()
+        self._set_buffering(False)
+        self.track_loaded.emit(request.path, source.info)
+        self.position_changed.emit(self.position)
+        if request.auto_play and source is self._source and self._request is None:
+            self._start_sink()
+
+    def _cancel_load(self) -> None:
+        with self._lock:
+            if self._request is not None:
+                self._request.token.cancel()
+                self._request = None
+            pending, self._pending_source = self._pending_source, None
+        if pending is not None:
+            pending.close()
+
+    def unload(self) -> None:
+        self.stop()
+        with self._lock:
+            source, self._source = self._source, None
+            self._path = None
+            self._total_frames = 0
+            self._last_ch_dbs, self._last_objs = [], []
+            self.clear_ms()
+        if source is not None:
+            source.close()
+        self.track_cleared.emit()
+
+    def shutdown(self) -> None:
+        self.unload()
 
     @Slot()
     def _start_sink(self) -> None:
@@ -397,15 +414,39 @@ class PlaybackEngine(QObject):
             self._sink.stop()
             self._sink.deleteLater()
         self._playing = True
-        self._sink = QAudioSink(device, fmt, self)
-        self._sink.start(self._io)
+        sink = self._sink = QAudioSink(device, fmt, self)
+        sink.stateChanged.connect(lambda state: self._queue_sink_state(sink, state))
+        sink.start(self._io)
         self._meter_timer.start()
         self.state_changed.emit(True)
 
-    def play(self) -> None:
-        if self._total_frames == 0:
+    def _queue_sink_state(self, sink: QAudioSink, state: QAudio.State) -> None:
+        # Let the Qt Multimedia callback return before stopping or replacing the sink.
+        if state == QAudio.State.IdleState:
+            QTimer.singleShot(0, self, lambda: self._finish_if_drained(sink))
+
+    def _finish_if_drained(self, sink: QAudioSink) -> None:
+        if (
+            sink is not self._sink
+            or sink.state().value != QAudio.State.IdleState.value
+            or not self._playing
+            or not self.at_end
+        ):
             return
-        if self._sink is None:
+        self._playing = False
+        self._meter_timer.stop()
+        self.position_changed.emit(self.position)
+        self.state_changed.emit(False)
+        self.track_finished.emit()
+
+    def play(self) -> None:
+        if self._total_frames == 0 or self.is_loading:
+            return
+        sink = self._sink
+        at_end = self.at_end
+        if sink is None or (at_end and sink.state().value == QAudio.State.IdleState.value):
+            if at_end:
+                self.seek(0)
             self._start_sink()
         elif not self._playing:
             self._sink.resume()
@@ -418,6 +459,7 @@ class PlaybackEngine(QObject):
             self._sink.suspend()
         self._playing = False
         self._meter_timer.stop()
+        self._set_buffering(False)
         self.state_changed.emit(False)
 
     def toggle_play(self) -> None:
@@ -427,46 +469,71 @@ class PlaybackEngine(QObject):
             self.play()
 
     def stop(self) -> None:
-        self._playing = False
+        self._cancel_load()
+        self._set_buffering(False)
+        with self._lock:
+            self._playing = False
+            self._cursor = 0
         self._meter_timer.stop()
         if self._sink is not None:
             self._sink.stop()
             self._sink.deleteLater()
             self._sink = None
-        self._cursor = 0
         self.state_changed.emit(False)
         self.position_changed.emit(0.0)
 
     def seek(self, seconds: float) -> None:
         with self._lock:
             self._cursor = min(self._total_frames, max(0, int(seconds * self._sample_rate)))
+            if self._source is not None and self._source.buffer is not None:
+                self._source.buffer.request(self._cursor)
+        sink = self._sink
+        if sink is not None:
+            was_playing = self._playing
+            self._sink = None
+            sink.reset()
+            sink.deleteLater()
+            if was_playing:
+                self._start_sink()
+                self._set_buffering(not self.at_end and not self.readable_frames)
         self.position_changed.emit(self.position)
 
     def _pull_stereo(self, frames: int) -> np.ndarray:
         with self._lock:
-            if not self._playing or self._cursor >= self._total_frames:
-                if self._playing and self._cursor >= self._total_frames and self._total_frames > 0:
-                    self._playing = False
-                    self.track_finished.emit()
-                return np.zeros((frames, 2), dtype=np.float32)
+            if not self._playing or self.readable_frames == 0:
+                return np.empty((0, 2), dtype=np.float32)
 
-            avail = min(frames, self._total_frames - self._cursor)
+            avail = min(frames, self.readable_frames)
             start = self._cursor
             self._cursor += avail
 
-            if self._adm is not None:
-                raw = self._adm.read_frames(start, avail)
+            source = self._source
+            assert source is not None
+            streamed_stereo = None
+            if source.buffer is not None:
+                block = source.buffer.read(start, avail)
+                buf = block[:, : source.buffer.channels]
+                if source.buffer.stereo:
+                    streamed_stereo = block[:, source.buffer.channels :]
+                self._last_objs = []
+                if source.vvm1_header is not None and source.vvm1_path is not None:
+                    frame = start // source.vvm1_header.frame_samples
+                    row = read_vvm1_frame(source.vvm1_path, source.vvm1_header, frame)
+                    if row is not None:
+                        self._last_objs = self._eval_vvm1_row(source.vvm1_header, row)
+            elif source.adm is not None:
+                raw = source.adm.read_frames(start, avail)
                 t_mid = (start + avail * 0.5) / self._sample_rate
                 spk_buf = np.zeros((avail, len(self._layout.channels)), dtype=np.float32)
                 objs: list[ObjectSnapshot] = []
                 obj_idx = 0
-                for tr in self._adm.tracks:
+                for tr in source.adm.tracks:
                     if tr.is_object:
                         active_ms = (
                             obj_idx not in self._muted_obj
                             and (not self._soloed_obj or obj_idx in self._soloed_obj)
                         )
-                        peak = float(np.max(np.abs(raw[:, tr.channel_index]))) if avail > 0 else 0.0
+                        peak = float(np.max(np.abs(raw[:, tr.channel_index])))
                         db = max(SILENCE_DB, 20.0 * math.log10(peak)) if peak > 1e-5 else SILENCE_DB
                         blk = tr.blocks[0] if tr.blocks else None
                         for b in tr.blocks:
@@ -477,23 +544,23 @@ class PlaybackEngine(QObject):
                         ox, oy, oz = (blk.x, blk.y, blk.z) if blk else (0.5, 0.5, 0.0)
                         objs.append(ObjectSnapshot(obj_idx, ox, oy, oz, db if active_ms else SILENCE_DB, active_ms))
                         if active_ms:
-                            g = self._adm._track_gains_at(tr, t_mid, self._layout)
+                            g = source.adm._track_gains_at(tr, t_mid, self._layout)
                             if np.any(g):
                                 spk_buf += raw[:, tr.channel_index : tr.channel_index + 1] * g[np.newaxis, :]
                         obj_idx += 1
                     elif not self._soloed_obj:
-                        g = self._adm._track_gains_at(tr, t_mid, self._layout)
+                        g = source.adm._track_gains_at(tr, t_mid, self._layout)
                         if np.any(g):
                             spk_buf += raw[:, tr.channel_index : tr.channel_index + 1] * g[np.newaxis, :]
                 self._last_objs = objs
                 buf = spk_buf
-            elif self._audio is not None:
-                buf = np.ascontiguousarray(self._audio.samples[:, start : start + avail].T)
-                if self._vvm1_frames is not None and self._vvm1_header is not None:
-                    self._last_objs = self._eval_vvm1(start)
-                elif self._trace is not None:
+            elif source.audio is not None:
+                buf = np.ascontiguousarray(source.audio.samples[:, start : start + avail].T)
+                if source.vvm1_frames is not None and source.vvm1_header is not None:
+                    self._last_objs = self._eval_vvm1(start, source.vvm1_header, source.vvm1_frames)
+                elif source.trace is not None:
                     t_mid = (start + avail * 0.5) / self._sample_rate
-                    self._last_objs = self._eval_trace(t_mid)
+                    self._last_objs = self._eval_trace(t_mid, source.trace)
                 else:
                     self._last_objs = []
             else:
@@ -501,8 +568,8 @@ class PlaybackEngine(QObject):
 
             # Channel M/S & metering reflect bed/speaker channels
             bed_limit = (
-                self._vvm1_header.bed_channels
-                if self._vvm1_header is not None and self._vvm1_header.bed_channels > 0
+                source.vvm1_header.bed_channels
+                if source.vvm1_header is not None and source.vvm1_header.bed_channels > 0
                 else buf.shape[1]
             )
             meter_buf = buf[:, :bed_limit]
@@ -514,14 +581,27 @@ class PlaybackEngine(QObject):
             masked = meter_buf * mask[np.newaxis, :]
             self._last_ch_dbs = _peaks_dbfs(masked)
 
-            if self._binaural_audio is not None and not self._muted_ch and not self._soloed_ch and not self._muted_obj and not self._soloed_obj:
-                b_avail = min(avail, max(0, self._binaural_audio.frames - start))
-                if b_avail > 0:
-                    stereo = np.ascontiguousarray(self._binaural_audio.samples[:, start : start + b_avail].T)
-                    if b_avail < avail:
-                        stereo = np.vstack([stereo, np.zeros((avail - b_avail, 2), dtype=np.float32)])
+            gain = self._volume
+            alternate = source.stereo_audio
+            mpegh_mix = source.mpegh_monitor
+            unchanged = not (self._muted_ch or self._soloed_ch or self._muted_obj or self._soloed_obj)
+            if streamed_stereo is not None and unchanged:
+                return cap_stream_peak(streamed_stereo, gain)
+            if alternate is not None and unchanged:
+                stereo = np.zeros((avail, 2), dtype=np.float32)
+                samples = alternate.samples[:, start : start + avail].T
+                stereo[: len(samples)] = samples
+                if mpegh_mix is not None:
+                    gain = monitor_gain(gain, mpegh_mix.stereo_peak)
+            elif mpegh_mix is not None:
+                stereo = masked @ mpegh_mix.matrix
+                if source.buffer is not None:
+                    if n_ch <= 2:
+                        return cap_stream_peak(stereo, gain)
+                    bound = float((np.abs(mpegh_mix.matrix) * mask[:, None]).sum(axis=0).max())
                 else:
-                    stereo = np.zeros((avail, 2), dtype=np.float32)
+                    bound = mpegh_mix.fold_peak
+                gain = monitor_gain(gain, bound)
             elif n_ch == 1:
                 stereo = np.repeat(masked, 2, axis=1)
             elif n_ch == 2:
@@ -531,24 +611,18 @@ class PlaybackEngine(QObject):
             else:
                 stereo = masked[:, :2]
 
-            stereo = np.clip(stereo * self._volume, -1.0, 1.0).astype(np.float32, copy=False)
-            if avail < frames:
-                pad = np.zeros((frames - avail, 2), dtype=np.float32)
-                return np.vstack([stereo, pad])
-            return stereo
+            return np.clip(stereo * gain, -1.0, 1.0).astype(np.float32, copy=False)
 
-    def _eval_vvm1(self, start_frame: int) -> list[ObjectSnapshot]:
-        hdr = self._vvm1_header
-        frames_arr = self._vvm1_frames
-        if hdr is None or frames_arr is None or hdr.object_count <= 0:
-            return []
+    def _eval_vvm1(
+        self, start_frame: int, hdr: VvmTimelineHeader, frames_arr: np.ndarray
+    ) -> list[ObjectSnapshot]:
         idx = min(frames_arr.shape[0] - 1, max(0, start_frame // hdr.frame_samples))
-        row = frames_arr[idx]
+        return self._eval_vvm1_row(hdr, frames_arr[idx])
+
+    def _eval_vvm1_row(self, hdr: VvmTimelineHeader, row: np.ndarray) -> list[ObjectSnapshot]:
         objs: list[ObjectSnapshot] = []
         for oi in range(hdr.object_count):
             ch_idx = hdr.bed_channels + oi
-            if ch_idx >= row.shape[0]:
-                break
             active_ms = oi not in self._muted_obj and (not self._soloed_obj or oi in self._soloed_obj)
             vx, vy, vz, peak, _ = row[ch_idx]
             ox = max(0.0, min(1.0, float((vx + 1.0) * 0.5)))
@@ -559,10 +633,7 @@ class PlaybackEngine(QObject):
             objs.append(ObjectSnapshot(oi, ox, oy, oz, db if shown else SILENCE_DB, shown))
         return objs
 
-    def _eval_trace(self, t_mid: float) -> list[ObjectSnapshot]:
-        trace = self._trace
-        if trace is None:
-            return []
+    def _eval_trace(self, t_mid: float, trace: ObjectTrace) -> list[ObjectSnapshot]:
         objs: list[ObjectSnapshot] = []
         step_idx = int((t_mid - trace.level_start) / trace.level_step) if trace.level_step > 0 else 0
         for oi, path in enumerate(trace.objects):
@@ -587,5 +658,28 @@ class PlaybackEngine(QObject):
         return objs
 
     def _emit_telemetry(self) -> None:
+        source = self._source
+        if source is not None and source.progress is not None:
+            frames, eof, error = source.progress.state()
+            if error is not None:
+                self.unload()
+                self.load_failed.emit(error)
+                return
+            with self._lock:
+                if eof:
+                    self._total_frames = frames
+                    self._cursor = min(self._cursor, frames)
+                else:
+                    self._total_frames = max(self._total_frames, frames)
+            sink = self._sink
+            if sink is not None and sink.state().value == QAudio.State.IdleState.value:
+                if self.at_end:
+                    self._finish_if_drained(sink)
+                    return
+                self._set_buffering(not self.readable_frames)
+                if self.readable_frames:
+                    self._io.readyRead.emit()
+            else:
+                self._set_buffering(False)
         self.position_changed.emit(self.position)
         self.meters_updated.emit(list(self._last_ch_dbs), list(self._last_objs))

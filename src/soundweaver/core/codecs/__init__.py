@@ -42,8 +42,8 @@ def detect_format(path: Path) -> str | None:
 
 __all__ = [
     "EngineStatus",
-    "available_engines",
     "av3a",
+    "available_engines",
     "detect_format",
     "mpegh",
     "native",

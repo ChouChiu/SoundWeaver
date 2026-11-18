@@ -88,16 +88,6 @@ def _is_atmos(stream: dict) -> bool:
     return stream.get("codec_name") == "eac3" and "Atmos" in stream.get("profile", "")
 
 
-def _tags(data: dict, stream: dict) -> dict[str, str]:
-    """Container tags, then the audio stream's, with lower-cased keys (Matroska shouts them)."""
-    tags: dict[str, str] = {}
-    for source in (stream.get("tags", {}), data.get("format", {}).get("tags", {})):
-        for key, value in source.items():
-            if str(value).strip():
-                tags[key.lower()] = str(value).strip()
-    return tags
-
-
 def _number(tag: str) -> int:
     """The leading number of a "3" or "3/12" track or disc tag, 0 when there is none."""
     head = tag.split("/", 1)[0].strip()
@@ -147,13 +137,13 @@ def _probe_av3a_info(path: Path) -> AudioInfo:
     )
 
 
-def probe_audio(path: Path) -> AudioInfo:
+def probe_audio(path: Path, *, measure_raw_duration: bool = True) -> AudioInfo:
     """Layout, length and embedded cover of the first audio stream; raises FFmpegError if unusable."""
     if av3a.is_av3a_file(path):
         return _probe_av3a_info(path)
     is_mpegh = mpegh.is_mpegh_file(path)
     if is_mpegh and path.suffix.lower() in mpegh.MPEGH_SUFFIXES:
-        info = mpegh.probe_mpegh(path)
+        info = mpegh.probe_mpegh(path, measure_duration=measure_raw_duration)
         return AudioInfo(
             info.channels,
             max(0.01, info.duration),
@@ -166,30 +156,35 @@ def probe_audio(path: Path) -> AudioInfo:
     data = ffmpeg.probe(path)
     stream = ffmpeg.first_audio_stream(data)
     ac4_info = _ac4_info(path) if ac4.is_ac4_stream(stream) else None
-    # a bare AC-4 stream has no channel count before decoding; the TOC gives it below
-    channels = int(stream.get("channels", 0)) if ac4_info is None else 1
+    if is_mpegh:
+        # An mha1/mhm1 sample entry can omit the channel count. MPEG-H is
+        # rendered to the configured CICP target, independent of its source bed.
+        channels = mpegh.cicp_layout(13).channels
+    else:
+        # A bare AC-4 stream gets its channel count from the TOC below.
+        channels = int(stream.get("channels", 0)) if ac4_info is None else 1
     if channels < 1:
         raise ffmpeg.FFmpegError(t("error.no_channel_count"))
     try:
-        seconds = float(data["format"]["duration"])
+        stream_duration = stream.get("duration") if is_mpegh else None
+        seconds = float(stream_duration or data["format"]["duration"])
     except (KeyError, ValueError) as error:
         if ac4_info is None or ac4_info.duration is None:
             raise ffmpeg.FFmpegError(t("error.no_duration", name=path.name)) from error
         seconds = ac4_info.duration
     if seconds <= 0:
         raise ffmpeg.FFmpegError(t("error.zero_duration"))
-    cover = next(
-        (s["index"] for s in data["streams"] if s.get("disposition", {}).get("attached_pic")),
-        None,
-    )
     atmos = _is_atmos(stream)
-    tags = _tags(data, stream)
+    tags = ffmpeg.media_tags(data, stream)
     codec = str(stream.get("codec_long_name") or stream.get("codec_name") or "")
-    speakers = None if atmos else file_layout(str(stream.get("channel_layout", "")), channels)
+    speakers = None if atmos or is_mpegh else file_layout(str(stream.get("channel_layout", "")), channels)
     adm_bwf = False
     object_count = 0
     bed_channels: tuple[str, ...] = ()
-    if ac4_info is not None:
+    if is_mpegh:
+        codec = "MPEG-H 3D Audio (360RA)"
+        speakers = BY_NAME["22.2"]
+    elif ac4_info is not None:
         channels, codec, speakers, atmos = _ac4_layout(ac4_info)
     elif is_adm_bwf(path):
         try:
@@ -205,15 +200,13 @@ def probe_audio(path: Path) -> AudioInfo:
                 adm.close()
         except (OSError, ValueError) as error:
             logger.warning("Failed to parse ADM BWF chunks in %s: %s", path, error)
-    elif is_mpegh:
-        codec = codec or "MPEG-H 3D Audio (360RA)"
     return AudioInfo(
         channels,
         seconds,
         atmos=atmos,
         codec=codec,
         sample_rate=ac4_info.sample_rate if ac4_info else int(stream.get("sample_rate") or 0),
-        cover_stream=cover,
+        cover_stream=ffmpeg.cover_stream(data),
         title=tags.get("title", ""),
         artist=tags.get("artist", "") or tags.get("album_artist", ""),
         album=tags.get("album", ""),

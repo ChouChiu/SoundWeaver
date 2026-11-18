@@ -16,6 +16,7 @@ AUDIO_SUFFIXES = {
     ".mov",
     ".mka",
     ".mkv",
+    ".webm",
     ".ts",
     ".m2ts",
     ".ec3",
@@ -23,11 +24,27 @@ AUDIO_SUFFIXES = {
     ".ac3",
     ".ac4",
     ".thd",
+    ".mlp",
     ".av3a",
     ".avs3a",
     ".mhas",
     ".wav",
+    ".bwf",
+    ".rf64",
+    ".w64",
     ".flac",
+    ".aiff",
+    ".aif",
+    ".caf",
+    ".alac",
+    ".wv",
+    ".ape",
+    ".ogg",
+    ".oga",
+    ".opus",
+    ".mp3",
+    ".aac",
+    ".wma",
 }
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 TTML_SUFFIXES = {".ttml"}
@@ -52,21 +69,31 @@ def inspect_source(audio: Path, want_cover: bool = True) -> Inspection:
         info = probe_audio(audio)
     except (ffmpeg.FFmpegError, OSError, RuntimeError) as error:
         return Inspection(audio, error=str(error))
-    cover = (_embedded_cover(audio, info) or folder_cover(audio.parent)) if want_cover else None
+    cover = (embedded_cover(audio, info.cover_stream) or folder_cover(audio.parent)) if want_cover else None
     return Inspection(audio, info, cover=cover, ttml=find_lyrics(audio, info.title))
 
 
-def _embedded_cover(audio: Path, info: AudioInfo) -> Path | None:
-    if info.cover_stream is None:
+def embedded_cover(audio: Path, stream: int | None) -> Path | None:
+    """Resolve a cached still from a container's attached picture stream."""
+    if stream is None:
         return None
     target = cache_dir("covers") / f"{audio.stem}_{content_key(audio)[:8]}.png"
     if not target.is_file():
         try:
             with atomic_output(target) as partial:
-                ffmpeg.extract_frame(audio, info.cover_stream, partial)
+                ffmpeg.extract_frame(audio, stream, partial)
         except ffmpeg.FFmpegError:
             return None
     return target
+
+
+def sidecar_cover(audio: Path) -> Path | None:
+    """Return a sidecar image sharing `audio`'s stem, if one exists."""
+    for suffix in sorted(IMAGE_SUFFIXES):
+        candidate = audio.with_suffix(suffix)
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def folder_cover(folder: Path) -> Path | None:

@@ -49,6 +49,15 @@ constexpr SpeakerAngle kSpeakerAngles[] = {
     {"Tbl", 135.0f, 35.0f, false}, {"Tbr", -135.0f, 35.0f, false},
     {"Tbc", 180.0f, 35.0f, false}, {"Bfl", 45.0f, -15.0f, false},
     {"Bfr", -45.0f, -15.0f, false},{"Bfc", 0.0f, -15.0f, false},
+    // CICP / 360RA speaker labels
+    {"Lc", 60.0f, 0.0f, false},    {"Rc", -60.0f, 0.0f, false},
+    {"Lss", 90.0f, 0.0f, false},   {"Rss", -90.0f, 0.0f, false},
+    {"Leos", 60.0f, 0.0f, false},  {"Reos", -60.0f, 0.0f, false},
+    {"Lv", 45.0f, 35.0f, false},   {"Rv", -45.0f, 35.0f, false},
+    {"Cv", 0.0f, 35.0f, false},    {"Lvr", 135.0f, 35.0f, false},
+    {"Rvr", -135.0f, 35.0f, false},{"Lvss", 90.0f, 35.0f, false},
+    {"Rvss", -90.0f, 35.0f, false},{"Cvr", 180.0f, 35.0f, false},
+    {"Lvs", 135.0f, 35.0f, false}, {"Rvs", -135.0f, 35.0f, false},
 };
 
 const SpeakerAngle *find_speaker(const std::string &name) {
@@ -79,6 +88,50 @@ void polar_to_cart(float az_deg, float el_deg, float out[3]) {
     out[1] = std::sin(el);
     out[2] = std::cos(az) * std::cos(el);
 }
+
+struct Biquad {
+    double b0 = 1.0, b1 = 0.0, b2 = 0.0, a1 = 0.0, a2 = 0.0;
+    double z1[2] = {0.0, 0.0};
+    double z2[2] = {0.0, 0.0};
+
+    static Biquad shelf(double fs, double fc, double gain_db, bool high) {
+        Biquad q;
+        const double A = std::pow(10.0, gain_db / 40.0);
+        const double w0 = 2.0 * M_PI * fc / fs;
+        const double cosw = std::cos(w0);
+        const double sinw = std::sin(w0);
+        const double beta = std::sqrt(2.0 * A) * sinw;
+        double a0 = 1.0;
+        if (high) {
+            q.b0 = A * ((A + 1.0) + (A - 1.0) * cosw + beta);
+            q.b1 = -2.0 * A * ((A - 1.0) + (A + 1.0) * cosw);
+            q.b2 = A * ((A + 1.0) + (A - 1.0) * cosw - beta);
+            a0 = (A + 1.0) - (A - 1.0) * cosw + beta;
+            q.a1 = 2.0 * ((A - 1.0) - (A + 1.0) * cosw);
+            q.a2 = (A + 1.0) - (A - 1.0) * cosw - beta;
+        } else {
+            q.b0 = A * ((A + 1.0) - (A - 1.0) * cosw + beta);
+            q.b1 = 2.0 * A * ((A - 1.0) - (A + 1.0) * cosw);
+            q.b2 = A * ((A + 1.0) - (A - 1.0) * cosw - beta);
+            a0 = (A + 1.0) + (A - 1.0) * cosw + beta;
+            q.a1 = -2.0 * ((A - 1.0) + (A + 1.0) * cosw);
+            q.a2 = (A + 1.0) + (A - 1.0) * cosw - beta;
+        }
+        q.b0 /= a0;
+        q.b1 /= a0;
+        q.b2 /= a0;
+        q.a1 /= a0;
+        q.a2 /= a0;
+        return q;
+    }
+
+    float process(int ch, float x) {
+        const double y = b0 * x + z1[ch];
+        z1[ch] = b1 * x - a1 * y + z2[ch];
+        z2[ch] = b2 * x - a2 * y;
+        return static_cast<float>(y);
+    }
+};
 
 int render_adm(bw64::Bw64Reader *wav, const std::string &out_path) {
     auto axml = wav->axmlChunk();
@@ -162,6 +215,7 @@ int render_direct(
 
     std::vector<int> source_ids(channels, -1);
     std::vector<bool> lfe_mask(channels, false);
+    int active_speakers = 0;
     if (hoa_order <= 0) {
         for (uint32_t ch = 0; ch < channels; ++ch) {
             const SpeakerAngle *ang = (ch < speakers.size()) ? find_speaker(speakers[ch]) : nullptr;
@@ -183,13 +237,23 @@ int render_direct(
                 return 1;
             }
             source_ids[ch] = sid;
+            ++active_speakers;
+        }
+        float spk_gain = std::min(1.0f, std::sqrt(2.0f / static_cast<float>(std::max(1, active_speakers))));
+        for (int sid : source_ids) {
+            if (sid >= 0) {
+                audio_set_source_gain(ctx, sid, spk_gain);
+            }
         }
     }
 
-    auto writer = bw64::writeFile(out_path, kOutChannels, sample_rate, bit_depth);
+    const float lfe_gain = 0.5f * std::min(1.0f, std::sqrt(2.0f / static_cast<float>(std::max(1, active_speakers))));
     std::vector<float> in_blk(channels * kBlockSize, 0.0f);
     std::vector<float> ch_buf(kBlockSize, 0.0f);
     std::vector<float> out_blk(kOutChannels * kBlockSize, 0.0f);
+    std::vector<float> rendered;
+    rendered.reserve(static_cast<size_t>(num_frames) * kOutChannels);
+    float peak = 0.0f;
 
     for (uint64_t done = 0; done < num_frames; done += kBlockSize) {
         uint64_t n = std::min<uint64_t>(kBlockSize, num_frames - done);
@@ -211,16 +275,44 @@ int render_direct(
         audio_update_scene(ctx);
         audio_get_interleaved_binaural_buffer(ctx, out_blk.data(), kBlockSize);
 
-        // Mix any LFE channels equally to both ears at -6 dB so sub energy is preserved cleanly.
+        // Mix any LFE channels equally to both ears with headroom scaling.
         for (uint32_t ch = 0; ch < channels; ++ch) {
             if (!lfe_mask[ch]) continue;
             for (uint64_t f = 0; f < n; ++f) {
-                float lfe = in_blk[f * channels + ch] * 0.5f;
-                out_blk[f * 2] = std::max(-1.0f, std::min(1.0f, out_blk[f * 2] + lfe));
-                out_blk[f * 2 + 1] = std::max(-1.0f, std::min(1.0f, out_blk[f * 2 + 1] + lfe));
+                float lfe = in_blk[f * channels + ch] * lfe_gain;
+                out_blk[f * 2] += lfe;
+                out_blk[f * 2 + 1] += lfe;
             }
         }
-        writer->write(out_blk.data(), n);
+        for (uint64_t i = 0; i < n * kOutChannels; ++i) {
+            peak = std::max(peak, std::abs(out_blk[i]));
+        }
+        rendered.insert(rendered.end(), out_blk.begin(), out_blk.begin() + static_cast<ptrdiff_t>(n * kOutChannels));
+    }
+
+    // Compensate Ambisonic low-mid buildup and raw HRTF high-frequency roll-off.
+    Biquad low_shelf = Biquad::shelf(static_cast<double>(sample_rate), 240.0, -3.5, false);
+    Biquad high_shelf = Biquad::shelf(static_cast<double>(sample_rate), 3200.0, 4.5, true);
+    peak = 0.0f;
+    for (size_t i = 0; i + 1 < rendered.size(); i += 2) {
+        float l = high_shelf.process(0, low_shelf.process(0, rendered[i]));
+        float r = high_shelf.process(1, low_shelf.process(1, rendered[i + 1]));
+        rendered[i] = l;
+        rendered[i + 1] = r;
+        peak = std::max(peak, std::max(std::abs(l), std::abs(r)));
+    }
+
+    if (peak > 0.98f) {
+        const float norm = 0.98f / peak;
+        for (float &s : rendered) {
+            s *= norm;
+        }
+    }
+    auto writer = bw64::writeFile(out_path, kOutChannels, sample_rate, bit_depth);
+    for (size_t pos = 0; pos < rendered.size(); pos += static_cast<size_t>(kBlockSize) * kOutChannels) {
+        uint64_t frames_left = (rendered.size() - pos) / kOutChannels;
+        uint64_t n = std::min<uint64_t>(kBlockSize, frames_left);
+        writer->write(rendered.data() + pos, n);
     }
 
     audio_destroy(ctx);

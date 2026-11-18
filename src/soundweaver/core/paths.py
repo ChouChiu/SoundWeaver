@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import sys
+import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -97,23 +98,16 @@ def content_key(path: Path) -> str:
     return hashlib.sha1(ident.encode()).hexdigest()[:20]
 
 
-def partial_path(target: Path) -> Path:
-    """Where `target` is written until it is complete; keeps the suffix for tools that need it."""
-    return target.with_name(f".{target.stem}.partial{target.suffix}")
+def output_workspace(target: Path) -> tempfile.TemporaryDirectory:
+    """Create a private workspace on the target's filesystem."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    return tempfile.TemporaryDirectory(prefix=".soundweaver-", dir=target.parent)
 
 
 @contextmanager
 def atomic_output(target: Path) -> Iterator[Path]:
-    """A scratch path beside `target` that replaces it only once the block succeeds.
-
-    The scratch name keeps the suffix, so tools that pick a format by extension
-    still do; a failed or cancelled run leaves any earlier `target` untouched.
-    """
-    target.parent.mkdir(parents=True, exist_ok=True)
-    partial = partial_path(target)
-    partial.unlink(missing_ok=True)
-    try:
+    """Publish an output only after it has finished writing."""
+    with output_workspace(target) as folder:
+        partial = Path(folder) / target.name
         yield partial
         os.replace(partial, target)
-    finally:
-        partial.unlink(missing_ok=True)

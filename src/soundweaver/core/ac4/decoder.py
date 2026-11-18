@@ -212,29 +212,57 @@ def _decode(
     if info.objects:
         _render(frames, target, token, on_fraction)
         return
+    with sf.SoundFile(
+        target, "w", samplerate=info.sample_rate, channels=len(info.channels),
+        format="FLAC", subtype="PCM_24",
+    ) as out:
+        for block in channel_blocks(frames, info, token, on_fraction):
+            out.write(block)
+    on_fraction(1.0)
+    logger.info(
+        "ac4: decoded %d frames, %s at %d Hz",
+        len(frames), "/".join(info.channels), info.sample_rate,
+    )
+
+
+def playback_blocks(source: Path, token: CancellationToken) -> tuple[Ac4Info, Iterator[np.ndarray]]:
+    frames = list(sync_frames(stream_bytes(source, token)))
+    if not frames:
+        raise Ac4Error(t("ac4.no_frames"))
+    info = _info(frames[0])
+    if info.objects:
+        raise Ac4Error(t("ac4.layout_changed", frame=0))
+    return info, channel_blocks(frames, info, token, lambda _f: None)
+
+
+def channel_blocks(
+    frames: list[bytes],
+    info: Ac4Info,
+    token: CancellationToken,
+    on_fraction: Callable[[float], None],
+) -> Iterator[np.ndarray]:
+    """Yield interleaved PCM with the same delay compensation as the FLAC cache."""
     coded_rate, rate = _rates(read_toc(frames[0]))
     resampler = Resampler(Fraction(rate) / coded_rate, len(info.channels))
-    # the QMF tools delay the output; it is trimmed off the start and made up at the end
     trimmed = 0
-    with sf.SoundFile(
-        target, "w", samplerate=rate, channels=len(info.channels), format="FLAC", subtype="PCM_24"
-    ) as out:
-        for k, decoded in enumerate(checked_frames(frames, token)):
-            if k % 64 == 0:
-                token.raise_if_cancelled()
-                on_fraction(k / len(frames))
-            pcm = decoded.pcm
-            if set(pcm) != set(info.channels):
-                raise Ac4Error(t("ac4.layout_changed", frame=k))
-            block = np.stack([pcm[name] for name in info.channels]) / 32768.0
-            if trimmed < decoded.delay:
-                cut = min(decoded.delay - trimmed, block.shape[1])
-                block, trimmed = block[:, cut:], trimmed + cut
-            out.write(np.clip(resampler.push(block), -1.0, 1.0).T)
-        resampler.push(np.zeros((len(info.channels), trimmed)))
-        out.write(np.clip(resampler.finish(), -1.0, 1.0).T)
-    on_fraction(1.0)
-    logger.info("ac4: decoded %d frames, %s at %d Hz", len(frames), "/".join(info.channels), rate)
+    for k, decoded in enumerate(checked_frames(frames, token)):
+        if k % 64 == 0:
+            token.raise_if_cancelled()
+            on_fraction(k / len(frames))
+        pcm = decoded.pcm
+        if set(pcm) != set(info.channels):
+            raise Ac4Error(t("ac4.layout_changed", frame=k))
+        block = np.stack([pcm[name] for name in info.channels]) / 32768.0
+        if trimmed < decoded.delay:
+            cut = min(decoded.delay - trimmed, block.shape[1])
+            block, trimmed = block[:, cut:], trimmed + cut
+        ready = resampler.push(block)
+        if ready.size:
+            yield np.clip(ready, -1.0, 1.0).T
+    resampler.push(np.zeros((len(info.channels), trimmed)))
+    tail = resampler.finish()
+    if tail.size:
+        yield np.clip(tail, -1.0, 1.0).T
 
 
 def checked_frames(frames: list[bytes], token: CancellationToken) -> Iterator[Decoded]:

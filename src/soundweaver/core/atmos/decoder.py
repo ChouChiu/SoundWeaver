@@ -89,6 +89,7 @@ def decode_atmos(
     layout: SpeakerLayout = DEFAULT_ATMOS,
     speakers: bool = False,
     adm: Path | None = None,
+    on_adm_chunk: Callable[[Path, int], None] | None = None,
 ) -> AtmosDecode:
     """Decode the first audio track of `source` once and produce every output asked for.
 
@@ -99,14 +100,14 @@ def decode_atmos(
     from soundweaver.core import ac4  # ac4 builds on this package's modules
 
     if ac4.is_ac4(source):
-        trace, out = ac4.decode_objects(source, token, on_fraction, layout, speakers, adm)
+        trace, out = ac4.decode_objects(source, token, on_fraction, layout, speakers, adm, on_adm_chunk)
         _store_trace(source, layout, trace)
         return AtmosDecode(trace, out, layout)
     with _prepare(source, token) as (frames, core, rate, first, length):
         out = create_pcm_audio(len(layout.channels), length, rate) if speakers else None
         try:
             trace = _Decode(frames, core, rate, first, length, layout, out, adm).run(
-                token, on_fraction
+                token, on_fraction, on_adm_chunk
             )
         except BaseException:
             if out is not None:
@@ -152,7 +153,10 @@ class _Decode:
         self.chunks = list(pairwise(bounds))
         self.workers = min(workers, count)
 
-    def run(self, token: CancellationToken, on_fraction: Callable[[float], None]) -> ObjectTrace:
+    def run(
+        self, token: CancellationToken, on_fraction: Callable[[float], None],
+        on_adm_chunk: Callable[[Path, int], None] | None,
+    ) -> ObjectTrace:
         total = len(self.frames)
         tracer = Tracer(self.rate, self.first, self.length, FRAME, self.layout)
         oamd = OamdDecoder()
@@ -224,21 +228,31 @@ class _Decode:
                     if k % 64 == 0:
                         progress(k)
                 results: list[ChunkResult] = []
-                for result in pending:
+                readback = adm.prepare_readback(tracer.keys) if adm and on_adm_chunk else None
+                for index, result in enumerate(pending):
                     while not result.ready():
                         token.raise_if_cancelled()
                         result.wait(0.1)
                         progress(total)
                     results.append(result.get())
+                    if adm is not None:
+                        part = Path(scratch) / f"adm-{index}.pcm"
+                        adm.append(part)
+                        part.unlink()
+                        if readback is not None and on_adm_chunk is not None:
+                            adm.file.flush()
+                            if adm.frames_written:
+                                on_adm_chunk(readback, adm.frames_written)
             except BaseException:
                 pool.terminate()
                 if adm is not None:
                     adm.discard()
                 raise
             if adm is not None:
-                for index in range(len(self.chunks)):
-                    adm.append(Path(scratch) / f"adm-{index}.pcm")
-                adm.close(tracer.keys)
+                if readback is not None:
+                    adm.file.close()
+                else:
+                    adm.close(tracer.keys)
                 clipped = sum(r.clipped for r in results)
                 if clipped:
                     logger.warning("adm: %d samples clipped at full scale", clipped)

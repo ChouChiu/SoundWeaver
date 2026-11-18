@@ -63,6 +63,25 @@ def first_audio_stream(data: dict) -> dict:
     return stream
 
 
+def media_tags(data: dict, stream: dict) -> dict[str, str]:
+    """Merge stream and container tags, preferring container values."""
+    tags: dict[str, str] = {}
+    for source in (stream.get("tags", {}), data.get("format", {}).get("tags", {})):
+        for key, value in source.items():
+            if str(value).strip():
+                tags[key.lower()] = str(value).strip()
+    return tags
+
+
+
+def cover_stream(data: dict) -> int | None:
+    """Return the index of the first attached picture, if present."""
+    return next(
+        (stream["index"] for stream in data["streams"] if stream.get("disposition", {}).get("attached_pic")),
+        None,
+    )
+
+
 def duration(path: Path) -> float:
     """Container duration in seconds; raw streams without one are rejected."""
     try:

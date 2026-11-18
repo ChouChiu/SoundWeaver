@@ -218,12 +218,13 @@ def decode_objects(
     layout: SpeakerLayout,
     speakers: bool,
     adm: Path | None,
+    on_adm_chunk: Callable[[Path, int], None] | None = None,
 ) -> tuple[ObjectTrace, AudioData | None]:
     """The trace, and the render to `layout` when `speakers`, of `source`'s A-JOC track; ADM to `adm`."""
     frames = read_frames(source, token)
     if not is_ajoc(frames[0]):
         raise Ac4Error(t("ac4.not_objects"))
-    return render_objects(frames, token, on_fraction, layout, speakers, adm)
+    return render_objects(frames, token, on_fraction, layout, speakers, adm, on_adm_chunk)
 
 
 def render_objects(
@@ -233,6 +234,7 @@ def render_objects(
     layout: SpeakerLayout,
     speakers: bool,
     adm: Path | None,
+    on_adm_chunk: Callable[[Path, int], None] | None = None,
 ) -> tuple[ObjectTrace, AudioData | None]:
     out = None
     try:
@@ -242,7 +244,7 @@ def render_objects(
                 out = render.out = create_pcm_audio(
                     len(layout.channels), render.out_len, render.rate
                 )
-            trace = render.run(token, on_fraction)
+            trace = render.run(token, on_fraction, on_adm_chunk)
     except parallel.FrameError as error:
         if out is not None:
             out.cleanup()
@@ -285,7 +287,10 @@ class _Render:
     def resampled(self) -> bool:
         return self.ratio != 1
 
-    def run(self, token: CancellationToken, on_fraction: Callable[[float], None]) -> ObjectTrace:
+    def run(
+        self, token: CancellationToken, on_fraction: Callable[[float], None],
+        on_adm_chunk: Callable[[Path, int], None] | None,
+    ) -> ObjectTrace:
         stretches = parallel.plan(self.frames)
         if self.out is not None and self.resampled:
             self.speakers = self._coded("speakers.f32", len(self.layout.channels))
@@ -293,6 +298,14 @@ class _Render:
         adm_tracks: Resampler | None = None
         measured: list[Measure] = []
         clipped = 0
+        readback: Path | None = None
+
+        def publish() -> None:
+            if readback is not None and self.adm is not None and on_adm_chunk is not None:
+                self.adm.file.flush()
+                if self.adm.frames_written:
+                    on_adm_chunk(readback, self.adm.frames_written)
+
         try:
             with parallel.worker_pool(len(stretches)) as pool:
                 parse = parallel.Parse(pool, self.frames, stretches, token, here=1)
@@ -318,6 +331,13 @@ class _Render:
                 first = self._job(stretches[0], parse)
                 submit(block=False)
                 pending.appendleft((stretches[0], parallel.done(_render_stretch(first))))
+                if self.adm is not None and on_adm_chunk is not None:
+                    # Finish the metadata map while the PCM workers render upcoming stretches.
+                    submit(block=True)
+                    if queued < len(stretches) or not parse.take(len(self.frames), True):
+                        raise parse.error()
+                    self._take(parse, len(self.frames))
+                    readback = self.adm.prepare_readback(self.tracer.keys)
                 while pending or (queued < len(stretches) and not parse.broken):
                     submit(block=not pending)
                     if not pending:
@@ -337,10 +357,11 @@ class _Render:
                             if adm_tracks is None:
                                 adm_tracks = Resampler(self.ratio, self.adm.channels)
                             block = self.tracks[:, s.start * self.n : s.stop * self.n]
-                            clipped += self._put_adm(adm_tracks.push(block))
+                            clipped += self._put_adm(adm_tracks.push(block), readback is not None)
                         else:
                             self.adm.append(self._part(s))
                             self._part(s).unlink()
+                    publish()
                     on_fraction(s.stop / len(self.frames))
                 if queued < len(stretches) or not parse.take(len(self.frames), True):
                     raise parse.error()
@@ -348,13 +369,17 @@ class _Render:
             if self.speakers is not None:
                 self._put(feeds.finish())
             if adm_tracks is not None:
-                clipped += self._put_adm(adm_tracks.finish())
+                clipped += self._put_adm(adm_tracks.finish(), readback is not None)
+                publish()
             if self.adm is not None:
                 if clipped:
                     logger.warning("adm: %d samples clipped at full scale", clipped)
-                if self.tracks is not None:
-                    self.adm.append(self.scratch / "adm.pcm")
-                self.adm.close(self.tracer.keys)
+                if readback is not None:
+                    self.adm.file.close()
+                else:
+                    if self.tracks is not None:
+                        self.adm.append(self.scratch / "adm.pcm")
+                    self.adm.close(self.tracer.keys)
         except BaseException:
             if self.adm is not None:
                 self.adm.discard()
@@ -416,8 +441,11 @@ class _Render:
         self.out.samples[:, self.written : self.written + block.shape[1]] = block
         self.written += block.shape[1]
 
-    def _put_adm(self, block: np.ndarray) -> int:
+    def _put_adm(self, block: np.ndarray, readback: bool) -> int:
         data, clipped = pcm24(block)
-        with (self.scratch / "adm.pcm").open("ab") as part:
-            part.write(data)
+        if readback:
+            self.adm.write_pcm(data)
+        else:
+            with (self.scratch / "adm.pcm").open("ab") as part:
+                part.write(data)
         return clipped

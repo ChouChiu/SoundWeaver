@@ -28,11 +28,10 @@ import struct
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO
 
 import numpy as np
 
-from soundweaver.core.paths import partial_path
+from soundweaver.core.paths import output_workspace
 from soundweaver.core.speakers import BED_POSITIONS
 
 from .oamd import Program
@@ -254,31 +253,50 @@ class AdmFile:
     """Writes the header up front, takes the PCM in order, and the metadata at `close`."""
 
     def __init__(
-        self, target: Path, sample_rate: int, length: int, program: Program, objects: int
+        self,
+        target: Path,
+        sample_rate: int,
+        length: int,
+        program: Program,
+        objects: int,
+        *,
+        layout: tuple[str, tuple[_Track, ...], tuple[_Track, ...]] | None = None,
     ) -> None:
         self.target, self.sample_rate, self.length = target, sample_rate, length
         self.program, self.objects = program, objects
-        self.bed_name, self.bed, self.others = _tracks(program, objects)
+        if layout is not None:
+            self.bed_name, self.bed, self.others = layout
+        else:
+            self.bed_name, self.bed, self.others = _tracks(program, objects)
         self.tracks = self.bed + self.others
         # which OAMD object each track of the file carries, for `adm_block`
         self.sources = tuple(t.source for t in self.tracks)
         self.channels = len(self.tracks)
         self.keys: dict[int, list[Key]] = {}
         self.data_bytes = 0
-        target.parent.mkdir(parents=True, exist_ok=True)
-        # written aside and moved into place by `close`, so a failed run leaves no torn file
-        self.partial = partial_path(target)
-        self.file: BinaryIO = open(self.partial, "wb")  # noqa: SIM115 - closed in close()
-        w = self.file
-        w.write(b"RIFF" + struct.pack("<I", 0) + b"WAVE")
-        w.write(b"JUNK" + struct.pack("<I", _DS64_SIZE) + bytes(_DS64_SIZE))
         align = self.channels * BIT_DEPTH // 8
-        w.write(b"fmt " + struct.pack("<IHHIIHH", 16, 1, self.channels, sample_rate,
-                                      sample_rate * align, align, BIT_DEPTH))  # fmt: skip
+        fmt = struct.pack("<IHHIIHH", 16, 1, self.channels, sample_rate, sample_rate * align, align, BIT_DEPTH)
         chna = self._chna()
-        w.write(b"chna" + struct.pack("<I", len(chna)) + chna)
-        w.write(b"data" + struct.pack("<I", 0))
-        self.data_start = w.tell()
+        header = (
+            b"RIFF" + bytes(4) + b"WAVE"
+            + b"JUNK" + struct.pack("<I", _DS64_SIZE) + bytes(_DS64_SIZE)
+            + b"fmt " + fmt
+            + b"chna" + struct.pack("<I", len(chna)) + chna
+            + b"data" + bytes(4)
+        )
+        self._workspace = output_workspace(target)
+        self.partial = Path(self._workspace.name) / target.name
+        try:
+            self.file = self.partial.open("w+b")
+            try:
+                self.file.write(header)
+            except OSError:
+                self.file.close()
+                raise
+        except OSError:
+            self._workspace.cleanup()
+            raise
+        self.data_start = len(header)
 
     def append(self, part: Path) -> None:
         """Copy a run of PCM written by `pcm24` onto the end of the data chunk."""
@@ -286,39 +304,62 @@ class AdmFile:
             shutil.copyfileobj(source, self.file, 1 << 22)
             self.data_bytes += source.tell()
 
+    def write_pcm(self, data: bytes) -> None:
+        self.file.write(data)
+        self.data_bytes += len(data)
+
+    @property
+    def frames_written(self) -> int:
+        return self.data_bytes // (self.channels * BIT_DEPTH // 8)
+
+    def prepare_readback(self, keys: dict[int, list[Key]]) -> Path:
+        """Publish the header at the stable, private path owned by playback."""
+        size = self.length * self.channels * BIT_DEPTH // 8
+        self._write_footer(keys, size)
+        self.file.close()
+        self.partial.replace(self.target)
+        self._workspace.cleanup()
+        self.file = self.target.open("r+b")
+        self.file.seek(self.data_start)
+        return self.target
+
     def close(self, keys: dict[int, list[Key]]) -> None:
         """Finish the file; `keys` are the dynamic objects' positions from the trace."""
-        self.keys = keys
-        w = self.file
         try:
-            if self.data_bytes % 2:
-                w.write(b"\0")
-            axml = self._axml()
-            w.write(b"axml" + struct.pack("<I", len(axml)) + axml)
-            if len(axml) % 2:
-                w.write(b"\0")
-            riff = w.tell() - 8
-            data = self.data_bytes
-            if riff > _RIFF_LIMIT or data > _RIFF_LIMIT:
-                w.seek(0)
-                w.write(b"RF64" + struct.pack("<I", _RIFF_LIMIT) + b"WAVE")
-                w.write(b"ds64" + struct.pack("<I", _DS64_SIZE))
-                frames = data // (self.channels * BIT_DEPTH // 8)
-                w.write(struct.pack("<QQQI", riff, data, frames, 0))
-                data = _RIFF_LIMIT
-            else:
-                w.seek(4)
-                w.write(struct.pack("<I", riff))
-            w.seek(self.data_start - 4)
-            w.write(struct.pack("<I", data))
-            w.close()
+            self._write_footer(keys, self.data_bytes)
+            self.file.close()
             self.partial.replace(self.target)
         finally:
             self.discard()
 
+    def _write_footer(self, keys: dict[int, list[Key]], data: int) -> None:
+        self.keys = keys
+        w = self.file
+        w.seek(self.data_start + data)
+        if data % 2:
+            w.write(b"\0")
+        axml = self._axml()
+        w.write(b"axml" + struct.pack("<I", len(axml)) + axml)
+        if len(axml) % 2:
+            w.write(b"\0")
+        riff = w.tell() - 8
+        if riff > _RIFF_LIMIT or data > _RIFF_LIMIT:
+            w.seek(0)
+            w.write(b"RF64" + struct.pack("<I", _RIFF_LIMIT) + b"WAVE")
+            w.write(b"ds64" + struct.pack("<I", _DS64_SIZE))
+            frames = data // (self.channels * BIT_DEPTH // 8)
+            w.write(struct.pack("<QQQI", riff, data, frames, 0))
+            data = _RIFF_LIMIT
+        else:
+            w.seek(4)
+            w.write(struct.pack("<I", riff))
+        w.seek(self.data_start - 4)
+        w.write(struct.pack("<I", data))
+        w.flush()
+
     def discard(self) -> None:
         self.file.close()
-        self.partial.unlink(missing_ok=True)
+        self._workspace.cleanup()
 
     # ---- metadata ----------------------------------------------------------------------
     #
