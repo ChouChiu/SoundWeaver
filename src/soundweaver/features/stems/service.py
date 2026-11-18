@@ -136,15 +136,22 @@ def split_stems(
             elif is_adm_bwf(source):
                 av3a.render_binaural_file(source, binaural_target(output_dir, source), token=token)
             else:
-                spk_names = (
-                    list(mpegh.cicp_layout(cicp).channel_names)
-                    if mpegh.is_mpegh_file(source)
-                    else (list(speakers.channels) if speakers is not None else None)
-                )
+                bin_hoa = hoa_order
+                spk_names: list[str] | None = None
+                if mpegh.is_mpegh_file(source):
+                    spk_names = list(mpegh.cicp_layout(cicp).binaural_names[:audio.channels])
+                elif av3a.is_av3a_file(source) and bin_hoa == 0:
+                    av_info = av3a.probe_av3a(source, quick=True)
+                    if av_info.hoa_order > 0:
+                        bin_hoa = av_info.hoa_order
+                    elif av_info.channel_order and av_info.object_count == 0:
+                        spk_names = [c.strip() for c in av_info.channel_order.split(",") if c.strip()]
+                elif speakers is not None:
+                    spk_names = list(speakers.channels)
                 bin_audio = av3a.render_binaural_audio(
                     audio,
-                    speakers=None if hoa_order > 0 else spk_names,
-                    hoa_order=hoa_order,
+                    speakers=None if bin_hoa > 0 else spk_names,
+                    hoa_order=bin_hoa,
                     token=token,
                 )
                 with bin_audio:

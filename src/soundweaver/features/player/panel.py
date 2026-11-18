@@ -22,6 +22,7 @@ from soundweaver.core.project import ORIGINAL, PlanContext, Project
 from soundweaver.core.renderer import renderer_problem
 from soundweaver.core.stems import stem_label
 from soundweaver.core.task import Progress, Step
+from soundweaver.core.ttml import without_number
 from soundweaver.features.player.service import (
     DEFAULT_QUALITY,
     PlayerSpec,
@@ -34,7 +35,6 @@ from soundweaver.features.player.service import (
     queue_step,
     render_player_video,
 )
-from soundweaver.core.ttml import without_number
 from soundweaver.ui import fluent, widgets
 from soundweaver.ui.feature import FeaturePanel
 from soundweaver.ui.fonts import FontList

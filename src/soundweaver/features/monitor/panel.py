@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import QDragEnterEvent, QDropEvent, QGuiApplication
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -18,14 +18,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from qfluentwidgets import (
-    BodyLabel,
     CheckBox,
-    ListWidget,
     PillPushButton,
     PushButton,
     SegmentedWidget,
     SimpleCardWidget,
-    SmoothScrollArea,
     TitleLabel,
     ToolButton,
 )
@@ -39,9 +36,11 @@ from soundweaver.core.sources import AUDIO_SUFFIXES, is_audio
 from soundweaver.core.speakers import LAYOUTS, atmos_layout
 from soundweaver.core.ttml import parse_ttml_lines
 from soundweaver.features.monitor.meters import MeterRow, object_color
+from soundweaver.features.monitor.playlist import PlaylistView
 from soundweaver.features.monitor.room_canvas import Room3DCanvas
 from soundweaver.features.monitor.webgl_view import WebGLMonitorWidget
 from soundweaver.ui import fluent, widgets
+from soundweaver.ui.scrolling import DirectListWidget, DirectScrollArea
 
 
 class MonitorPage(QWidget):
@@ -53,21 +52,23 @@ class MonitorPage(QWidget):
         super().__init__(parent)
         self.engine = engine
         self.setAcceptDrops(True)
-        self._playlist: list[Path] = []
-        self._current_idx = -1
         self._lyrics: list[tuple[float, float, str]] = []
         self._meter_mode = "channels"
         self._meter_rows: list[MeterRow] = []
+        self._object_ids: tuple[int, ...] = ()
+        self._selected_object: int | None = None
+        self._telemetry: tuple[list[float], list[ObjectSnapshot]] = ([], [])
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(*widgets.PAGE_MARGINS)
+        root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(widgets.SECTION_SPACING)
 
         # Header + Layout / CICP + Binaural + Full-window
-        hdr = QHBoxLayout()
-        hdr.setSpacing(8)
-        hdr.addWidget(TitleLabel(t("monitor.title"), self))
-        hdr.addStretch(1)
+        view_controls = QWidget()
+        hdr = QHBoxLayout(view_controls)
+        hdr.setContentsMargins(0, 0, 0, 0)
+        hdr.setSpacing(widgets.INLINE_SPACING)
+        root.addWidget(TitleLabel(t("monitor.title"), self))
 
         self.binaural_btn = PillPushButton(fluent.icon("headphones"), t("monitor.binaural"), self)
         self.binaural_btn.setCheckable(True)
@@ -77,46 +78,53 @@ class MonitorPage(QWidget):
         hdr.addWidget(self.binaural_btn)
 
         self.mode_box = fluent.ComboBox(self)
+        widgets.name_control(self.mode_box, t("monitor.view_mode"))
         self.mode_box.addItem(t("monitor.mode.room"), "room")
         self.mode_box.addItem(t("monitor.mode.spherical"), "spherical")
         self.mode_box.currentIndexChanged.connect(self._on_mode_changed)
         hdr.addWidget(self.mode_box)
 
-        self.layout_lbl = BodyLabel(t("label.atmos_render_layout"), self)
         self.layout_box = fluent.ComboBox(self)
+        self.layout_lbl = widgets.field_label(t("label.atmos_render_layout"), self.layout_box)
         for spk in LAYOUTS:
             self.layout_box.addItem(spk.name, spk.name)
         self.layout_box.setCurrentIndex(self.layout_box.findData(self.engine.layout.name))
         self.layout_box.currentIndexChanged.connect(self._on_layout_changed)
-        hdr.addWidget(self.layout_lbl)
-        hdr.addWidget(self.layout_box)
+        render_controls = QWidget()
+        render = QHBoxLayout(render_controls)
+        render.setContentsMargins(0, 0, 0, 0)
+        render.setSpacing(widgets.INLINE_SPACING)
+        render.addWidget(self.layout_lbl)
+        render.addWidget(self.layout_box)
 
         self.cicp_box = fluent.ComboBox(self)
+        widgets.name_control(self.cicp_box, t("monitor.cicp_layout"))
         for cid in mpegh.SUPPORTED_CICP:
             lay = mpegh.CICP_LAYOUTS[cid]
             self.cicp_box.addItem(f"CICP {cid}: {lay.label}", cid)
         self.cicp_box.setCurrentIndex(self.cicp_box.findData(self.engine.cicp))
         self.cicp_box.currentIndexChanged.connect(self._on_cicp_changed)
         self.cicp_box.setVisible(False)
-        hdr.addWidget(self.cicp_box)
+        render.addWidget(self.cicp_box)
 
         self.full_btn = ToolButton(fluent.icon("view-fullscreen"), self)
         self.full_btn.setCheckable(True)
-        self.full_btn.setToolTip(t("monitor.fullscreen_tip"))
+        widgets.name_control(self.full_btn, t("monitor.fullscreen_tip"))
         self.full_btn.toggled.connect(self._on_full_toggled)
         hdr.addWidget(self.full_btn)
-        root.addLayout(hdr)
+        hdr.addStretch(1)
+        render.addStretch(1)
+        root.addWidget(widgets.AdaptiveColumns(view_controls, render_controls, breakpoint=0))
 
-        splitter = QSplitter(Qt.Orientation.Horizontal, self)
+        splitter = self._splitter = QSplitter(Qt.Orientation.Horizontal, self)
         splitter.setHandleWidth(8)
         splitter.setChildrenCollapsible(False)
-        splitter.setStyleSheet("QSplitter::handle { background: transparent; }")
 
         # Left: Playlist + Synced Lyrics (Fluent ListWidget)
         left = SimpleCardWidget(splitter)
-        left.setMinimumWidth(200)
+        left.setMinimumWidth(224)
         left_lay = QVBoxLayout(left)
-        left_lay.setContentsMargins(12, 10, 12, 12)
+        left_lay.setContentsMargins(12, 12, 12, 12)
         left_lay.setSpacing(8)
         left_tabs = SegmentedWidget(left)
         left_stack = QStackedWidget(left)
@@ -128,21 +136,27 @@ class MonitorPage(QWidget):
         pl_btns = QHBoxLayout()
         pl_btns.setSpacing(6)
         btn_add = PushButton(fluent.icon("list-add"), t("monitor.add_tracks"), pl_page)
+        btn_add.setMinimumWidth(btn_add.sizeHint().width())
         btn_add.clicked.connect(self._browse_tracks)
         btn_clear = ToolButton(fluent.icon("edit-clear-all"), pl_page)
+        widgets.name_control(btn_clear, t("monitor.clear_playlist"))
         btn_clear.clicked.connect(self._clear_playlist)
+        btn_remove = ToolButton(fluent.icon("list-remove"), pl_page)
+        widgets.name_control(btn_remove, t("monitor.remove_track"))
+        btn_remove.setEnabled(False)
+        btn_remove.clicked.connect(self._remove_track)
         pl_btns.addWidget(btn_add, 1)
+        pl_btns.addWidget(btn_remove)
         pl_btns.addWidget(btn_clear)
-        self.playlist_list = ListWidget(pl_page)
-        self.playlist_list.setFrameShape(QFrame.Shape.NoFrame)
-        self.playlist_list.setStyleSheet("ListWidget { background: transparent; border: none; }")
-        self.playlist_list.itemDoubleClicked.connect(self._play_item)
+        self.playlist_list = PlaylistView(pl_page)
+        self.playlist_list.itemActivated.connect(self._play_item)
+        self.playlist_list.remove_requested.connect(self._remove_track)
+        self.playlist_list.currentRowChanged.connect(lambda row: btn_remove.setEnabled(row >= 0))
         pl_lay.addLayout(pl_btns)
         pl_lay.addWidget(self.playlist_list, 1)
 
-        self.lyrics_list = ListWidget(left_stack)
-        self.lyrics_list.setFrameShape(QFrame.Shape.NoFrame)
-        self.lyrics_list.setStyleSheet("ListWidget { background: transparent; border: none; }")
+        self.lyrics_list = DirectListWidget(left_stack, transparent=True)
+        self.lyrics_list.setAccessibleName(t("monitor.lyrics"))
         left_stack.addWidget(pl_page)
         left_stack.addWidget(self.lyrics_list)
         left_tabs.addItem("playlist", t("monitor.playlist"), lambda: left_stack.setCurrentIndex(0))
@@ -155,17 +169,18 @@ class MonitorPage(QWidget):
         center = SimpleCardWidget(splitter)
         center.setMinimumWidth(360)
         c_lay = QVBoxLayout(center)
-        c_lay.setContentsMargins(12, 10, 12, 12)
+        c_lay.setContentsMargins(12, 12, 12, 12)
         c_lay.setSpacing(8)
         vp_row = QHBoxLayout()
         vp_row.setSpacing(8)
-        vp_tabs = SegmentedWidget(center)
+        view_box = fluent.ComboBox(center)
+        widgets.name_control(view_box, t("monitor.viewpoint"))
         for preset in ("iso", "top", "front", "back", "left", "right"):
-            vp_tabs.addItem(preset, t(f"option.view.{preset}"), lambda p=preset: self.canvas_3d.set_view(p))
-        vp_tabs.setCurrentItem("iso")
-        vp_row.addWidget(vp_tabs)
-        vp_row.addStretch(1)
+            view_box.addItem(t(f"option.view.{preset}"), preset)
+        view_box.currentIndexChanged.connect(lambda: self.canvas_3d.set_view(view_box.currentData()))
+        vp_row.addWidget(view_box)
         self.style_box = fluent.ComboBox(center)
+        widgets.name_control(self.style_box, t("monitor.style"))
         for key in ("person", "room", "logic"):
             self.style_box.addItem(t(f"monitor.style.{key}"), key)
         self.style_box.currentIndexChanged.connect(self._on_style_changed)
@@ -183,7 +198,6 @@ class MonitorPage(QWidget):
         opt_row.addWidget(self.chk_labels)
         opt_row.addWidget(self.chk_speakers)
         opt_row.addWidget(self.chk_drop)
-        opt_row.addStretch(1)
 
         self.btn_upper = PillPushButton(t("monitor.layer.upper"), center)
         self.btn_middle = PillPushButton(t("monitor.layer.middle"), center)
@@ -194,6 +208,7 @@ class MonitorPage(QWidget):
             b.toggled.connect(self._sync_layers)
             b.setVisible(False)
             opt_row.addWidget(b)
+        opt_row.addStretch(1)
 
         self._center_lay = c_lay
         if (
@@ -209,32 +224,34 @@ class MonitorPage(QWidget):
         c_lay.addLayout(opt_row)
         c_lay.addWidget(self.canvas_3d, 1)
 
-        # Right: Live Meters + M/S (SmoothScrollArea)
+        # Right: Live Meters + M/S
         right = SimpleCardWidget(splitter)
-        right.setMinimumWidth(250)
+        right.setMinimumWidth(280)
         r_lay = QVBoxLayout(right)
-        r_lay.setContentsMargins(12, 10, 12, 12)
+        r_lay.setContentsMargins(12, 12, 12, 12)
         r_lay.setSpacing(8)
         r_hdr = QHBoxLayout()
         r_hdr.setSpacing(6)
         m_tabs = SegmentedWidget(right)
         m_tabs.addItem("channels", t("monitor.channels"), lambda: self._set_meter_mode("channels"))
         m_tabs.addItem("objects", t("monitor.objects"), lambda: self._set_meter_mode("objects"))
-        m_tabs.setCurrentItem("channels")
+        m_tabs.setCurrentItem(self._meter_mode)
         btn_clear_ms = ToolButton(fluent.icon("edit-clear"), right)
-        btn_clear_ms.setToolTip(t("monitor.clear_ms"))
+        widgets.name_control(btn_clear_ms, t("monitor.clear_ms"))
         btn_clear_ms.clicked.connect(self.engine.clear_ms)
         r_hdr.addWidget(m_tabs, 1)
         r_hdr.addWidget(btn_clear_ms)
         r_lay.addLayout(r_hdr)
 
-        scroll = SmoothScrollArea(right)
+        scroll = DirectScrollArea(right)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setWidgetResizable(True)
         self._meter_container = QWidget(scroll)
         self._meter_layout = QVBoxLayout(self._meter_container)
         self._meter_layout.setContentsMargins(2, 4, 2, 4)
-        self._meter_layout.setSpacing(3)
+        self._meter_layout.setSpacing(4)
+        self._empty_objects = widgets.hint_label(t("monitor.no_objects"))
+        self._meter_layout.addWidget(self._empty_objects)
         self._meter_layout.addStretch(1)
         scroll.setWidget(self._meter_container)
         scroll.enableTransparentBackground()
@@ -249,7 +266,29 @@ class MonitorPage(QWidget):
         self.engine.meters_updated.connect(self._on_meters)
         self.engine.position_changed.connect(self._on_position)
         self.engine.track_loaded.connect(self._on_track_loaded)
-        self._rebuild_meters(0)
+        self.engine.track_cleared.connect(self._on_track_cleared)
+        self._rebuild_meters()
+
+    def minimumSizeHint(self) -> QSize:
+        widest_card = max(
+            max(card.minimumSizeHint().width(), card.minimumWidth())
+            for card in (self._splitter.widget(index) for index in range(self._splitter.count()))
+        )
+        return QSize(widest_card, super().minimumSizeHint().height())
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        splitter = self._splitter
+        minimum = sum(
+            max(card.minimumSizeHint().width(), card.minimumWidth())
+            for card in (splitter.widget(index) for index in range(splitter.count()))
+        ) + splitter.handleWidth() * (splitter.count() - 1)
+        orientation = Qt.Orientation.Horizontal if self.width() >= minimum else Qt.Orientation.Vertical
+        if orientation != splitter.orientation():
+            splitter.setOrientation(orientation)
+            splitter.setSizes(
+                [240, 620, 300] if orientation == Qt.Orientation.Horizontal else [180, 410, 240]
+            )
 
     def _fallback_to_software_canvas(self) -> None:
         if isinstance(self.canvas_3d, Room3DCanvas):
@@ -259,12 +298,14 @@ class MonitorPage(QWidget):
         sw.set_show_labels(self.chk_labels.isChecked())
         sw.set_show_speakers(self.chk_speakers.isChecked())
         sw.set_show_drop(self.chk_drop.isChecked())
-        sw.set_style(str(self.style_box.currentData() or "person"))
+        sw.set_style(self.style_box.currentData())
         sw.set_mode(str(self.mode_box.currentData() or "room"))
         sw.set_layers(self.btn_upper.isChecked(), self.btn_middle.isChecked(), self.btn_lower.isChecked())
         self._center_lay.replaceWidget(old, sw)
         old.deleteLater()
         self.canvas_3d = sw
+        sw.set_selected_object(self._selected_object)
+        sw.update_telemetry(*self._telemetry)
 
     def _on_full_toggled(self, on: bool) -> None:
         self.full_btn.setIcon(fluent.icon("view-restore" if on else "view-fullscreen"))
@@ -295,70 +336,110 @@ class MonitorPage(QWidget):
             b.setVisible(is_sph)
 
     def _on_style_changed(self) -> None:
-        self.canvas_3d.set_style(str(self.style_box.currentData() or "person"))
+        self.canvas_3d.set_style(self.style_box.currentData())
 
     def _on_layout_changed(self) -> None:
         self.engine.set_layout(atmos_layout(str(self.layout_box.currentData() or "")))
         self.canvas_3d.sync_speakers()
-        self._rebuild_meters(len(self._meter_rows))
+        self._rebuild_meters()
 
     def _on_cicp_changed(self) -> None:
         self.engine.set_cicp(int(self.cicp_box.currentData() or 13))
         self.canvas_3d.sync_speakers()
-        self._rebuild_meters(0)
+        self._rebuild_meters()
 
     def _set_meter_mode(self, mode: str) -> None:
         self._meter_mode = mode
-        self._rebuild_meters(0)
+        self._rebuild_meters()
 
-    def _rebuild_meters(self, obj_count: int) -> None:
+    def _rebuild_meters(self) -> None:
         for row in self._meter_rows:
             self._meter_layout.removeWidget(row)
             row.deleteLater()
-        self._meter_rows = []
-        if self._meter_mode == "channels":
-            channels = self.engine.active_channels
-            for idx, ch in enumerate(channels):
-                row = MeterRow(idx, ch, parent=self._meter_container)
-                row.mute_clicked.connect(self.engine.toggle_channel_mute)
-                row.solo_clicked.connect(self.engine.toggle_channel_solo)
-                self._meter_layout.insertWidget(self._meter_layout.count() - 1, row)
-                self._meter_rows.append(row)
+        self._meter_rows.clear()
+        objects = self._meter_mode == "objects"
+        if objects:
+            entries = (
+                (index, t("monitor.object_name", number=index + 1)) for index in self._object_ids
+            )
         else:
-            for idx in range(obj_count):
-                row = MeterRow(
-                    idx, f"Obj {idx + 1}", object_color(idx), is_object=True, parent=self._meter_container
-                )
+            entries = enumerate(self.engine.active_channels)
+        self._empty_objects.setVisible(objects and not self._object_ids)
+        for index, label in entries:
+            color = object_color(index) if objects else None
+            row = MeterRow(index, label, color, is_object=objects, parent=self._meter_container)
+            if objects:
+                row.object_clicked.connect(self._toggle_object_selection)
                 row.mute_clicked.connect(self.engine.toggle_object_mute)
                 row.solo_clicked.connect(self.engine.toggle_object_solo)
-                self._meter_layout.insertWidget(self._meter_layout.count() - 1, row)
-                self._meter_rows.append(row)
+                row.set_selected(index == self._selected_object)
+            else:
+                row.mute_clicked.connect(self.engine.toggle_channel_mute)
+                row.solo_clicked.connect(self.engine.toggle_channel_solo)
+            self._meter_layout.insertWidget(self._meter_layout.count() - 1, row)
+            self._meter_rows.append(row)
+        self._update_meter_rows()
+
+    def _toggle_object_selection(self, index: int) -> None:
+        self._set_selected_object(None if index == self._selected_object else index)
+
+    def _set_selected_object(self, index: int | None) -> None:
+        self._selected_object = index
+        self.canvas_3d.set_selected_object(index)
+        if self._meter_mode == "objects":
+            for row in self._meter_rows:
+                row.set_selected(row.index == index)
+
+    def _reset_objects(self, count: int = 0) -> None:
+        self._telemetry = ([], [])
+        self._object_ids = tuple(range(count))
+        self._set_selected_object(None)
+        self.canvas_3d.update_telemetry(*self._telemetry)
+        self._rebuild_meters()
 
     def _on_meters(self, ch_dbs: list[float], objs: list[ObjectSnapshot]) -> None:
+        self._telemetry = (ch_dbs, objs)
         self.canvas_3d.update_telemetry(ch_dbs, objs)
-        if self._meter_mode == "channels":
-            if len(self._meter_rows) != len(self.engine.active_channels):
-                self._rebuild_meters(len(objs))
-            muted, soloed = self.engine.channel_ms()
-            for i, row in enumerate(self._meter_rows):
-                db = ch_dbs[i] if i < len(ch_dbs) else SILENCE_DB
-                row.set_state(db, i in muted, i in soloed)
+        ids = self._object_ids
+        if objs:
+            ids = tuple(sorted(obj.index for obj in objs))
+        objects_changed = ids != self._object_ids
+        self._object_ids = ids
+        if self._selected_object is not None and self._selected_object not in ids:
+            self._set_selected_object(None)
+        if self._meter_mode == "objects":
+            rebuild = objects_changed
         else:
-            if len(self._meter_rows) != len(objs):
-                self._rebuild_meters(len(objs))
+            rebuild = len(self._meter_rows) != len(self.engine.active_channels)
+        if rebuild:
+            self._rebuild_meters()
+        else:
+            self._update_meter_rows()
+
+    def _update_meter_rows(self) -> None:
+        ch_dbs, objs = self._telemetry
+        if self._meter_mode == "objects":
+            states = {obj.index: obj for obj in objs}
             muted, soloed = self.engine.object_ms()
-            for i, row in enumerate(self._meter_rows):
-                if i < len(objs):
-                    row.set_state(objs[i].level_db, i in muted, i in soloed, (objs[i].x, objs[i].y))
+            for row in self._meter_rows:
+                index = row.index
+                if obj := states.get(index):
+                    row.set_state(obj.level_db, index in muted, index in soloed, (obj.x, obj.y))
                 else:
-                    row.set_state(SILENCE_DB, i in muted, i in soloed)
+                    row.set_state(SILENCE_DB, index in muted, index in soloed)
+        else:
+            muted, soloed = self.engine.channel_ms()
+            for row in self._meter_rows:
+                index = row.index
+                db = ch_dbs[index] if index < len(ch_dbs) else SILENCE_DB
+                row.set_state(db, index in muted, index in soloed)
 
     def _on_track_loaded(self, path: Path, info: AudioInfo) -> None:
         target_mode = "spherical" if info.is_mpegh else "room"
         mode_idx = self.mode_box.findData(target_mode)
         if mode_idx >= 0 and self.mode_box.currentIndex() != mode_idx:
             self.mode_box.setCurrentIndex(mode_idx)
-        self._rebuild_meters(info.object_count)
+        self._reset_objects(info.object_count)
 
         self.lyrics_list.clear()
         self._lyrics = []
@@ -383,44 +464,57 @@ class MonitorPage(QWidget):
                 self.lyrics_list.scrollToItem(item, QAbstractItemView.ScrollHint.PositionAtCenter)
 
     def add_paths(self, paths: list[Path]) -> None:
-        for p in paths:
-            if p.is_dir():
-                for child in sorted(p.rglob("*")):
+        playlist = self.playlist_list
+        for path in paths:
+            if path.is_dir():
+                for child in sorted(path.rglob("*")):
                     if is_audio(child):
-                        self._add_one(child)
-            elif p.is_file():
-                self._add_one(p)
-        if self._current_idx < 0 and self._playlist:
+                        playlist.append_track(child)
+            elif path.is_file():
+                playlist.append_track(path)
+        if playlist.active_row < 0 and playlist.count():
             self.play_index(0)
 
-    def _add_one(self, path: Path) -> None:
-        if path in self._playlist:
-            return
-        self._playlist.append(path)
-        self.playlist_list.addItem(QListWidgetItem(path.name))
-
-    def play_index(self, idx: int) -> None:
-        if 0 <= idx < len(self._playlist):
-            self._current_idx = idx
-            self.playlist_list.setCurrentRow(idx)
-            self.engine.load(self._playlist[idx])
+    def play_index(self, index: int, *, auto_play: bool = True) -> None:
+        if 0 <= index < self.playlist_list.count():
+            self.engine.load(self.playlist_list.activate(index), auto_play=auto_play)
 
     def play_next(self) -> None:
-        if self._playlist:
-            self.play_index((self._current_idx + 1) % len(self._playlist))
+        count = self.playlist_list.count()
+        if count:
+            self.play_index((self.playlist_list.active_row + 1) % count)
 
     def play_prev(self) -> None:
-        if self._playlist:
-            self.play_index((self._current_idx - 1) % len(self._playlist))
+        count = self.playlist_list.count()
+        if count:
+            active = self.playlist_list.active_row
+            self.play_index((active - 1) % count if active >= 0 else count - 1)
 
     def _play_item(self, item: QListWidgetItem) -> None:
         self.play_index(self.playlist_list.row(item))
 
+    def _remove_track(self) -> None:
+        playlist = self.playlist_list
+        row = playlist.currentRow()
+        if row < 0:
+            return
+        was_active = row == playlist.active_row
+        auto_play = self.engine.is_playing or self.engine.is_loading
+        playlist.remove_current()
+        if was_active:
+            if playlist.count():
+                self.play_index(min(row, playlist.count() - 1), auto_play=auto_play)
+            else:
+                self.engine.unload()
+
     def _clear_playlist(self) -> None:
-        self.engine.stop()
-        self._playlist.clear()
         self.playlist_list.clear()
-        self._current_idx = -1
+        self.engine.unload()
+
+    def _on_track_cleared(self) -> None:
+        self.lyrics_list.clear()
+        self._lyrics = []
+        self._reset_objects()
 
     def _browse_tracks(self) -> None:
         exts = " ".join(f"*{s}" for s in sorted(AUDIO_SUFFIXES))

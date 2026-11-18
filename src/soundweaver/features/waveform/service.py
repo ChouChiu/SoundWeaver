@@ -17,12 +17,12 @@ from pathlib import Path
 
 from soundweaver.core import ac4
 from soundweaver.core.cancel import CancellationToken
+from soundweaver.core.encoders import DEFAULT_ENCODER, ENCODERS, encoder_for
 from soundweaver.core.ffmpeg import duration, run_ffmpeg
 from soundweaver.core.i18n import t
 from soundweaver.core.paths import atomic_output, work_root
 from soundweaver.core.project import Track
 from soundweaver.core.task import Report, Step, percent
-from soundweaver.core.encoders import DEFAULT_ENCODER, ENCODERS, encoder_for
 
 
 @dataclass(frozen=True, slots=True)

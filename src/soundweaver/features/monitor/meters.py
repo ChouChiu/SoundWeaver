@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtCore import QPointF, QRectF, Qt, Signal, SignalInstance
+from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPen
 from PySide6.QtWidgets import QHBoxLayout, QWidget
-from qfluentwidgets import CaptionLabel, ToggleButton
+from qfluentwidgets import CaptionLabel, ToggleButton, setCustomStyleSheet, themeColor
 
+from soundweaver.core.i18n import t
 from soundweaver.core.playback import SILENCE_DB
-from soundweaver.ui import fluent
+from soundweaver.ui import fluent, widgets
+
+SELECTED_OBJECT_COLOR = "#e0fbff"
 
 OBJECT_PALETTE = (
     "#ff4d4d", "#ff884d", "#ffc24d", "#e6ff4d", "#88ff4d",
@@ -61,7 +64,7 @@ class LevelBar(QWidget):
         super().__init__(parent)
         self._color = color
         self._db = SILENCE_DB
-        self.setMinimumWidth(80)
+        self.setMinimumWidth(40)
         self.setFixedHeight(16)
 
     def set_db(self, db: float) -> None:
@@ -87,6 +90,7 @@ class LevelBar(QWidget):
 class MeterRow(QWidget):
     """Single channel or object meter row with optional XY radar, dBFS bar, and M / S toggles."""
 
+    object_clicked = Signal(int)
     mute_clicked = Signal(int)
     solo_clicked = Signal(int)
 
@@ -101,39 +105,76 @@ class MeterRow(QWidget):
         super().__init__(parent)
         self.index = index
         self._color = color or QColor(77, 166, 255)
-        self.setFixedHeight(30)
+        self.setFixedHeight(36 if is_object else 30)
+        self._object_button: ToggleButton | None = None
 
         row = QHBoxLayout(self)
         row.setContentsMargins(2, 1, 2, 1)
-        row.setSpacing(6)
+        row.setSpacing(4)
         self.xy_view: MiniXYView | None = None
         if is_object:
             self.xy_view = MiniXYView(self._color, self)
             row.addWidget(self.xy_view)
 
-        lbl = CaptionLabel(label, self)
-        lbl.setFixedWidth(42)
-        row.addWidget(lbl)
+        if is_object:
+            self._object_button = self._toggle(
+                row, label, t("monitor.highlight_object", name=label), self.object_clicked,
+                width=64,
+            )
+        else:
+            lbl = CaptionLabel(label, self)
+            lbl.setFixedWidth(40)
+            row.addWidget(lbl)
 
         self.bar = LevelBar(self._color, self)
         row.addWidget(self.bar, 1)
 
         self.db_lbl = CaptionLabel("-∞", self)
-        self.db_lbl.setFixedWidth(36)
+        self.db_lbl.setFixedWidth(32)
         self.db_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         row.addWidget(self.db_lbl)
 
-        self.btn_m = ToggleButton("M", self)
-        self.btn_m.setFixedSize(26, 22)
-        self.btn_m.setStyleSheet("padding: 0px;")
-        self.btn_m.clicked.connect(lambda: self.mute_clicked.emit(self.index))
-        row.addWidget(self.btn_m)
+        self.btn_m = self._toggle(row, "M", t("monitor.mute", name=label), self.mute_clicked)
+        self.btn_s = self._toggle(row, "S", t("monitor.solo", name=label), self.solo_clicked)
 
-        self.btn_s = ToggleButton("S", self)
-        self.btn_s.setFixedSize(26, 22)
-        self.btn_s.setStyleSheet("padding: 0px;")
-        self.btn_s.clicked.connect(lambda: self.solo_clicked.emit(self.index))
-        row.addWidget(self.btn_s)
+    def _toggle(
+        self, row: QHBoxLayout, text: str, name: str, signal: SignalInstance, *, width: int = 32
+    ) -> ToggleButton:
+        button = ToggleButton(text, self)
+        widgets.name_control(button, name)
+        button.setFixedSize(width, 24)
+        padding = "ToggleButton[hasIcon=false] { padding: 0px; }"
+        setCustomStyleSheet(
+            button,
+            padding + "ToggleButton:focus { border: 2px solid #242424; }",
+            padding + "ToggleButton:focus { border: 2px solid #ffffff; }",
+        )
+        button.clicked.connect(lambda: signal.emit(self.index))
+        row.addWidget(button)
+        return button
+
+    def set_selected(self, selected: bool) -> None:
+        if self._object_button is not None:
+            self._object_button.setChecked(selected)
+            self.update()
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if self._object_button is not None and event.button() == Qt.MouseButton.LeftButton:
+            self._object_button.click()
+            event.accept()
+        else:
+            super().mouseReleaseEvent(event)
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        if self._object_button is not None and self._object_button.isChecked():
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(fluent.surface_subtle())
+            painter.drawRoundedRect(self.rect(), 6, 6)
+            painter.setBrush(themeColor())
+            painter.drawRoundedRect(0, 8, 2, self.height() - 16, 1, 1)
 
     def set_state(
         self,

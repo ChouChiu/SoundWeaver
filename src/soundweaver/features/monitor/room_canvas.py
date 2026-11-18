@@ -19,7 +19,10 @@ from PySide6.QtWidgets import QWidget
 
 from soundweaver.core.codecs import mpegh
 from soundweaver.core.playback import SILENCE_DB, ObjectSnapshot, PlaybackEngine
-from soundweaver.features.monitor.meters import object_color
+from soundweaver.features.monitor.meters import (
+    SELECTED_OBJECT_COLOR,
+    object_color,
+)
 
 
 class Room3DCanvas(QWidget):
@@ -37,6 +40,7 @@ class Room3DCanvas(QWidget):
         self._show_drop = False
         self._show_xy = True
         self._style = "person"
+        self._selected_object: int | None = None
         self._mode = "room"
         self._layers = {"upper": True, "middle": True, "lower": True}
         self._objs: list[ObjectSnapshot] = []
@@ -72,6 +76,10 @@ class Room3DCanvas(QWidget):
 
     def set_style(self, style: str) -> None:
         self._style = style
+        self.update()
+
+    def set_selected_object(self, index: int | None) -> None:
+        self._selected_object = index
         self.update()
 
     def set_mode(self, mode: str) -> None:
@@ -210,15 +218,17 @@ class Room3DCanvas(QWidget):
         # Objects
         draw_objs = []
         for o in self._objs:
-            if not o.active:
+            selected = o.index == self._selected_object
+            if not selected and (not o.active or o.level_db <= -80.0):
                 continue
             px, py, depth = self._project(o.x, o.y, o.z, cx, cy, scale)
             fx, fy, _ = self._project(o.x, o.y, 0.0, cx, cy, scale)
             draw_objs.append((depth, o, px, py, fx, fy))
         for _, o, px, py, fx, fy in sorted(draw_objs, key=lambda item: -item[0]):
+            selected = o.index == self._selected_object
             norm = max(0.0, min(1.0, (o.level_db + 60.0) / 55.0))
-            col = object_color(o.index)
-            radius = 7.5 + 6.5 * norm
+            col = QColor(SELECTED_OBJECT_COLOR) if selected else object_color(o.index)
+            radius = 7.5 + 6.5 * norm + (1.5 if selected else 0.0)
             if self._show_drop:
                 p.setPen(QPen(QColor(col.red(), col.green(), col.blue(), 110), 1.0, Qt.PenStyle.DashLine))
                 p.drawLine(QPointF(px, py), QPointF(fx, fy))
@@ -232,7 +242,11 @@ class Room3DCanvas(QWidget):
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(sphere_grad)
             p.drawEllipse(QPointF(px, py), radius, radius)
-            if self._show_labels:
+            if selected:
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.setPen(QPen(col, 1.5))
+                p.drawEllipse(QPointF(px, py), radius + 4, radius + 4)
+            if self._show_labels or selected:
                 label = str(o.index + 1)
                 p.setFont(QFont("sans-serif", 8, QFont.Weight.Bold))
                 path = QPainterPath()

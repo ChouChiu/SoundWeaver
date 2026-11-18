@@ -20,8 +20,6 @@ from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFileDialog,
-    QFormLayout,
-    QHBoxLayout,
     QHeaderView,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -36,9 +34,12 @@ from qfluentwidgets import (
     TransparentPushButton,
 )
 
+from soundweaver.core import ttml as lyric_match
 from soundweaver.core.i18n import t
 from soundweaver.core.paths import path_from_text
 from soundweaver.core.project import ATMOS_LAYOUT_KEY, Project, expected_tracks
+from soundweaver.core.sources import Inspection, folder_cover
+from soundweaver.core.sources import inspect_source as inspect
 from soundweaver.core.speakers import SpeakerLayout, atmos_layout
 from soundweaver.features.batch.service import (
     BatchTrack,
@@ -50,8 +51,6 @@ from soundweaver.features.batch.service import (
     safe_name,
     track_output_dir,
 )
-from soundweaver.core import ttml as lyric_match
-from soundweaver.core.sources import Inspection, folder_cover, inspect_source as inspect
 from soundweaver.ui import fluent, widgets
 from soundweaver.ui.background import Each
 
@@ -117,15 +116,15 @@ class BatchPanel(widgets.Card):
         self.remove_btn = self._button(t("batch.remove"), "list-remove", self.remove_selected)
         self.remove_btn.setToolTip(t("batch.remove_tip"))
         clear = self._button(t("batch.clear"), "edit-clear-all", self.clear, flat=True)
-        buttons = QHBoxLayout()
-        buttons.setSpacing(widgets.INLINE_SPACING)
-        for button in (add_files, add_folder, import_lyrics, self.lyrics_btn, self.remove_btn):
-            buttons.addWidget(button)
-        buttons.addStretch(1)
-        buttons.addWidget(clear)
+        imports = QWidget()
+        imports.setLayout(widgets.hbox(add_files, add_folder, import_lyrics, spacing=widgets.INLINE_SPACING))
+        edits = QWidget()
+        edits.setLayout(widgets.hbox(self.lyrics_btn, self.remove_btn, clear, spacing=widgets.INLINE_SPACING))
+        buttons = widgets.AdaptiveColumns(imports, edits, breakpoint=0, spacing=widgets.INLINE_SPACING)
 
         self.album = SwitchButton(t("batch.album_mode"))
         self.album.setOnText(t("batch.album_mode"))
+        widgets.name_switch(self.album, t("batch.album_mode"))
         self.album.setToolTip(t("batch.album_mode_tip"))
         self.album.checkedChanged.connect(lambda _on: self._sync())
         self.album_name = LineEdit()
@@ -137,20 +136,18 @@ class BatchPanel(widgets.Card):
         self.out_edit, out_btn, out_row = widgets.browse_row("", self.pick_output)
         self._buttons += [cover_btn, out_btn]
         # one form, so the labels line up whether the album rows show or not
-        self.form = QFormLayout()
-        self.form.setHorizontalSpacing(widgets.FIELD_SPACING)
-        self.form.setVerticalSpacing(widgets.ROW_SPACING)
-        self.form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.form.addRow(
-            widgets.field_label(t("batch.album_name"), self.album_name), self.album_name
+        self.form = widgets.form(
+            [
+                (t("batch.album_name"), self.album_name),
+                (t("batch.album_cover"), cover_row),
+                (t("batch.output_root"), out_row),
+            ]
         )
-        self.form.addRow(widgets.field_label(t("batch.album_cover"), self.album_cover), cover_row)
-        self.form.addRow(widgets.field_label(t("batch.output_root"), self.out_edit), out_row)
 
         layout = QVBoxLayout()
         layout.setSpacing(widgets.ROW_SPACING)
         layout.addWidget(self.list, 1)
-        layout.addLayout(buttons)
+        layout.addWidget(buttons)
         layout.addWidget(self.album)
         layout.addLayout(self.form)
         self.set_body(layout)
@@ -162,6 +159,9 @@ class BatchPanel(widgets.Card):
             edit.editingFinished.connect(self._settle.now)
         fluent.on_theme_change(self._sync)
         self._sync()
+
+    def flush_pending_edits(self) -> None:
+        self._settle.flush()
 
     def _button(self, text: str, icon: str, slot, flat: bool = False) -> PushButton:
         kind = TransparentPushButton if flat else PushButton
@@ -213,26 +213,35 @@ class BatchPanel(widgets.Card):
             cached = self._folder_covers[folder] = (stamp, folder_cover(folder))
         return cached[1]
 
-    def _cover(self, track: BatchTrack) -> Path | None:
-        if self.is_album:
-            return self.album_cover_path() or track.cover
-        return track.cover
-
-    def project(self, track: BatchTrack) -> Project:
-        out = track_output_dir(track.audio, self.output_root())
-        info, render = track.info, self.atmos_layout()
-        tracks = expected_tracks(track.audio, out, info, render) if info else ()
-        ttml = self.lyrics_for(track)
+    def _project(
+        self,
+        track: BatchTrack,
+        root: Path | None,
+        cover: Path | None,
+        render: SpeakerLayout,
+    ) -> Project:
+        out = track_output_dir(track.audio, root)
+        tracks = expected_tracks(track.audio, out, track.info, render) if track.info else ()
         return Project(
-            track.audio, self._cover(track), ttml, out, info, tracks,
-            probing=track.probing, audio_error=track.error, atmos_layout=render,
-        )  # fmt: skip
+            audio=track.audio,
+            cover=cover or track.cover,
+            ttml=self.lyrics_for(track),
+            output_dir=out,
+            info=track.info,
+            tracks=tracks,
+            probing=track.probing,
+            audio_error=track.error,
+            atmos_layout=render,
+        )
 
     def atmos_layout(self) -> SpeakerLayout:
         return atmos_layout(str(self.settings.value(ATMOS_LAYOUT_KEY, "")))
 
     def projects(self) -> list[Project]:
-        return [self.project(track) for track in self.tracks]
+        root = self.output_root()
+        cover = self.album_cover_path() if self.is_album else None
+        render = self.atmos_layout()
+        return [self._project(track, root, cover, render) for track in self.tracks]
 
     def album_project(self) -> Project | None:
         """The album as one input, for the outputs made once per album."""
@@ -256,7 +265,9 @@ class BatchPanel(widgets.Card):
         if not self.tracks:
             return Project()
         rows = self._selected_rows()
-        return self.project(self.tracks[rows[0] if rows else 0])
+        track = self.tracks[rows[0] if rows else 0]
+        cover = self.album_cover_path() if self.is_album else None
+        return self._project(track, self.output_root(), cover, self.atmos_layout())
 
     def set_status(self, index: int, text: str, problem: bool = False) -> None:
         item = self.list.topLevelItem(index)

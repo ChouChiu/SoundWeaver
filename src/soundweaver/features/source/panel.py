@@ -1,7 +1,7 @@
 """The inputs: audio, cover, TTML lyrics and output directory.
 
 Reads the audio in the background and fills in the cover and lyrics it finds
-(see `service.inspect`) unless the user picked their own; what was filled in
+(see `core.sources.inspect_source`) unless the user picked their own; what was filled in
 follows the audio when another one is picked.  All of it becomes a `Project`
 for the output panels.
 """
@@ -22,11 +22,11 @@ from soundweaver.core.audio import AudioInfo
 from soundweaver.core.i18n import t
 from soundweaver.core.paths import FileStamp, file_stamp, path_from_text
 from soundweaver.core.project import ATMOS_LAYOUT_KEY, Project, default_output_dir, expected_tracks
+from soundweaver.core.sources import Inspection, inspect_source, kind_of
 from soundweaver.core.speakers import SpeakerLayout, atmos_layout
-from soundweaver.features.source.service import Inspection, inspect, kind_of
+from soundweaver.features.source.inspector import StreamInspectorDialog
 from soundweaver.ui import fluent, widgets
 from soundweaver.ui.background import Latest
-from soundweaver.features.source.inspector import StreamInspectorDialog
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +94,9 @@ class SourcePanel(widgets.Card):
         grid.setVerticalSpacing(widgets.ROW_SPACING)
         self.cover_preview = _CoverPreview()
         self.cover_preview.setText(t("source.no_cover"))
-        self.cover_preview.setToolTip(t("source.click_to_pick_cover"))
+        widgets.keyboard_activate(
+            self.cover_preview, t("source.click_to_pick_cover"), self.pick_cover
+        )
         self.cover_preview.clicked.connect(self.pick_cover)
         grid.addWidget(self.cover_preview, 0, 0, 5, 1, Qt.AlignmentFlag.AlignTop)
 
@@ -104,8 +106,8 @@ class SourcePanel(widgets.Card):
         )  # fmt: skip
         self.audio_info = widgets.hint_label()
         self.inspect_button = TransparentToolButton(fluent.icon("help-about"))
-        self.inspect_button.setToolTip(t("inspector.title"))
-        self.inspect_button.setFixedSize(22, 22)
+        widgets.name_control(self.inspect_button, t("inspector.title"))
+        self.inspect_button.setFixedSize(28, 28)
         self.inspect_button.clicked.connect(self._open_inspector)
         self.inspect_button.hide()
         info_row = QHBoxLayout()
@@ -146,7 +148,7 @@ class SourcePanel(widgets.Card):
         edit, button, line = widgets.browse_row(placeholder, slot, tip)
         self._buttons.append(button)
         buddy = widgets.field_label(label, edit)
-        grid.addWidget(buddy, row, 1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        grid.addWidget(buddy, row, 1, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         grid.addLayout(line, row, 2)
         return edit
 
@@ -264,6 +266,9 @@ class SourcePanel(widgets.Card):
 
     # ---- reactions -------------------------------------------------------------------
 
+    def flush_pending_edits(self) -> None:
+        self._settle.flush()
+
     def _flush(self) -> None:
         self._settle.now()
 
@@ -290,7 +295,7 @@ class SourcePanel(widgets.Card):
             return
         self.settings.setValue("last_dir", str(audio.parent))
         self._set_info(t("status.reading"))
-        self._probe.run(lambda: inspect(audio), self._audio_read)
+        self._probe.run(lambda: inspect_source(audio), self._audio_read)
 
     def _audio_read(self, result: Inspection | Exception) -> None:
         if isinstance(result, Exception):

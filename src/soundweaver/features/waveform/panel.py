@@ -5,11 +5,11 @@ from __future__ import annotations
 from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QVBoxLayout
 
+from soundweaver.core.encoders import DEFAULT_ENCODER
 from soundweaver.core.ffmpeg import MAX_FRAME_SIDE, frame_problem
 from soundweaver.core.i18n import t
 from soundweaver.core.project import PlanContext, Project, Track
 from soundweaver.core.task import Step
-from soundweaver.core.encoders import DEFAULT_ENCODER
 from soundweaver.features.waveform.service import WaveformSpec, waveform_step, waveform_target
 from soundweaver.ui import widgets
 from soundweaver.ui.feature import FeaturePanel

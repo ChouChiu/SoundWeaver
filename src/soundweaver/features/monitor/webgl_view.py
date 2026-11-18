@@ -28,6 +28,8 @@ class WebGLMonitorWidget(QWebEngineView):
         self._show_speakers = False
         self._show_drop = False
         self._style = "person"
+        self._selected_object: int | None = None
+        self._telemetry: tuple[list[float], list[ObjectSnapshot]] = ([], [])
         self._mode = "room"
         self._layers = (True, True, True)
         self.setMinimumSize(360, 300)
@@ -49,6 +51,8 @@ class WebGLMonitorWidget(QWebEngineView):
         self.set_show_drop(self._show_drop)
         self.set_style(self._style)
         self.set_layers(*self._layers)
+        self.set_selected_object(self._selected_object)
+        self.update_telemetry(*self._telemetry)
 
     def sync_speakers(self) -> None:
         if not self._ready:
@@ -113,7 +117,13 @@ class WebGLMonitorWidget(QWebEngineView):
             l = "true" if lower else "false"
             self.page().runJavaScript(f"window.liveMonitor?.setLayers({u}, {m}, {l});")
 
+    def set_selected_object(self, index: int | None) -> None:
+        self._selected_object = index
+        if self._ready:
+            self.page().runJavaScript(f"window.liveMonitor?.setSelectedObject({json.dumps(index)});")
+
     def update_telemetry(self, ch_dbs: list[float], objs: list[ObjectSnapshot]) -> None:
+        self._telemetry = (ch_dbs, objs)
         if not self._ready:
             return
         payload = [

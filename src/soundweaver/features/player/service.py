@@ -15,11 +15,11 @@ from pathlib import Path
 
 from soundweaver.core import ac4, ffmpeg, motion
 from soundweaver.core.cancel import CancellationToken
+from soundweaver.core.encoders import encoder_available, encoder_for
 from soundweaver.core.i18n import t
 from soundweaver.core.paths import atomic_output, work_root
 from soundweaver.core.renderer import renderer_script, run_renderer
 from soundweaver.core.task import Progress, Report, Step
-from soundweaver.core.encoders import encoder_available, encoder_for
 from soundweaver.core.ttml import css_font_list
 
 # a sensible quality per encoder: CRF for the software ones, CQ for NVENC
