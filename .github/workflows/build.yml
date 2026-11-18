@@ -12,10 +12,10 @@ jobs:
         include:
           - os: ubuntu-latest
             target: linux-x86_64
-            exe: dolbytool
+            exe: soundweaver
           - os: windows-latest
             target: windows-x86_64
-            exe: dolbytool.exe
+            exe: soundweaver.exe
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -29,6 +29,7 @@ jobs:
         working-directory: renderer
         run: |
           bun install --frozen-lockfile
+          bun run check
           bun run build:page
           # Bundle npm packages into the CLI scripts, the packaged app ships no node_modules
           bun build src/cli/main.ts --outfile dist/render.mjs --target node
@@ -46,33 +47,32 @@ jobs:
         run: |
           uv run --with pyinstaller pyinstaller \
             --noconfirm --clean --onedir --windowed \
-            --name dolbytool \
+            --name soundweaver \
             --paths src \
             --exclude-module tkinter \
-            --collect-data dolbytool \
-            --add-data "src/dolbytool/locales:dolbytool/locales" \
+            --add-data "src/soundweaver/locales:soundweaver/locales" \
             --add-data "renderer/dist:renderer/dist" \
-            src/dolbytool/__main__.py
+            src/soundweaver/__main__.py
 
       - name: Smoke test
         run: |
-          test -f dist/dolbytool/${{ matrix.exe }}
-          test -f dist/dolbytool/_internal/renderer/dist/render.mjs
-          test -f dist/dolbytool/_internal/dolbytool/locales/zh_cn.json
-          test -f dist/dolbytool/_internal/dolbytool/locales/en.json
-          test -f dist/dolbytool/_internal/dolbytool/locales/zh_tw.json
+          test -f dist/soundweaver/${{ matrix.exe }}
+          test -f dist/soundweaver/_internal/renderer/dist/render.mjs
+          test -f dist/soundweaver/_internal/soundweaver/locales/zh_cn.json
+          test -f dist/soundweaver/_internal/soundweaver/locales/en.json
+          test -f dist/soundweaver/_internal/soundweaver/locales/zh_tw.json
 
       - name: Pack (Linux)
         if: runner.os == 'Linux'
-        run: tar -C dist -czf dolbytool-${{ matrix.target }}.tar.gz dolbytool
+        run: tar -C dist -czf soundweaver-${{ matrix.target }}.tar.gz soundweaver
 
       - name: Pack (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: Compress-Archive -Path dist/dolbytool -DestinationPath dolbytool-${{ matrix.target }}.zip
+        run: Compress-Archive -Path dist/soundweaver -DestinationPath soundweaver-${{ matrix.target }}.zip
 
       - uses: actions/upload-artifact@v4
         with:
-          name: dolbytool-${{ matrix.target }}
-          path: dolbytool-${{ matrix.target }}.*
+          name: soundweaver-${{ matrix.target }}
+          path: soundweaver-${{ matrix.target }}.*
           if-no-files-found: error

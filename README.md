@@ -68,15 +68,26 @@ uv run soundweaver
 
 ## 性能与渲染机制
 
+- **播放器分段预读**：普通音频、360RA、Audio Vivid 和非对象 AC-4 先缓冲约半秒，后台预读约 6 秒，已解码片段保留在临时文件供跳转；Atmos 对象播放完成前置元数据准备后按 PCM 段交付
 - **GPU Vulkan 硬件合成**：页面与 Three.js 场景通过 ANGLE Vulkan 强制启用显卡渲染，分段浏览器分时调度 GPU
 - **确定性分段并行**：无头 Chromium 基于 CDP `BeginFrame` 确定性时钟切片并行渲染，渲染完毕后无损拼接，彻底消除接缝跳变；无歌词区间自动复用透明关键帧跳过空跑
 - **快速截图加速**：不透明视频默认使用 JPEG（质量 90）帧流，截图耗时约为 PNG 的一半（720p 播放器片段 CRF 18 编码后 SSIM 0.997）
 - **硬件编码自适应**：支持 H.264 NVENC / HEVC NVENC / libx264，超出硬件尺寸限制（H.264 最大 4K、HEVC 最大 8K）或无显卡时自动回退至软件编码
 - **分块渲染防溢出**：视频单边最高支持 16384 px；3D 声场超过 8K 时自动开启分块渲染再拼接，避免触发 WebGL 显存上限
-- **写入保护**：所有产物先写入临时文件（`.<文件名>.partial.<ext>`），完成后原子替换，中断不破坏已有文件
+- **写入保护**：在目标目录内使用独立的临时目录写入产物，成功后原子替换目标，中断时保留已有文件
 
 > **调试模式**：运行前加入环境变量 `SOUNDWEAVER_DEBUG=1 uv run soundweaver` 即可在终端输出浏览器切片耗时与 WebGL 详细诊断日志
 
+
+## 项目结构与重构依据
+
+- `features/` 按功能组织，`source`、`batch` 生成统一的 `Project`，`monitor` 管理播放列表与空间监视，`tasks` 管理任务列表、日志和 Qt 工作线程
+- 各导出功能在自己的 `panel.py` 读取界面参数，由 `service.py` 构建和执行任务，通过 `features/registry.py` 注册，分轨功能先于依赖分轨的导出执行
+- `core/planning.py` 提供单曲和批量共用的规划合约与路径检查，批量规划复用每轨的可用性检查，`core/runner.py` 负责执行顺序、并行与取消
+- `core/playback_source.py` 负责源格式分派、准备 PCM 和对象元数据、管理临时文件，Qt 播放引擎负责设备输出、播放状态和电平信号
+- `core/codecs/` 管理编解码器与原生进程边界，`renderer/src/` 按歌词、播放器、声场和实时监视组织，浏览器参数由 CLI 共用
+- `ui/` 组合页面并提供共享的 Fluent 控件、颜色、间距和字体，素材页和监视页随窗口宽度重排，导航、输出开关、播放条支持键盘操作｜[Fluent 2 布局](https://fluent2.microsoft.design/layout) · [可访问性](https://fluent2.microsoft.design/accessibility)
+- 对照 Spatial Audio Tools 0.8.0 的 Audio Vivid 集成说明、5.1.4 测试样本及本地 AVS3 Part 3 规范，验证声道顺序与采样一致性，现有 SoundWeaver 格式支持和导出选项以本项目为准
 
 ## 开源许可
 

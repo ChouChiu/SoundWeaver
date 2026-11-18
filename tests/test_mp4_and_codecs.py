@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import struct
+import sys
 import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
 from soundweaver.core import audio, mp4
 from soundweaver.core.cancel import CancellationToken
 from soundweaver.core.codecs import av3a, mpegh
+from soundweaver.core.codecs.native import NativePcmStream, run_native
 from soundweaver.core.pcm import AudioData
 
 SAMPLE_AV3A_ZIP = Path("/home/chouchiu/Documents/AV3A/8033F932_audio.av3a.zip")
@@ -63,6 +66,24 @@ class Mp4AndCodecTests(unittest.TestCase):
             self.assertTrue(mp4.has_mhas_sync(mhas))
             self.assertTrue(mpegh.is_mpegh_file(mhas))
 
+    def test_mha1_in_m4a_is_identified_with_unknown_source_channel_count(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "track.m4a"
+            path.write_bytes(_build_minimal_mp4(b"mha1", [b"frame"]))
+            metadata = {
+                "streams": [
+                    {"codec_type": "audio", "codec_tag_string": "mha1",
+                     "channels": 0, "sample_rate": "48000", "duration": "2.5"},
+                    {"index": 1, "codec_type": "video", "disposition": {"attached_pic": 1}},
+                ],
+                "format": {"duration": "5", "tags": {"TITLE": "Track", "artist": "Artist"}},
+            }
+            with patch("soundweaver.core.ffmpeg.probe", return_value=metadata):
+                info = audio.probe_audio(path)
+            self.assertTrue(info.is_mpegh)
+            self.assertEqual((info.channels, info.sample_rate, info.duration), (24, 48000, 2.5))
+            self.assertEqual((info.title, info.artist, info.cover_stream), ("Track", "Artist", 1))
+
     def test_cicp_layouts_and_remap(self) -> None:
         self.assertEqual(len(mpegh.CICP_22_2_REMAP), 24)
         self.assertEqual(sorted(mpegh.CICP_22_2_REMAP), list(range(24)))
@@ -72,13 +93,13 @@ class Mp4AndCodecTests(unittest.TestCase):
             self.assertGreaterEqual(lay.channels, 1)
             for sp in lay.speakers:
                 self.assertIn(sp.layer, ("upper", "middle", "lower"))
-                x, y, z = sp.cartesian()
+                x, y, _z = sp.cartesian()
                 self.assertTrue(-1.0 <= x <= 1.0 and -1.0 <= y <= 1.0)
 
     def test_av3a_aatf_hoa_header_parser(self) -> None:
         # Construct 9-byte AATF header: sync=0xFFF2, res=0, nn=0, profile=2(HOA), fs_idx=2(48k),
-        # skipped 8 bits (pos 27..34), hoa_order-1 = 0 (FOA -> 4ch, pos 35..38), br_idx=1 (96000, pos 39..42),
-        # res=0 (pos 43..44), trailer=0.
+        # skipped 8 bits (pos 27..34), hoa_order-1 = 0 (FOA -> 4ch, pos 35..38),
+        # resolution=0 (pos 39..40), br_idx=1 (96000, pos 41..44), crc=0 (pos 45..52).
         bits_val = 0
         def put(val: int, width: int) -> None:
             nonlocal bits_val
@@ -91,9 +112,9 @@ class Mp4AndCodecTests(unittest.TestCase):
         put(2, 4)      # fs_idx=2 (48000 Hz)
         put(0, 8)      # reserved/crc placeholder up to bit 35
         put(0, 4)      # hoaOrder - 1 = 0 -> FOA (4ch)
-        put(1, 4)      # br_idx = 1 -> 96000 bps
         put(0, 2)      # resolution = 0
-        put(0, 8)      # trailer
+        put(1, 4)      # br_idx = 1 -> 96000 bps
+        put(0, 8)      # 8-bit CRC
         put(0, 19)     # pad to 72 bits = 9 bytes
         hdr_bytes = bits_val.to_bytes(9, "big")
         parsed = av3a.parse_aatf_header(hdr_bytes)
@@ -102,6 +123,33 @@ class Mp4AndCodecTests(unittest.TestCase):
         self.assertEqual(parsed.hoa_order, 1)
         self.assertEqual(parsed.channels, 4)
         self.assertEqual(parsed.bitrate, 96000)
+        self.assertEqual(parsed.header_bytes, 7)
+
+    def test_native_process_drains_large_error_output_and_reports_failed_exit(self) -> None:
+        cmd = [
+            sys.executable,
+            "-c",
+            "import sys; sys.stderr.write('x' * 200_000 + ' decoder error'); sys.exit(7)",
+        ]
+        with self.assertRaisesRegex(av3a.Av3aError, "decoder error$"):
+            run_native(cmd, CancellationToken(), av3a.Av3aError, timeout=5.0)
+
+    def test_native_stream_reports_failed_exit_after_pcm_header(self) -> None:
+        cmd = [
+            sys.executable,
+            "-c",
+            (
+                "import struct, sys; sys.stdout.buffer.write(struct.pack('<iif', 48000, 1, 0.5)); "
+                "sys.stderr.write('frame decode failed'); sys.exit(7)"
+            ),
+        ]
+        stream = NativePcmStream(cmd)
+        try:
+            self.assertEqual(stream.read_frames(1)[0, 0], 0.5)
+            with self.assertRaisesRegex(RuntimeError, "frame decode failed"):
+                stream.read_frames(1)
+        finally:
+            stream.close()
 
     def test_av3a_encode_decode_binaural_roundtrip(self) -> None:
         sr = 48000
@@ -122,6 +170,11 @@ class Mp4AndCodecTests(unittest.TestCase):
             self.assertEqual(info.channels, 4)
             self.assertEqual(info.hoa_order, 1)
             self.assertEqual(info.profile, 2)
+            hdr = av3a.parse_aatf_header(out_av3a.read_bytes()[:16])
+            self.assertEqual(hdr.sample_rate, info.sample_rate)
+            self.assertEqual(hdr.hoa_order, info.hoa_order)
+            self.assertEqual(hdr.channels, info.channels)
+            self.assertEqual(hdr.bitrate, info.bitrate)
 
             decoded = av3a.decode_av3a(out_av3a, CancellationToken())
             with decoded:

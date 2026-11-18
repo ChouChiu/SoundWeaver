@@ -6,11 +6,18 @@ import struct
 import tempfile
 import unittest
 from pathlib import Path
+from threading import Event
 
 import numpy as np
 
+from soundweaver.core.atmos.adm import AdmFile
 from soundweaver.core.atmos.adm_reader import PreparedADM, is_adm_bwf
+from soundweaver.core.atmos.oamd import Program
 from soundweaver.core.cancel import CancellationToken
+from soundweaver.core.codecs.mpegh import cicp_layout
+from soundweaver.core.pcm import AudioData
+from soundweaver.core.playback_buffer import AdmReadAhead
+from soundweaver.core.playback_mix import cicp_fold_matrix, fold_peak_bound, monitor_gain
 from soundweaver.core.speakers import BY_NAME
 from soundweaver.core.stems import StemKind
 from soundweaver.features.stems.service import av3a_target, binaural_target, split_stems
@@ -89,6 +96,29 @@ def _write_adm_wav(path: Path, sample_rate: int = 48000, frames: int = 12000) ->
 
 
 class AdmAndDspTests(unittest.TestCase):
+    def test_mpegh_fold_reserves_headroom_when_a_channel_is_muted(self) -> None:
+        layout = cicp_layout(13)
+        matrix = cicp_fold_matrix(layout, layout.channels)
+        rear_left = layout.channel_names.index("Lrs")
+        rear_right = layout.channel_names.index("Rrs")
+        self.assertGreater(matrix[rear_left, 0], 0)
+        self.assertEqual(matrix[rear_left, 1], 0)
+        self.assertGreater(matrix[rear_right, 1], 0)
+        self.assertEqual(matrix[rear_right, 0], 0)
+
+        pcm = np.zeros((layout.channels, 1), dtype=np.float32)
+        pcm[0, 0] = 0.9
+        pcm[rear_left, 0] = 0.9
+        center = layout.channel_names.index("C")
+        pcm[center, 0] = -0.9
+        full_mix = pcm.T @ matrix
+        self.assertLess(full_mix[0, 0], 1)
+        peak = fold_peak_bound(AudioData(pcm, 48000), matrix, CancellationToken())
+        pcm[center, 0] = 0
+        solo_mix = pcm.T @ matrix
+        self.assertGreater(solo_mix[0, 0], 1)
+        self.assertLess(float(np.abs(solo_mix * monitor_gain(2.0, peak)).max()), 1)
+
     def test_adm_reader_reuse_and_render(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             wav = Path(tmp) / "adm_test.wav"
@@ -110,6 +140,46 @@ class AdmAndDspTests(unittest.TestCase):
                 self.assertEqual(len(trace.objects), 1)
             finally:
                 adm.close()
+
+    def test_adm_playback_file_survives_decoder_completion(self) -> None:
+        progress = AdmReadAhead(CancellationToken())
+        release = Event()
+        finished = Event()
+
+        def decode(target, publish):
+            writer = AdmFile(target, 48000, 4, Program((), 0, 1), 1)
+            try:
+                path = writer.prepare_readback({})
+                writer.write_pcm(b"\x00\x00\x20" * 2)
+                writer.file.flush()
+                publish(path, writer.frames_written)
+                if not release.wait(2):
+                    raise TimeoutError("playback did not release the decoder")
+                writer.write_pcm(b"\x00\x00\xe0" * 2)
+                writer.file.flush()
+                publish(path, writer.frames_written)
+            finally:
+                writer.discard()
+                finished.set()
+
+        reader = None
+        try:
+            path = progress.start(decode)
+            self.assertEqual(path.name, "playback.wav")
+            self.assertEqual(progress.state(), (2, False, None))
+            reader = PreparedADM(path)
+            self.assertEqual(reader.frame_count, 4)
+
+            # Open the PCM handle for the first time after the decoder has released its writer.
+            release.set()
+            self.assertTrue(finished.wait(2))
+            np.testing.assert_allclose(reader.read_frames(0, 2), [[0.25], [0.25]])
+            np.testing.assert_allclose(reader.read_frames(2, 2), [[-0.25], [-0.25]])
+        finally:
+            release.set()
+            if reader is not None:
+                reader.close()
+            progress.close()
 
     def test_stems_split_binaural_and_av3a_encode(self) -> None:
         import soundfile as sf
@@ -143,3 +213,4 @@ class AdmAndDspTests(unittest.TestCase):
             self.assertTrue((out_dir / "bed51_surround.wav").is_file())
             self.assertTrue(binaural_target(out_dir, src).is_file())
             self.assertTrue(av3a_target(out_dir, src).is_file())
+
