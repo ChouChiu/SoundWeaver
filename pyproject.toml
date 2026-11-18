@@ -18,11 +18,10 @@ dependencies = [
 ]
 
 [project.scripts]
-soundweaver = "dolbytool.__main__:main"
-dolbytool = "dolbytool.__main__:main"
+soundweaver = "soundweaver.__main__:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/dolbytool"]
+packages = ["src/soundweaver"]
 
 [tool.ruff]
 target-version = "py311"

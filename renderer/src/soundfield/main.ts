@@ -8,7 +8,7 @@ import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import type { SoundfieldOptions, SoundfieldScene } from "../shared/api";
 import { setFrameSize, setLineResolution } from "./lines";
 import { ObjectView } from "./objects";
-import { camera, placeHead, ROOM_HALF, silhouette, tint, world } from "./scene";
+import { camera, placeHead, ROOM_HALF, silhouette, speakerMarkers, tint, world } from "./scene";
 import * as timeline from "./timeline";
 import { KeyedError } from "../shared/errors";
 
@@ -69,6 +69,8 @@ const scene = world();
 let cam = camera("iso", window.innerWidth / window.innerHeight);
 let objects: ObjectView[] = [];
 let duration = 0;
+let xyOverlay: HTMLCanvasElement | null = null;
+let xyCtx: CanvasRenderingContext2D | null = null;
 
 function parseGlb(base64: string): Promise<THREE.Object3D> {
 	const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
@@ -94,6 +96,22 @@ async function load(data: SoundfieldScene, options: SoundfieldOptions, glb: stri
 	}
 	tint(head);
 	scene.add(placeHead(head, scaleFor));
+
+	if (options.showSpeakers && data.speakers?.length) {
+		scene.add(speakerMarkers(data.speakers));
+	}
+	if (options.showXy && !xyOverlay) {
+		const size = Math.max(110, Math.round(Math.min(frame.width, frame.height) * 0.18));
+		xyOverlay = document.createElement("canvas");
+		xyOverlay.width = size;
+		xyOverlay.height = size;
+		xyOverlay.style.position = "fixed";
+		xyOverlay.style.right = `${Math.round(size * 0.18)}px`;
+		xyOverlay.style.bottom = `${Math.round(size * 0.18)}px`;
+		xyOverlay.style.pointerEvents = "none";
+		document.body.appendChild(xyOverlay);
+		xyCtx = xyOverlay.getContext("2d");
+	}
 
 	objects = data.objects.map((o, index) => {
 		const path = timeline.buildPath(o.keys);
@@ -136,6 +154,35 @@ function seek(ms: number): number {
 			}
 		}
 		cam.clearViewOffset();
+	}
+	if (xyOverlay && xyCtx) {
+		const s = xyOverlay.width;
+		const pad = 10;
+		xyCtx.clearRect(0, 0, s, s);
+		xyCtx.fillStyle = "rgba(18, 26, 36, 0.72)";
+		xyCtx.strokeStyle = "rgba(126, 180, 216, 0.55)";
+		xyCtx.lineWidth = 1.5;
+		xyCtx.beginPath();
+		xyCtx.roundRect(1, 1, s - 2, s - 2, 10);
+		xyCtx.fill();
+		xyCtx.stroke();
+		xyCtx.strokeStyle = "rgba(126, 180, 216, 0.25)";
+		xyCtx.lineWidth = 1;
+		xyCtx.beginPath();
+		xyCtx.moveTo(s / 2, pad);
+		xyCtx.lineTo(s / 2, s - pad);
+		xyCtx.moveTo(pad, s / 2);
+		xyCtx.lineTo(s - pad, s / 2);
+		xyCtx.stroke();
+		for (const obj of objects) {
+			if (!obj.lastShown) continue;
+			const px = pad + obj.lastRoom[0] * (s - pad * 2);
+			const py = pad + obj.lastRoom[1] * (s - pad * 2);
+			xyCtx.fillStyle = `#${obj.lastColor.getHexString()}`;
+			xyCtx.beginPath();
+			xyCtx.arc(px, py, 4.5, 0, Math.PI * 2);
+			xyCtx.fill();
+		}
 	}
 	// the room is always in the picture
 	return 1;

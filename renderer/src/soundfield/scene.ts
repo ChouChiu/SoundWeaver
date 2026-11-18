@@ -190,6 +190,11 @@ const VIEWS: Record<ViewPreset, { theta: number; phi: number; fov: number; up: V
 	top: { theta: 0, phi: deg(90 - 72), fov: 48, up: [0, 0, -1] },
 	// low from the far side
 	angle: { theta: deg(301), phi: deg(90 - 17.5), fov: 42, up: [0, 1, 0] },
+	// cardinal views
+	front: { theta: 0, phi: deg(82), fov: 42, up: [0, 1, 0] },
+	back: { theta: Math.PI, phi: deg(82), fov: 42, up: [0, 1, 0] },
+	left: { theta: -Math.PI / 2, phi: deg(82), fov: 42, up: [0, 1, 0] },
+	right: { theta: Math.PI / 2, phi: deg(82), fov: 42, up: [0, 1, 0] },
 };
 // share of the frame left around the room on its tightest side
 const MARGIN = 0.07;
@@ -257,6 +262,25 @@ export function camera(view: ViewPreset, aspect: number, zoom = 1): THREE.Perspe
 	place(distance / Math.max(0.1, zoom));
 	cam.updateProjectionMatrix();
 	return cam;
+}
+
+export function speakerMarkers(speakers: { name: string; pos: Vec3 }[]): THREE.Group {
+	const group = new THREE.Group();
+	const geom = new THREE.BoxGeometry(0.16, 0.16, 0.16);
+	const mat = new THREE.MeshStandardMaterial({
+		color: 0x8ec5ff,
+		emissive: 0x264870,
+		emissiveIntensity: 0.4,
+		transparent: true,
+		opacity: 0.72,
+	});
+	for (const s of speakers) {
+		const [x, y, z] = toScene(s.pos);
+		const mesh = new THREE.Mesh(geom, mat);
+		mesh.position.set(x, y, z);
+		group.add(mesh);
+	}
+	return group;
 }
 
 export function world(): THREE.Scene {

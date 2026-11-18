@@ -22,7 +22,7 @@ cd renderer && bun install && bun run build && cd ..
 uv run soundweaver
 ```
 
-> **提示**：首次生成视频时，程序会自动下载配套的 `chrome-headless-shell`（约 100 MB，保存在 `~/.cache/dolbytool/chrome`）
+> **提示**：首次生成视频时，程序会自动下载配套的 `chrome-headless-shell`（约 100 MB，保存在 `~/.cache/soundweaver/chrome`）
 
 
 ## 主要功能
@@ -75,7 +75,7 @@ uv run soundweaver
 - **分块渲染防溢出**：视频单边最高支持 16384 px；3D 声场超过 8K 时自动开启分块渲染再拼接，避免触发 WebGL 显存上限
 - **写入保护**：所有产物先写入临时文件（`.<文件名>.partial.<ext>`），完成后原子替换，中断不破坏已有文件
 
-> **调试模式**：运行前加入环境变量 `DOLBYTOOL_DEBUG=1 uv run soundweaver` 即可在终端输出浏览器切片耗时与 WebGL 详细诊断日志
+> **调试模式**：运行前加入环境变量 `SOUNDWEAVER_DEBUG=1 uv run soundweaver` 即可在终端输出浏览器切片耗时与 WebGL 详细诊断日志
 
 
 ## 开源许可

@@ -10,13 +10,11 @@ import { LineGeometry } from "three/examples/jsm/lines/LineGeometry.js";
 import type { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
 import type { LineSegments2 } from "three/examples/jsm/lines/LineSegments2.js";
 import type { ColorMode, SoundfieldOptions } from "../shared/api";
+import { FLOOR_DB, TOP_DB } from "../shared/spatial";
 import { lineMaterial, segments } from "./lines";
 import { objectMesh, ROOM_HALF, TINT, toScene } from "./scene";
 import * as timeline from "./timeline";
 
-// level range mapped onto 0..1 of brightness, glow and size
-const FLOOR_DB = -60;
-const TOP_DB = -10;
 // samples along a trail
 const TRAIL_POINTS = 48;
 const HALO_SIZE = 0.75;
@@ -83,6 +81,10 @@ export class ObjectView {
 	private readonly trailColors: Float32Array | null = null;
 	private readonly drop: LineSegments2 | null = null;
 	private readonly ring: THREE.Mesh | null = null;
+	private readonly labelSprite: THREE.Sprite | null = null;
+	lastRoom: [number, number, number] = [0.5, 0.5, 0];
+	lastColor = new THREE.Color(TINT);
+	lastShown = false;
 
 	constructor(
 		scene: THREE.Scene,
@@ -146,6 +148,30 @@ export class ObjectView {
 			this.ring.renderOrder = 2;
 			scene.add(this.ring);
 		}
+
+		if (options.showLabels) {
+			const canvas = document.createElement("canvas");
+			canvas.width = 64;
+			canvas.height = 64;
+			const ctx = canvas.getContext("2d")!;
+			ctx.font = "bold 34px sans-serif";
+			ctx.textAlign = "center";
+			ctx.textBaseline = "middle";
+			ctx.lineWidth = 5;
+			ctx.strokeStyle = "rgba(0,0,0,0.75)";
+			const text = String(data.index + 1);
+			ctx.strokeText(text, 32, 32);
+			ctx.fillStyle = "#ffffff";
+			ctx.fillText(text, 32, 32);
+			const tex = new THREE.CanvasTexture(canvas);
+			tex.colorSpace = THREE.SRGBColorSpace;
+			this.labelSprite = new THREE.Sprite(
+				new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false }),
+			);
+			this.labelSprite.renderOrder = 10;
+			this.labelSprite.scale.setScalar(0.28 * options.objectScale);
+			scene.add(this.labelSprite);
+		}
 	}
 
 	/** 0..1 loudness at `t`, shaped so quiet passages still read. */
@@ -173,6 +199,15 @@ export class ObjectView {
 		const energy = this.energy(t) * options.levelResponse;
 		const color = colorFor(options.colorMode, data.index, room[2], scratch);
 		const shown = v > 0.02;
+		this.lastRoom = [room[0], room[1], room[2]];
+		this.lastColor.copy(color);
+		this.lastShown = shown && alpha > 0.05;
+
+		if (this.labelSprite) {
+			this.labelSprite.position.set(x, y + 0.16 * options.objectScale, z);
+			this.labelSprite.visible = this.lastShown;
+			this.labelSprite.material.opacity = alpha;
+		}
 
 		const sphere = this.sphere;
 		sphere.position.set(x, y, z);

@@ -368,3 +368,7 @@ vite.config.ts.timestamp-*
 
 # Turbo Repo
 .turbo
+
+# Native decoder build intermediates & staged binaries
+native/.build/
+src/soundweaver/bin/

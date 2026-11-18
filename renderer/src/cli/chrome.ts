@@ -12,7 +12,7 @@ import {
 } from "@puppeteer/browsers";
 import { status } from "./log";
 
-const cacheDir = path.join(os.homedir(), ".cache", "dolbytool", "chrome");
+const cacheDir = path.join(os.homedir(), ".cache", "soundweaver", "chrome");
 
 export const BROWSER_ARGS = [
 	"--deterministic-mode",

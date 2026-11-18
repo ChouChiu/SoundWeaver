@@ -147,7 +147,7 @@ export interface PlayerRender {
 	gpu(): string;
 }
 
-export type ViewPreset = "iso" | "top" | "angle";
+export type ViewPreset = "iso" | "top" | "angle" | "front" | "back" | "left" | "right";
 
 export interface SoundfieldOptions {
 	view: ViewPreset;
@@ -170,6 +170,12 @@ export interface SoundfieldOptions {
 	colorMode: ColorMode;
 	// camera distance relative to the one that just fits the room, above 1 is closer
 	zoom: number;
+	// show object ordinal badge above each sphere
+	showLabels?: boolean;
+	// show target speaker layout nodes inside the room
+	showSpeakers?: boolean;
+	// show 2D top-down XY projection overlay
+	showXy?: boolean;
 }
 
 export type ColorMode = "tint" | "height" | "object";
@@ -177,7 +183,7 @@ export type ColorMode = "tint" | "height" | "object";
 /** One key: start s, ramp s, x, y, z (TS 103 420 room coordinates), active 0/1. */
 export type ObjectKey = [number, number, number, number, number, number];
 
-/** The trace the Python side writes, see dolbytool.core.atmos.trace. */
+/** The trace the Python side writes, see soundweaver.core.atmos.trace. */
 export interface SoundfieldScene {
 	sampleRate: number;
 	levelStart: number;
@@ -185,6 +191,7 @@ export interface SoundfieldScene {
 	duration: number;
 	// trackLevels: the level counting only the video's track, when it is not the whole mix
 	objects: { id: number; keys: ObjectKey[]; levels: number[]; trackLevels?: number[] }[];
+	speakers?: { name: string; pos: [number, number, number] }[];
 }
 
 export interface SoundfieldRender {

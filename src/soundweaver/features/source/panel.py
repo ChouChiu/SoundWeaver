@@ -1,0 +1,358 @@
+"""The inputs: audio, cover, TTML lyrics and output directory.
+
+Reads the audio in the background and fills in the cover and lyrics it finds
+(see `service.inspect`) unless the user picked their own; what was filled in
+follows the audio when another one is picked.  All of it becomes a `Project`
+for the output panels.
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Iterable
+from pathlib import Path
+
+from PySide6.QtCore import QSettings, Qt, Signal
+from PySide6.QtGui import QImage, QMouseEvent, QPixmap
+from PySide6.QtWidgets import QFileDialog, QGridLayout, QHBoxLayout, QLineEdit, QWidget
+from qfluentwidgets import CaptionLabel, ToolButton, TransparentToolButton
+
+from soundweaver.core import motion
+from soundweaver.core.audio import AudioInfo
+from soundweaver.core.i18n import t
+from soundweaver.core.paths import FileStamp, file_stamp, path_from_text
+from soundweaver.core.project import ATMOS_LAYOUT_KEY, Project, default_output_dir, expected_tracks
+from soundweaver.core.speakers import SpeakerLayout, atmos_layout
+from soundweaver.features.source.service import Inspection, inspect, kind_of
+from soundweaver.ui import fluent, widgets
+from soundweaver.ui.background import Latest
+from soundweaver.features.source.inspector import StreamInspectorDialog
+
+logger = logging.getLogger(__name__)
+
+_COVER_SIDE = 112
+
+
+class _CoverPreview(CaptionLabel):
+    """The cover as a thumbnail; clicking it picks another."""
+
+    clicked = Signal()
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setFixedSize(_COVER_SIDE, _COVER_SIDE)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setWordWrap(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setStyleSheet(widgets.PREVIEW_STYLE)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and self.isEnabled():
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)
+
+
+def _thumbnail(cover: Path, side: int, ratio: float) -> tuple[QImage, bool]:
+    """`cover` scaled to fit `side` logical pixels at `ratio` device pixels each
+    (motion artwork by its first frame), and whether it moves.
+    """
+    moving = motion.is_motion(cover)
+    image = QImage(str(motion.still(cover)))
+    if not image.isNull():
+        pixels = round(side * ratio)
+        image = image.scaled(
+            pixels,
+            pixels,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        image.setDevicePixelRatio(ratio)
+    return image, moving
+
+
+class SourcePanel(widgets.Card):
+    changed = Signal()
+
+    def __init__(self, settings: QSettings, parent: QWidget | None = None) -> None:
+        super().__init__(t("source.title"), parent)
+        self.settings = settings
+        self.info: AudioInfo | None = None
+        self._error: str | None = None
+        # the audio last read; the path itself until then, so that a first path
+        # naming no file is reported rather than taken for "nothing changed"
+        self._probed: FileStamp | Path | None = Path()
+        # what was filled in for the audio, replaced along with it unless the user changed it
+        self._auto_cover: Path | None = None
+        self._auto_ttml: Path | None = None
+        self._shown_cover: FileStamp | None = None
+        self._probe = Latest(self)
+        self._thumb = Latest(self)
+        self._buttons: list[ToolButton] = []
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(widgets.FIELD_SPACING)
+        grid.setVerticalSpacing(widgets.ROW_SPACING)
+        self.cover_preview = _CoverPreview()
+        self.cover_preview.setText(t("source.no_cover"))
+        self.cover_preview.setToolTip(t("source.click_to_pick_cover"))
+        self.cover_preview.clicked.connect(self.pick_cover)
+        grid.addWidget(self.cover_preview, 0, 0, 5, 1, Qt.AlignmentFlag.AlignTop)
+
+        self.audio_edit = self._row(
+            grid, 0, t("source.audio_label"), t("source.audio_placeholder"), self.pick_audio,
+            t("source.audio_tip"),
+        )  # fmt: skip
+        self.audio_info = widgets.hint_label()
+        self.inspect_button = TransparentToolButton(fluent.icon("help-about"))
+        self.inspect_button.setToolTip(t("inspector.title"))
+        self.inspect_button.setFixedSize(22, 22)
+        self.inspect_button.clicked.connect(self._open_inspector)
+        self.inspect_button.hide()
+        info_row = QHBoxLayout()
+        info_row.setContentsMargins(0, 0, 0, 0)
+        info_row.setSpacing(4)
+        info_row.addWidget(self.audio_info, 1)
+        info_row.addWidget(self.inspect_button)
+        grid.addLayout(info_row, 1, 2)
+        self.audio_info.hide()
+        self.cover_edit = self._row(
+            grid, 2, t("source.cover_label"), t("source.cover_placeholder"), self.pick_cover,
+            t("source.cover_tip"),
+        )  # fmt: skip
+        self.ttml_edit = self._row(
+            grid, 3, t("source.ttml_label"), t("source.ttml_placeholder"), self.pick_ttml,
+            t("source.ttml_tip"),
+        )  # fmt: skip
+        self.out_edit = self._row(
+            grid,
+            4,
+            t("source.output_label"),
+            t("source.output_placeholder"),
+            self.pick_output,
+            t("source.output_tip"),
+        )
+        grid.setColumnStretch(2, 1)
+        self.set_body(grid)
+
+        # edits settle before anything reacts, so typing a path probes it once
+        self._settle = widgets.Debouncer(self._fields_changed, parent=self)
+        for edit in (self.audio_edit, self.cover_edit, self.ttml_edit, self.out_edit):
+            edit.textChanged.connect(lambda _t: self._settle.poke())
+            edit.editingFinished.connect(self._flush)
+
+    def _row(
+        self, grid: QGridLayout, row: int, label: str, placeholder: str, slot, tip: str
+    ) -> QLineEdit:
+        edit, button, line = widgets.browse_row(placeholder, slot, tip)
+        self._buttons.append(button)
+        buddy = widgets.field_label(label, edit)
+        grid.addWidget(buddy, row, 1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        grid.addLayout(line, row, 2)
+        return edit
+
+    def _set_info(self, text: str) -> None:
+        # an empty line would still leave a gap between the audio and cover rows
+        self.audio_info.setText(text)
+        self.audio_info.setVisible(bool(text))
+        self.inspect_button.setVisible(bool(text) and self.info is not None and self.audio_path() is not None)
+
+    def _open_inspector(self) -> None:
+        path = self.audio_path()
+        if path is not None and self.info is not None:
+            StreamInspectorDialog(path, self.info, self.window()).exec()
+
+    # ---- state -----------------------------------------------------------------------
+
+    def audio_path(self) -> Path | None:
+        return path_from_text(self.audio_edit.text())
+
+    def cover_path(self) -> Path | None:
+        return path_from_text(self.cover_edit.text())
+
+    def ttml_path(self) -> Path | None:
+        return path_from_text(self.ttml_edit.text())
+
+    def output_dir(self) -> Path | None:
+        if out := path_from_text(self.out_edit.text()):
+            return out
+        if audio := self.audio_path():
+            return default_output_dir(audio)
+        ttml = self.ttml_path()
+        return ttml.parent if ttml else None
+
+    def atmos_layout(self) -> SpeakerLayout:
+        return atmos_layout(str(self.settings.value(ATMOS_LAYOUT_KEY, "")))
+
+    def project(self) -> Project:
+        audio, out, info = self.audio_path(), self.output_dir(), self.info
+        render = self.atmos_layout()
+        tracks = expected_tracks(audio, out, info, render) if audio and out and info else ()
+        return Project(
+            audio, self.cover_path(), self.ttml_path(), out, info, tracks,
+            probing=self._probe.busy, audio_error=self._error, atmos_layout=render,
+        )  # fmt: skip
+
+    def layout_changed(self) -> None:
+        """The Atmos render layout changed: say what the audio is rendered to now."""
+        if self.info is not None:
+            self._set_info(self.info.describe(self.atmos_layout()))
+
+    def start_dir(self) -> str:
+        audio = self.audio_path()
+        if audio and audio.parent.is_dir():
+            return str(audio.parent)
+        return str(self.settings.value("last_dir", str(Path.home())))
+
+    def set_running(self, running: bool) -> None:
+        for widget in (
+            self.audio_edit, self.cover_edit, self.ttml_edit, self.out_edit,
+            self.cover_preview, *self._buttons,
+        ):  # fmt: skip
+            widget.setEnabled(not running)
+
+    # ---- picking ---------------------------------------------------------------------
+
+    def pick_audio(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, t("source.dialog_open_audio"), self.start_dir(), t("source.filter_audio")
+        )
+        if path:
+            self.set_audio(Path(path))
+
+    def pick_cover(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, t("source.dialog_pick_cover"), self.start_dir(), t("source.filter_image")
+        )
+        if path:
+            self.set_cover(Path(path))
+
+    def pick_ttml(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, t("source.dialog_pick_lyrics"), self.start_dir(), t("source.filter_ttml")
+        )
+        if path:
+            self.set_ttml(Path(path))
+
+    def pick_output(self) -> None:
+        start = str(self.output_dir() or self.start_dir())
+        path = QFileDialog.getExistingDirectory(self, t("source.dialog_pick_output"), start)
+        if path:
+            self.out_edit.setText(path)
+            self._flush()
+
+    def set_audio(self, path: Path) -> None:
+        self.audio_edit.setText(str(path))
+        self._flush()
+
+    def set_cover(self, path: Path) -> None:
+        self.cover_edit.setText(str(path))
+        self._flush()
+
+    def set_ttml(self, path: Path) -> None:
+        self.ttml_edit.setText(str(path))
+        self._flush()
+
+    def drop(self, paths: Iterable[Path]) -> bool:
+        """Route dropped files to the field their type belongs to; False if none fit."""
+        setters = {"audio": self.set_audio, "cover": self.set_cover, "ttml": self.set_ttml}
+        used = False
+        for path in paths:
+            if kind := kind_of(path):
+                setters[kind](path)
+                used = True
+        return used
+
+    # ---- reactions -------------------------------------------------------------------
+
+    def _flush(self) -> None:
+        self._settle.now()
+
+    def _fields_changed(self) -> None:
+        audio = self.audio_path()
+        self.out_edit.setPlaceholderText(
+            str(default_output_dir(audio)) if audio else t("source.output_placeholder")
+        )
+        stamp = file_stamp(audio) if audio and audio.is_file() else None
+        seen = stamp or audio
+        if seen != self._probed:
+            self._probed = seen
+            self._read_audio(audio if stamp else None)
+        self._show_cover()
+        self.changed.emit()
+
+    def _read_audio(self, audio: Path | None) -> None:
+        self.info, self._error = None, None
+        if audio is None:
+            self._probe.cancel()
+            self._error = t("error.file_not_found") if self.audio_path() else None
+            self._set_info(self._error or "")
+            self._fill(None, None)
+            return
+        self.settings.setValue("last_dir", str(audio.parent))
+        self._set_info(t("status.reading"))
+        self._probe.run(lambda: inspect(audio), self._audio_read)
+
+    def _audio_read(self, result: Inspection | Exception) -> None:
+        if isinstance(result, Exception):
+            self._error = str(result) or type(result).__name__
+            self._set_info(t("error.cannot_read", error=self._error))
+        else:
+            self.info, self._error = result.info, result.error
+            self._set_info(
+                self.info.describe(self.atmos_layout())
+                if self.info
+                else t("error.cannot_read", error=self._error)
+            )
+            self._fill(result.cover, result.ttml)
+        self._show_cover()
+        self.changed.emit()
+
+    def _fill(self, cover: Path | None, ttml: Path | None) -> None:
+        self._auto_cover = self._fill_field(
+            self.cover_edit, self._auto_cover, cover, t("source.static_cover_tip")
+        )
+        self._auto_ttml = self._fill_field(
+            self.ttml_edit, self._auto_ttml, ttml, t("section.lyrics")
+        )
+
+    def _fill_field(
+        self, edit: QLineEdit, auto: Path | None, found: Path | None, what: str
+    ) -> Path | None:
+        """Show `found` in `edit` unless the user set it themselves; returns what is filled in now."""
+        current = path_from_text(edit.text())
+        if current is not None and current != auto:
+            return auto
+        if found != current:
+            edit.setText(str(found) if found else "")
+            if found:
+                logger.info(t("source.auto_used_log", what=what, name=found.name))
+        return found
+
+    def _show_cover(self) -> None:
+        cover = self.cover_path()
+        stamp = file_stamp(cover)
+        if stamp == self._shown_cover:
+            return
+        self._shown_cover = stamp
+        self.cover_preview.setPixmap(QPixmap())
+        if cover is None or not cover.is_file():
+            self._thumb.cancel()
+            self.cover_preview.setText(t("error.file_not_found") if cover else t("source.no_cover"))
+            self.cover_preview.setToolTip(t("source.click_to_pick_cover"))
+            return
+        self.cover_preview.setText(t("status.reading"))
+        side, ratio = _COVER_SIDE - 4, self.devicePixelRatioF()
+        self._thumb.run(
+            lambda: _thumbnail(cover, side, ratio), lambda r: self._cover_read(cover, r)
+        )
+
+    def _cover_read(self, cover: Path, result: tuple[QImage, bool] | Exception) -> None:
+        image, moving = result if not isinstance(result, Exception) else (QImage(), False)
+        if image.isNull():
+            self.cover_preview.setText(t("error.cannot_read_short"))
+            if isinstance(result, Exception):
+                logger.warning("cannot read the cover %s: %s", cover, result)
+            return
+        self.cover_preview.setPixmap(QPixmap.fromImage(image))
+        kind = t("source.motion_cover_tip") if moving else t("source.static_cover_tip")
+        self.cover_preview.setToolTip(f"{kind}\n{cover}\n{t('source.click_to_change')}")

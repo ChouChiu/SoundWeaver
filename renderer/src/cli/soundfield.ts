@@ -19,7 +19,7 @@ import { renderTimeline, start } from "./parallel";
 import { Stage, type StageSettings } from "./stage";
 import { KeyedError } from "../shared/errors";
 
-const VIEWS: ViewPreset[] = ["iso", "top", "angle"];
+const VIEWS: ViewPreset[] = ["iso", "top", "angle", "front", "back", "left", "right"];
 const COLOR_MODES: ColorMode[] = ["tint", "height", "object"];
 const WEBGL_ARGS = [
 	"--use-angle=vulkan",
@@ -54,6 +54,9 @@ function parseOptions(argv = process.argv.slice(2)) {
 			glow: { type: "string", default: "0" },
 			trail: { type: "string", default: "0" },
 			drop: { type: "boolean", default: false },
+			labels: { type: "boolean", default: false },
+			speakers: { type: "boolean", default: false },
+			xy: { type: "boolean", default: false },
 			color: { type: "string", default: "tint" },
 			zoom: { type: "string", default: "1" },
 			duration: { type: "string" },
@@ -83,6 +86,9 @@ function parseOptions(argv = process.argv.slice(2)) {
 		glow: number("glow", values.glow, 0, 1),
 		trail: number("trail", values.trail, 0, 10),
 		drop: values.drop!,
+		showLabels: values.labels!,
+		showSpeakers: values.speakers!,
+		showXy: values.xy!,
 		colorMode: COLOR_MODES.includes(values.color as ColorMode) ? (values.color as ColorMode) : invalid("color", values.color),
 		zoom: number("zoom", values.zoom, 0.2, 5),
 	};

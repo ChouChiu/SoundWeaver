@@ -13,7 +13,7 @@ import string
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent / "src" / "dolbytool"
+ROOT = Path(__file__).resolve().parent.parent / "src" / "soundweaver"
 LANGUAGES = ("zh_cn", "zh_tw", "en")
 # t("key") and t("key", ...) with a literal key; dynamic keys are built from known prefixes
 _CALL = re.compile(r"""\bt\(\s*["']([a-z0-9_.]+)["']""")

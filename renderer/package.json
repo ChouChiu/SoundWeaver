@@ -1,10 +1,10 @@
 {
-  "name": "dolbytool-renderer",
+  "name": "soundweaver-renderer",
   "private": true,
   "type": "module",
   "scripts": {
     "build": "bun run build:page && bun run build:cli",
-    "build:page": "bun build src/page/main.ts --outdir dist --entry-naming page.[ext] --target browser --format iife --minify --define process.env.NODE_ENV='\"production\"' && cp src/page/index.html dist/ && bun build src/soundfield/main.ts --outdir dist --entry-naming soundfield.[ext] --target browser --format iife --minify && cp src/soundfield/index.html dist/soundfield.html && bun build src/player/main.tsx --outdir dist --entry-naming player.[ext] --target browser --format iife --minify --define process.env.NODE_ENV='\"production\"' --define 'import.meta.env={\"MODE\":\"production\"}' && cp src/player/index.html dist/player.html",
+    "build:page": "bun build src/page/main.ts --outdir dist --entry-naming page.[ext] --target browser --format iife --minify --define process.env.NODE_ENV='\"production\"' && cp src/page/index.html dist/ && bun build src/soundfield/main.ts --outdir dist --entry-naming soundfield.[ext] --target browser --format iife --minify && cp src/soundfield/index.html dist/soundfield.html && bun build src/monitor/main.ts --outdir dist --entry-naming monitor.[ext] --target browser --format iife --minify && cp src/monitor/index.html dist/monitor.html && cp src/monitor/FBHead.obj dist/FBHead.obj && bun build src/player/main.tsx --outdir dist --entry-naming player.[ext] --target browser --format iife --minify --define process.env.NODE_ENV='\"production\"' --define 'import.meta.env={\"MODE\":\"production\"}' && cp src/player/index.html dist/player.html",
     "build:cli": "bun build src/cli/main.ts --outfile dist/render.mjs --target node --packages external && bun build src/cli/soundfield.ts --outfile dist/soundfield.mjs --target node --packages external && bun build src/cli/player.ts --outfile dist/player.mjs --target node --packages external",
     "check": "tsc --noEmit"
   },

@@ -3,7 +3,7 @@
 const started = performance.now();
 
 export function debug(message: string): void {
-	if (process.env.DOLBYTOOL_DEBUG) console.error(`[${((performance.now() - started) / 1000).toFixed(2)}s] ${message}`);
+	if (process.env.SOUNDWEAVER_DEBUG) console.error(`[${((performance.now() - started) / 1000).toFixed(2)}s] ${message}`);
 }
 
 export type Status =
