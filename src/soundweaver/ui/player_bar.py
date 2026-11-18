@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QMouseEvent, QPixmap
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QSlider, QVBoxLayout, QWidget
+from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtGui import QIcon, QKeyEvent, QMouseEvent, QPainter, QPen, QPixmap
+from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
@@ -19,19 +19,29 @@ from qfluentwidgets import (
 from soundweaver.core.audio import AudioInfo
 from soundweaver.core.i18n import t
 from soundweaver.core.playback import PlaybackEngine
-from soundweaver.ui import fluent
+from soundweaver.core.sources import sidecar_cover
+from soundweaver.ui import fluent, widgets
 
 
-def _fmt_time(seconds: float) -> str:
-    s = max(0, int(seconds))
-    return f"{s // 60}:{s % 60:02d}"
+class _PlaybackSlider(Slider):
+    def __init__(self, name: str, parent: QWidget) -> None:
+        super().__init__(Qt.Orientation.Horizontal, parent)
+        widgets.name_control(self, name)
+        self.setMinimumHeight(28)
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        if self.hasFocus():
+            with QPainter(self) as painter:
+                painter.setPen(QPen(self.palette().text().color(), 2))
+                painter.drawRoundedRect(self.rect().adjusted(2, 2, -2, -2), 4, 4)
 
 
-class _HoverSeekSlider(Slider):
+class _HoverSeekSlider(_PlaybackSlider):
     """Seek slider that shows the hovered timestamp in a tooltip without seeking on hover."""
 
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(Qt.Orientation.Horizontal, parent)
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(t("player.seek"), parent)
         self.setMouseTracking(True)
         self._duration = 0.0
 
@@ -41,26 +51,15 @@ class _HoverSeekSlider(Slider):
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         if self._duration > 0 and self.width() > 0:
             ratio = max(0.0, min(1.0, event.position().x() / self.width()))
-            self.setToolTip(_fmt_time(ratio * self._duration))
+            self.setToolTip(widgets.format_time(ratio * self._duration))
         super().mouseMoveEvent(event)
 
 
-class _CoverBadge(QLabel):
-    """Clickable album artwork thumbnail."""
-
-    clicked = Signal()
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setFixedSize(44, 44)
-        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setStyleSheet("border-radius: 6px; background: rgba(128,128,128,0.15);")
-
-    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.clicked.emit()
-        super().mouseReleaseEvent(event)
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        value = self.value()
+        super().keyPressEvent(event)
+        if self.value() != value:
+            self.clicked.emit(self.value())
 
 
 class PlayerBar(QWidget):
@@ -82,7 +81,10 @@ class PlayerBar(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(card)
 
-        self.cover_lbl = _CoverBadge(card)
+        self.cover_lbl = ToolButton(fluent.icon("audio-x-generic"), card)
+        self.cover_lbl.setFixedSize(44, 44)
+        self.cover_lbl.setIconSize(QSize(20, 20))
+        widgets.name_control(self.cover_lbl, t("player.open_monitor"))
         self.cover_lbl.clicked.connect(self.expand_requested.emit)
 
         meta_box = QWidget(card)
@@ -97,15 +99,15 @@ class PlayerBar(QWidget):
         meta.addWidget(self.sub_lbl)
 
         self.btn_prev = TransparentToolButton(fluent.icon("media-skip-backward"), card)
-        self.btn_prev.setToolTip(t("player.prev"))
+        widgets.name_control(self.btn_prev, t("player.prev"))
         self.btn_prev.clicked.connect(self.prev_requested.emit)
 
         self.btn_play = ToolButton(fluent.icon("media-playback-start"), card)
-        self.btn_play.setToolTip(t("player.play_pause"))
+        widgets.name_control(self.btn_play, t("player.play_pause"))
         self.btn_play.clicked.connect(self.engine.toggle_play)
 
         self.btn_next = TransparentToolButton(fluent.icon("media-skip-forward"), card)
-        self.btn_next.setToolTip(t("player.next"))
+        widgets.name_control(self.btn_next, t("player.next"))
         self.btn_next.clicked.connect(self.next_requested.emit)
 
         self.pos_lbl = CaptionLabel("0:00", card)
@@ -121,7 +123,7 @@ class PlayerBar(QWidget):
         self.seek_slider.sliderReleased.connect(self._on_seek_end)
         self.seek_slider.clicked.connect(self._on_seek_click)
 
-        self.vol_slider = Slider(Qt.Orientation.Horizontal, card)
+        self.vol_slider = _PlaybackSlider(t("player.volume"), card)
         self.vol_slider.setRange(0, 200)
         self.vol_slider.setValue(100)
         self.vol_slider.setFixedWidth(100)
@@ -131,12 +133,12 @@ class PlayerBar(QWidget):
         self.vol_slider.valueChanged.connect(self._on_volume)
 
         self.btn_expand = TransparentToolButton(fluent.icon("audio-speakers-symbolic"), card)
-        self.btn_expand.setToolTip(t("player.open_monitor"))
+        widgets.name_control(self.btn_expand, t("player.open_monitor"))
         self.btn_expand.clicked.connect(self.expand_requested.emit)
 
         row = QHBoxLayout(card)
-        row.setContentsMargins(14, 6, 14, 6)
-        row.setSpacing(10)
+        row.setContentsMargins(12, 8, 12, 8)
+        row.setSpacing(widgets.INLINE_SPACING)
         row.addWidget(self.cover_lbl)
         row.addWidget(meta_box, 1)
         row.addWidget(self.btn_prev)
@@ -149,26 +151,49 @@ class PlayerBar(QWidget):
         row.addWidget(self.vol_lbl)
         row.addWidget(self.btn_expand)
 
+        self._track_subtitle = ""
+        self.engine.buffering_changed.connect(self._on_buffering)
         self.engine.track_loaded.connect(self._on_track_loaded)
+        self.engine.track_cleared.connect(self._on_track_cleared)
         self.engine.state_changed.connect(self._on_state)
         self.engine.position_changed.connect(self._on_position)
 
     def _on_track_loaded(self, path: Path, info: AudioInfo) -> None:
         self.title_lbl.setText(info.title or path.stem)
-        self.sub_lbl.setText(info.artist or info.codec)
+        self._track_subtitle = info.artist or info.codec
+        self.sub_lbl.setText(self._track_subtitle)
         self.seek_slider.set_duration(info.duration)
         self.seek_slider.setEnabled(info.duration > 0)
         self.seek_slider.setValue(0)
-        self.dur_lbl.setText(_fmt_time(info.duration))
-        self.cover_lbl.setPixmap(QPixmap())
-        for ext in (".jpg", ".jpeg", ".png", ".webp"):
-            cand = path.with_suffix(ext)
-            if cand.is_file():
-                pix = QPixmap(str(cand)).scaled(
-                    44, 44, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation
+        self.dur_lbl.setText(widgets.format_time(info.duration))
+        self.cover_lbl.setIcon(fluent.icon("audio-x-generic"))
+        self.cover_lbl.setIconSize(QSize(20, 20))
+        cover = sidecar_cover(path)
+        if cover is not None:
+            pix = QPixmap(str(cover))
+            if not pix.isNull():
+                badge = pix.scaled(
+                    36, 36, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                    Qt.TransformationMode.SmoothTransformation,
                 )
-                self.cover_lbl.setPixmap(pix)
-                break
+                left, top = (badge.width() - 36) // 2, (badge.height() - 36) // 2
+                self.cover_lbl.setIcon(QIcon(badge.copy(left, top, 36, 36)))
+                self.cover_lbl.setIconSize(QSize(36, 36))
+
+    def _on_track_cleared(self) -> None:
+        self._track_subtitle = ""
+        self.title_lbl.setText(t("player.idle"))
+        self.sub_lbl.clear()
+        self.pos_lbl.setText("0:00")
+        self.dur_lbl.setText("0:00")
+        self.seek_slider.set_duration(0)
+        self.seek_slider.setValue(0)
+        self.seek_slider.setEnabled(False)
+        self.cover_lbl.setIcon(fluent.icon("audio-x-generic"))
+        self.cover_lbl.setIconSize(QSize(20, 20))
+
+    def _on_buffering(self, buffering: bool) -> None:
+        self.sub_lbl.setText(t("player.buffering") if buffering else self._track_subtitle)
 
     def _on_state(self, playing: bool) -> None:
         self.btn_play.setIcon(fluent.icon("media-playback-pause" if playing else "media-playback-start"))
@@ -176,9 +201,13 @@ class PlayerBar(QWidget):
     def _on_position(self, seconds: float) -> None:
         if self._seeking:
             return
-        self.pos_lbl.setText(_fmt_time(seconds))
+        self.pos_lbl.setText(widgets.format_time(seconds))
         dur = self.engine.duration
         if dur > 0:
+            self.seek_slider.set_duration(dur)
+            duration_label = widgets.format_time(dur)
+            if duration_label != self.dur_lbl.text():
+                self.dur_lbl.setText(duration_label)
             val = max(0, min(1000, int(1000 * seconds / dur)))
             if val != self.seek_slider.value():
                 self.seek_slider.setValue(val)

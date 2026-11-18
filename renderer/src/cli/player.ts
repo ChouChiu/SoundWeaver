@@ -19,10 +19,10 @@ import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import type { AudioFrames, BackgroundKind, ControlsKind, LyricSize, MotionFrames, PlayerOptions, PlayerTrack } from "../shared/api";
 import { analyse } from "./analysis";
-import { headlessShell } from "./chrome";
+import { headlessShell, WEBGL_ARGS } from "./chrome";
 import { type AudioMode, CODECS, type Codec, muxAudio } from "./ffmpeg";
 import { debug, status } from "./log";
-import { defaultJobs, number } from "./options";
+import { choice, defaultJobs, number } from "./options";
 import { renderTimeline, start } from "./parallel";
 import { Stage, type StageSettings } from "./stage";
 import { KeyedError } from "../shared/errors";
@@ -31,13 +31,6 @@ const BACKGROUNDS: BackgroundKind[] = ["mesh", "isolation", "solid", "none"];
 const CONTROLS: ControlsKind[] = ["controls", "fft", "none"];
 const SIZES: LyricSize[] = ["tiny", "extra-small", "small", "medium", "large", "extra-large", "huge"];
 const AUDIO_MODES: AudioMode[] = ["none", "encode", "copy"];
-const WEBGL_ARGS = [
-	"--use-angle=vulkan",
-	"--enable-features=Vulkan",
-	"--enable-gpu",
-	"--ignore-gpu-blocklist",
-	"--enable-unsafe-swiftshader",
-];
 const MIME: Record<string, string> = {
 	".png": "image/png",
 	".jpg": "image/jpeg",
@@ -45,14 +38,6 @@ const MIME: Record<string, string> = {
 	".webp": "image/webp",
 	".bmp": "image/bmp",
 };
-
-function choice<T extends string>(name: string, value: string | undefined, allowed: readonly T[]): T {
-	if (!allowed.includes(value as T)) {
-		console.error(`invalid --${name}: ${value}`);
-		process.exit(2);
-	}
-	return value as T;
-}
 
 function parseOptions(argv = process.argv.slice(2)) {
 	const { values } = parseArgs({

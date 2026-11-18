@@ -18,7 +18,6 @@ from qfluentwidgets import (
     InfoBar,
     PushButton,
     PushSettingCard,
-    ScrollArea,
     SettingCard,
     SettingCardGroup,
     TitleLabel,
@@ -41,6 +40,7 @@ from soundweaver.ui.fluent import (
     set_accent_color,
     set_theme_mode,
 )
+from soundweaver.ui.scrolling import DirectScrollArea
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +67,7 @@ class SettingsPage(QWidget):
 
     def __init__(self, shortcuts: Sequence[QAction], parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        scroll = ScrollArea(self)
+        scroll = DirectScrollArea(self)
         scroll.setWidgetResizable(True)
         container = QWidget()
         column = QVBoxLayout(container)
@@ -111,6 +111,7 @@ class SettingsPage(QWidget):
         self.combo_lang = self._combo(
             language, [(name, code) for code, name in LANGUAGE_NAMES.items()], get_language()
         )
+        self.combo_lang.setAccessibleName(t("settings.language"))
         self.combo_lang.currentIndexChanged.connect(
             lambda i: self.language_picked.emit(self.combo_lang.itemData(i))
         )
@@ -127,6 +128,7 @@ class SettingsPage(QWidget):
             ],
             get_theme_mode(),
         )
+        self.combo_theme.setAccessibleName(t("settings.theme"))
         self.combo_theme.currentIndexChanged.connect(
             lambda i: set_theme_mode(self.combo_theme.itemData(i))
         )
@@ -142,6 +144,7 @@ class SettingsPage(QWidget):
             + [(t(f"settings.accent_{name}"), name) for name, _hex in ACCENT_PRESETS],
             get_accent_color(),
         )
+        self.combo_accent.setAccessibleName(t("settings.accent"))
         self.combo_accent.currentIndexChanged.connect(
             lambda i: set_accent_color(self.combo_accent.itemData(i))
         )

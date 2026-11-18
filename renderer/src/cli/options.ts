@@ -76,3 +76,11 @@ export function number(name: string, text: string | undefined, min: number, max 
 	}
 	return value;
 }
+
+export function choice<T extends string>(name: string, value: string | undefined, allowed: readonly T[]): T {
+	if (!allowed.includes(value as T)) {
+		console.error(`invalid --${name}: ${value}`);
+		process.exit(2);
+	}
+	return value as T;
+}

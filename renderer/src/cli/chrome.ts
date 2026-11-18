@@ -32,6 +32,14 @@ export const BROWSER_ARGS = [
 	"--force-gpu-mem-available-mb=8192",
 ];
 
+export const WEBGL_ARGS = [
+	"--use-angle=vulkan",
+	"--enable-features=Vulkan",
+	"--enable-gpu",
+	"--ignore-gpu-blocklist",
+	"--enable-unsafe-swiftshader",
+];
+
 export async function headlessShell(): Promise<string> {
 	const platform = detectBrowserPlatform();
 	if (!platform) throw new Error("unsupported platform for chrome-headless-shell");

@@ -41,6 +41,8 @@ _WARNING_LIGHT = QColor("#9d5d00")
 _WARNING_DARK = QColor("#fce100")
 _SECONDARY_LIGHT = QColor(96, 96, 96)
 _SECONDARY_DARK = QColor(206, 206, 206)
+_FOCUS_STROKE_LIGHT = "#242424"
+_FOCUS_STROKE_DARK = "#ffffff"
 
 _ICONS: dict[str, FluentIcon] = {
     "home": FluentIcon.HOME,
@@ -139,6 +141,17 @@ def secondary(label: Any, problem: bool = False) -> None:
 def dim() -> QColor:
     """Secondary text colour."""
     return QColor(255, 255, 255, 140) if isDarkTheme() else QColor(0, 0, 0, 120)
+
+
+def focus_stroke_hex(dark: bool | None = None) -> str:
+    """Fluent 2 keyboard focus indicator color hex."""
+    is_dark = isDarkTheme() if dark is None else dark
+    return _FOCUS_STROKE_DARK if is_dark else _FOCUS_STROKE_LIGHT
+
+
+def focus_stroke() -> QColor:
+    """Fluent 2 keyboard focus indicator color."""
+    return QColor(focus_stroke_hex())
 
 
 def on_theme_change(slot: Callable[[], None]) -> None:

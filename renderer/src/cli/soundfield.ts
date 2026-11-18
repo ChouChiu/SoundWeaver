@@ -12,27 +12,15 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import type { ColorMode, SoundfieldOptions, SoundfieldScene, ViewPreset } from "../shared/api";
-import { headlessShell } from "./chrome";
+import { headlessShell, WEBGL_ARGS } from "./chrome";
 import { debug, status } from "./log";
-import { defaultJobs, number } from "./options";
+import { choice, defaultJobs, number } from "./options";
 import { renderTimeline, start } from "./parallel";
 import { Stage, type StageSettings } from "./stage";
 import { KeyedError } from "../shared/errors";
 
 const VIEWS: ViewPreset[] = ["iso", "top", "angle", "front", "back", "left", "right"];
 const COLOR_MODES: ColorMode[] = ["tint", "height", "object"];
-const WEBGL_ARGS = [
-	"--use-angle=vulkan",
-	"--enable-features=Vulkan",
-	"--enable-gpu",
-	"--ignore-gpu-blocklist",
-	"--enable-unsafe-swiftshader",
-];
-
-function invalid(name: string, value: string | undefined): never {
-	console.error(`invalid --${name}: ${value}`);
-	process.exit(2);
-}
 
 function parseOptions(argv = process.argv.slice(2)) {
 	const { values } = parseArgs({
@@ -70,13 +58,8 @@ function parseOptions(argv = process.argv.slice(2)) {
 		console.error("usage: soundfield.mjs --scene <trace.json> --out <file.webm> [options]");
 		process.exit(2);
 	}
-	const view = values.view as ViewPreset;
-	if (!VIEWS.includes(view)) {
-		console.error(`invalid --view: ${values.view}`);
-		process.exit(2);
-	}
 	const options: SoundfieldOptions = {
-		view,
+		view: choice("view", values.view, VIEWS),
 		objectScale: number("object-scale", values["object-scale"], 0.01),
 		headScale: number("head-scale", values["head-scale"], 0.01),
 		gateDb: number("gate-db", values["gate-db"], -200, 0),
@@ -89,7 +72,7 @@ function parseOptions(argv = process.argv.slice(2)) {
 		showLabels: values.labels!,
 		showSpeakers: values.speakers!,
 		showXy: values.xy!,
-		colorMode: COLOR_MODES.includes(values.color as ColorMode) ? (values.color as ColorMode) : invalid("color", values.color),
+		colorMode: choice("color", values.color, COLOR_MODES),
 		zoom: number("zoom", values.zoom, 0.2, 5),
 	};
 	return {

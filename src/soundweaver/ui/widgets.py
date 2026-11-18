@@ -5,8 +5,8 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 
-from PySide6.QtCore import QObject, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QGuiApplication, QIcon, QPainter, QPainterPath, QPixmap
+from PySide6.QtCore import QEvent, QObject, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QGuiApplication, QIcon, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFormLayout,
@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QLayout,
     QLineEdit,
     QListWidgetItem,
+    QStackedLayout,
     QVBoxLayout,
     QWidget,
 )
@@ -27,30 +28,166 @@ from qfluentwidgets import (
     FluentIcon,
     HyperlinkButton,
     LineEdit,
-    ListWidget,
     PushButton,
     SimpleCardWidget,
     StrongBodyLabel,
+    SwitchButton,
     ToolButton,
     TreeWidget,
+    setCustomStyleSheet,
 )
 
 from soundweaver.core.i18n import t
 from soundweaver.ui import fluent
+from soundweaver.ui.scrolling import DirectListWidget, use_direct_wheel
 
 # One spacing scale for every page, so the pages line up with each other.
 # Page edge (left, top, right, bottom) inside stackedWidget's frame.
-PAGE_MARGINS = (16, 14, 16, 14)
+PAGE_MARGINS = (16, 16, 16, 16)
 # between the cards of a page, and between a title and what it heads
-SECTION_SPACING = 12
+SECTION_SPACING = 16
 # inside a card: its edge, and the gap between its rows
-CARD_MARGINS = (16, 12, 16, 14)
+CARD_MARGINS = (16, 12, 16, 12)
 ROW_SPACING = 8
 # between a label and its field, between controls in one row, and before a
 # second label/field pair in the same row
 FIELD_SPACING = 12
 INLINE_SPACING = 8
-PAIR_GAP = 36
+PAIR_GAP = 24
+
+
+def name_control(control: QWidget, text: str) -> None:
+    """Name a control whose purpose is otherwise conveyed only by an icon or its position."""
+    control.setAccessibleName(text)
+    control.setToolTip(text)
+    control.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+    if isinstance(control, ToolButton):
+        setCustomStyleSheet(
+            control,
+            f"QToolButton:focus {{ border: 2px solid {fluent.focus_stroke_hex(False)}; }}",
+            f"QToolButton:focus {{ border: 2px solid {fluent.focus_stroke_hex(True)}; }}",
+        )
+
+
+class _FocusOutline(QWidget):
+    """Draw focus around Fluent controls whose own paint omits it."""
+
+    def __init__(self, control: QWidget) -> None:
+        super().__init__(control)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setGeometry(control.rect())
+        self.hide()
+        control.installEventFilter(self)
+        fluent.on_theme_change(self.update)
+
+    def eventFilter(self, control: QWidget, event: QEvent) -> bool:
+        kind = event.type()
+        if kind == QEvent.Type.FocusIn:
+            self.show()
+            self.raise_()
+        elif kind == QEvent.Type.FocusOut:
+            self.hide()
+        elif kind == QEvent.Type.Resize:
+            self.setGeometry(control.rect())
+        return False
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QPen(fluent.focus_stroke(), 2))
+        painter.drawRoundedRect(self.rect().adjusted(1, 1, -1, -1), 4, 4)
+
+
+class _KeyboardActivation(QObject):
+    def __init__(self, control: QWidget, activate: Callable[[], None]) -> None:
+        super().__init__(control)
+        self._activate = activate
+        control.installEventFilter(self)
+
+    def eventFilter(self, control: QWidget, event: QEvent) -> bool:
+        if event.type() == QEvent.Type.KeyPress and event.key() in (
+            Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_Enter
+        ):
+            if not event.isAutoRepeat():
+                self._activate()
+            return True
+        return False
+
+
+def keyboard_activate(control: QWidget, text: str, activate: Callable[[], None]) -> None:
+    """Give custom-painted click targets a tab stop and standard activation keys."""
+    name_control(control, text)
+    _FocusOutline(control)
+    _KeyboardActivation(control, activate)
+
+
+def name_switch(switch: SwitchButton, text: str) -> None:
+    """Expose the checkable child as the switch's keyboard stop and accessible control."""
+    switch.setAccessibleName(text)
+    switch.indicator.setAccessibleName(text)
+    switch.indicator.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+    _FocusOutline(switch.indicator)
+
+
+class CurrentPageStack(QStackedLayout):
+    """Use the visible form's dimensions, including when switching to a smaller form."""
+
+    def sizeHint(self) -> QSize:
+        return self.currentWidget().sizeHint()
+
+    def minimumSize(self) -> QSize:
+        return self.currentWidget().minimumSizeHint()
+
+    def hasHeightForWidth(self) -> bool:
+        return self.currentWidget().hasHeightForWidth()
+
+    def heightForWidth(self, width: int) -> int:
+        return self.currentWidget().heightForWidth(width)
+
+
+class AdaptiveColumns(QWidget):
+    """Place two content groups on a grid and stack them when the viewport narrows."""
+
+    def __init__(
+        self, primary: QWidget, secondary: QWidget, *, breakpoint: int, spacing: int = SECTION_SPACING
+    ) -> None:
+        super().__init__()
+        self._primary = primary
+        self._secondary = secondary
+        self._breakpoint = breakpoint
+        self._wide = False
+        self._grid = QGridLayout(self)
+        self._grid.setContentsMargins(0, 0, 0, 0)
+        self._grid.setSpacing(spacing)
+        self._grid.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
+        self._grid.addWidget(primary, 0, 0, Qt.AlignmentFlag.AlignTop)
+        self._grid.addWidget(secondary, 1, 0, Qt.AlignmentFlag.AlignTop)
+        self._grid.setColumnStretch(0, 1)
+        self._grid.setRowStretch(2, 1)
+
+    def minimumSizeHint(self) -> QSize:
+        sizes = self._primary.minimumSizeHint(), self._secondary.minimumSizeHint()
+        return QSize(max(size.width() for size in sizes), self._grid.minimumSize().height())
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        minimum = sum(
+            widget.minimumSizeHint().width() for widget in (self._primary, self._secondary)
+        ) + self._grid.spacing()
+        wide = self.width() >= max(self._breakpoint, minimum)
+        if wide != self._wide:
+            self._wide = wide
+            self._grid.removeWidget(self._secondary)
+            self._grid.addWidget(
+                self._secondary, 0 if wide else 1, int(wide), Qt.AlignmentFlag.AlignTop
+            )
+            self._grid.setColumnStretch(0, 2 if wide else 1)
+            self._grid.setColumnStretch(1, int(wide))
+
+
+def format_time(seconds: float) -> str:
+    whole = max(0, int(seconds))
+    return f"{whole // 60}:{whole % 60:02d}"
 
 
 def hex_name(color: QColor) -> str:
@@ -130,7 +267,7 @@ def browse_row(
     edit.setPlaceholderText(placeholder)
     edit.setClearButtonEnabled(True)
     button = ToolButton(FluentIcon.FOLDER)
-    button.setToolTip(tooltip or t("action.browse"))
+    name_control(button, tooltip or t("action.browse"))
     button.clicked.connect(slot)
     row = QHBoxLayout()
     row.setSpacing(INLINE_SPACING)
@@ -168,6 +305,7 @@ class HintTree(TreeWidget):
     def __init__(self, empty_text: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.empty_text = empty_text
+        use_direct_wheel(self)
 
     def paintEvent(self, event) -> None:
         super().paintEvent(event)
@@ -216,7 +354,7 @@ class Card(SimpleCardWidget):
         super().__init__(parent)
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(*CARD_MARGINS)
-        self._layout.setSpacing(ROW_SPACING + 2)
+        self._layout.setSpacing(ROW_SPACING)
         if title:
             self._layout.addWidget(StrongBodyLabel(title))
 
@@ -246,7 +384,8 @@ def field_label(text: str, field: QWidget | QLayout | None) -> BodyLabel:
 def form(rows: Iterable[tuple[str, QWidget | QLayout]]) -> QFormLayout:
     layout = QFormLayout()
     layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
-    layout.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+    layout.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+    layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
     layout.setHorizontalSpacing(FIELD_SPACING)
     layout.setVerticalSpacing(ROW_SPACING)
     for label, field in rows:
@@ -267,9 +406,9 @@ def two_column_grid(rows: Sequence[Row]) -> QGridLayout:
     grid = QGridLayout()
     grid.setHorizontalSpacing(FIELD_SPACING)
     grid.setVerticalSpacing(ROW_SPACING)
-    right_align = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+    label_alignment = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
     for r, (left_label, left, right_label, right) in enumerate(rows):
-        grid.addWidget(field_label(left_label, left), r, 0, right_align)
+        grid.addWidget(field_label(left_label, left), r, 0, label_alignment)
         if right is None and isinstance(left, (QLayout, QLineEdit)):
             if isinstance(left, QLayout):
                 grid.addLayout(left, r, 1, 1, 4)
@@ -283,7 +422,7 @@ def two_column_grid(rows: Sequence[Row]) -> QGridLayout:
             label = field_label(right_label or "", right)
             # a gap between the two pairs, which would otherwise touch
             label.setContentsMargins(PAIR_GAP, 0, 0, 0)
-            grid.addWidget(label, r, 2, right_align)
+            grid.addWidget(label, r, 2, label_alignment)
             if isinstance(right, QLayout):
                 grid.addLayout(right, r, 3)
             else:
@@ -329,6 +468,10 @@ class Debouncer(QObject):
     def poke(self) -> None:
         self._timer.start()
 
+    def flush(self) -> None:
+        if self._timer.isActive():
+            self.now()
+
     def now(self) -> None:
         """Run at once, dropping the pending call."""
         self._timer.stop()
@@ -351,7 +494,7 @@ class TrackList(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.list = ListWidget()
+        self.list = DirectListWidget()
         self.list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self.list.setUniformItemSizes(True)
         self.list.itemChanged.connect(lambda _item: self._remember())

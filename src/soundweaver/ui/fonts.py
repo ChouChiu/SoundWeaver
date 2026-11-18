@@ -19,7 +19,6 @@ from PySide6.QtWidgets import (
 )
 from qfluentwidgets import (
     EditableComboBox,
-    ListWidget,
     PushButton,
     ToolButton,
     setCustomStyleSheet,
@@ -29,6 +28,7 @@ from qfluentwidgets.components.widgets.menu import MenuAnimationType
 
 from soundweaver.core.i18n import t
 from soundweaver.ui import fluent, widgets
+from soundweaver.ui.scrolling import DirectListWidget
 
 # what the completer matches on: every name of the family, not just the one shown
 _SEARCH_ROLE = Qt.ItemDataRole.UserRole + 1
@@ -107,7 +107,7 @@ class FontList(QWidget):
 
     def __init__(self) -> None:
         super().__init__()
-        self.list = ListWidget()
+        self.list = DirectListWidget()
         self.list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
         self.list.setMaximumHeight(132)
         self.list.setMinimumHeight(96)

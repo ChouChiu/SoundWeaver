@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from PySide6.QtCore import QEvent, QObject, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QSignalBlocker, QSize, Qt
 from PySide6.QtWidgets import QAbstractItemView, QGridLayout, QListWidgetItem, QWidget
-from qfluentwidgets import CaptionLabel, IconWidget, ListWidget, StrongBodyLabel, SwitchButton
+from qfluentwidgets import CaptionLabel, IconWidget, StrongBodyLabel, SwitchButton
 
 from soundweaver.core.i18n import t
-from soundweaver.ui import fluent
+from soundweaver.ui import fluent, widgets
 from soundweaver.ui.feature import FeaturePanel
+from soundweaver.ui.scrolling import DirectListWidget
 
 
 class _Row(QWidget):
@@ -22,7 +23,7 @@ class _Row(QWidget):
         self.check.label.hide()
         self.check.setToolTip(t("switch.enable_disable", name=panel.title))
         # the switch shows no text of its own: say what it turns on
-        self.check.setAccessibleName(panel.title)
+        widgets.name_switch(self.check, panel.title)
         self.check.checkedChanged.connect(panel.set_enabled)
         icon = IconWidget(fluent.icon(panel.icon))
         icon.setFixedSize(20, 20)
@@ -32,7 +33,7 @@ class _Row(QWidget):
         # a batch's status can say why some tracks cannot make the output
         self.status.setWordWrap(True)
         layout = QGridLayout(self)
-        layout.setContentsMargins(10, 7, 6, 7)
+        layout.setContentsMargins(12, 8, 8, 8)
         layout.setHorizontalSpacing(12)
         layout.setVerticalSpacing(0)
         layout.addWidget(icon, 0, 0, 2, 1)
@@ -55,29 +56,27 @@ class _Row(QWidget):
 
     def set_status(self, text: str, problem: bool) -> None:
         self.status.setText(text)
-        # only show a tooltip if text is long enough to wrap/truncate
-        self.status.setToolTip(text if len(text) > 20 else "")
+        self.status.setToolTip(text)
         fluent.secondary(self.status, problem)
 
 
-class OutputList(ListWidget):
-    """One row per output panel; the current row is the page shown beside it."""
-
-    selected = Signal(int)
+class OutputList(DirectListWidget):
+    """One row per output with a switch, status, and activation to edit its settings."""
 
     def __init__(self, panels: Sequence[FeaturePanel], parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self.setAccessibleName(t("inputs.outputs_section"))
         self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.rows: list[_Row] = []
         for panel in panels:
             row = _Row(panel)
             item = QListWidgetItem(self)
+            item.setData(Qt.ItemDataRole.AccessibleTextRole, panel.title)
             item.setSizeHint(row.sizeHint())
             self.setItemWidget(item, row)
             row.installEventFilter(self)
             self.rows.append(row)
-        self.currentRowChanged.connect(self.selected)
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
         # The rows cover the viewport, so it never sees the mouse move and the
@@ -99,22 +98,21 @@ class OutputList(ListWidget):
             self.item(i).setSizeHint(QSize(width, row.height_for(width)))
         # a new size hint alone leaves the rows, and the widgets on them, where they were
         self.doItemsLayout()
-        for i, row in enumerate(self.rows):
-            row.setGeometry(self.visualItemRect(self.item(i)))
+        self.updateGeometry()
 
     def sync(self, panels: Sequence[FeaturePanel]) -> None:
         """Show each panel's enabled state without echoing it back."""
         for row, panel in zip(self.rows, panels, strict=True):
-            row.check.blockSignals(True)
-            row.check.setChecked(panel.enabled)
-            row.check.blockSignals(False)
+            with QSignalBlocker(row.check):
+                row.check.setChecked(panel.enabled)
 
-    def set_status(self, index: int, text: str, problem: bool = False) -> None:
-        row = self.rows[index]
-        resized = text != row.status.text()
-        row.set_status(text, problem)
+    def set_statuses(self, statuses: Sequence[tuple[str, bool]]) -> None:
+        resized = False
+        for index, (row, (text, problem)) in enumerate(zip(self.rows, statuses, strict=True)):
+            resized |= text != row.status.text()
+            row.set_status(text, problem)
+            self.item(index).setData(Qt.ItemDataRole.AccessibleDescriptionRole, text)
         if resized:
-            # a wrapped status may take another line, or give one back
             self._fit_rows()
 
     def set_locked(self, locked: bool) -> None:
@@ -124,3 +122,6 @@ class OutputList(ListWidget):
     def sizeHint(self) -> QSize:
         height = sum(self.sizeHintForRow(i) for i in range(self.count())) + 2 * self.frameWidth()
         return QSize(260, height + 4)
+
+    def minimumSizeHint(self) -> QSize:
+        return QSize(248, self.sizeHint().height())

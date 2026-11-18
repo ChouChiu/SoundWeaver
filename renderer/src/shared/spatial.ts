@@ -21,7 +21,7 @@ export function dbToNorm(db: number, floorDb = FLOOR_DB, topDb = TOP_DB): number
 }
 
 /** Crisp outlined sprite texture for 3D labels (object IDs, speaker names). */
-export function makeTextSpriteTexture(text: string): THREE.Texture {
+export function makeTextSprite(text: string, height: number): THREE.Sprite {
 	const c = document.createElement("canvas");
 	c.width = 96;
 	c.height = 64;
@@ -31,10 +31,14 @@ export function makeTextSpriteTexture(text: string): THREE.Texture {
 	ctx.textBaseline = "middle";
 	ctx.lineWidth = 5;
 	ctx.strokeStyle = "rgba(0,0,0,0.88)";
-	ctx.strokeText(text, 48, 32);
+	ctx.strokeText(text, c.width / 2, c.height / 2);
 	ctx.fillStyle = "#ffffff";
-	ctx.fillText(text, 48, 32);
+	ctx.fillText(text, c.width / 2, c.height / 2);
 	const tex = new THREE.CanvasTexture(c);
 	tex.colorSpace = THREE.SRGBColorSpace;
-	return tex;
+	const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
+		map: tex, transparent: true, depthTest: false,
+	}));
+	sprite.scale.set(height * c.width / c.height, height, 1);
+	return sprite;
 }

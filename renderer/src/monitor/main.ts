@@ -12,21 +12,30 @@ import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { OBJLoader } from "three/examples/jsm/loaders/OBJLoader.js";
 import type { ViewPreset } from "../shared/api";
-import { dbToNorm, type LayerBand, makeTextSpriteTexture, RAINBOW } from "../shared/spatial";
+import { dbToNorm, type LayerBand, makeTextSprite, RAINBOW } from "../shared/spatial";
 import { placeHead, silhouette } from "../soundfield/scene";
 
 // Dolby Atmos Renderer room proportions: 3.0 x 2.0 x 4.0 (half: 1.5, 1.0, 2.0)
-// Logic Pro room proportions: 4.0 x 2.5 x 4.0
+// Logic Pro room proportions: 4.0 x 2.5 x 4.0 (half: 2.0, 1.25, 2.0)
 const HALF = { x: 1.5, y: 1.0, z: 2.0 };
+const LOGIC_HALF = { x: 2.0, y: 1.25, z: 2.0 };
 const SPHERE_RADIUS = 1.65;
+const SELECTED_OBJECT_COLOR = new THREE.Color(0xe0fbff);
 type MonitorStyle = "person" | "room" | "logic";
 type MonitorMode = "room" | "spherical";
 
+let currentStyle: MonitorStyle = "person";
+
+function activeHalf(): { x: number; y: number; z: number } {
+	return currentStyle === "logic" ? LOGIC_HALF : HALF;
+}
+
 function roomToScene([x, y, z]: [number, number, number]): [number, number, number] {
+	const h = activeHalf();
 	return [
-		(2 * x - 1) * HALF.x * 0.94,
-		-HALF.y + z * (HALF.y * 2) * 0.94 + 0.06,
-		(2 * y - 1) * HALF.z * 0.94,
+		(2 * x - 1) * h.x * 0.94,
+		-h.y + z * (h.y * 2) * 0.94 + 0.06,
+		(2 * y - 1) * h.z * 0.94,
 	];
 }
 
@@ -123,6 +132,20 @@ function buildRendererRoom(): THREE.Group {
 		map: floorTex(),
 		side: THREE.FrontSide,
 	});
+	const logicWallMat = new THREE.MeshBasicMaterial({
+		color: 0x2b3748,
+		transparent: true,
+		opacity: 0.16,
+		side: THREE.FrontSide,
+		depthWrite: false,
+	});
+	const logicFloorMat = new THREE.MeshBasicMaterial({
+		color: 0x2d3a4b,
+		transparent: true,
+		opacity: 0.24,
+		side: THREE.DoubleSide,
+		depthWrite: false,
+	});
 
 	// Floor (y = -HALF.y, facing +Y)
 	const floor = new THREE.Mesh(new THREE.PlaneGeometry(w, d), floorMat);
@@ -208,7 +231,20 @@ function buildRendererRoom(): THREE.Group {
 	floorGrid.name = "floorGrid";
 	group.add(floorGrid);
 
-	group.userData = { wallMat, floorMat, edges, floorGrid, screenIn, screenOut, ceilIn, ceilOut };
+	group.userData = {
+		wallMat,
+		logicWallMat,
+		floorMat,
+		logicFloorMat,
+		floor,
+		walls: [rear, front, left, right],
+		edges,
+		floorGrid,
+		screenIn,
+		screenOut,
+		ceilIn,
+		ceilOut,
+	};
 	return group;
 }
 
@@ -276,11 +312,9 @@ function positionHead(pivot: THREE.Group): void {
 	if (activeMode === "spherical") {
 		pivot.position.set(0, -0.58, 0);
 	} else {
-		pivot.position.set(0, -HALF.y * (currentStyle === "logic" ? 2.5 / 2.0 : 1.0), 0);
+		pivot.position.set(0, -activeHalf().y, 0);
 	}
 }
-
-let currentStyle: MonitorStyle = "person";
 
 // Load real FBHead.obj from Spatial Audio Tools (fallback to silhouette while loading)
 const headMat = new THREE.MeshLambertMaterial({ color: 0x526e8c, side: THREE.DoubleSide });
@@ -320,7 +354,7 @@ controls.dampingFactor = 0.08;
 controls.target.set(0, -0.1, 0);
 
 function viewCameraPos(preset: ViewPreset): { pos: THREE.Vector3; up: THREE.Vector3 } {
-	const dist = 6.8;
+	const dist = currentStyle === "logic" && activeMode === "room" ? 8.2 : 6.8;
 	const deg = (d: number) => (d * Math.PI) / 180;
 	const map: Record<string, { yaw: number; pitch: number; up: THREE.Vector3 }> = {
 		iso: { yaw: deg(-45), pitch: deg(18), up: new THREE.Vector3(0, 1, 0) },
@@ -372,6 +406,21 @@ interface SpkNode {
 }
 
 const objNodes = new Map<number, ObjNode>();
+let latestObjects: LiveObj[] = [];
+let selectedObject: number | null = null;
+const selectionHalo = new THREE.Mesh(
+	new THREE.RingGeometry(0.119, 0.132, 40),
+	new THREE.MeshBasicMaterial({
+		color: SELECTED_OBJECT_COLOR,
+		side: THREE.DoubleSide,
+		transparent: true,
+		opacity: 0.92,
+		depthWrite: false,
+	}),
+);
+selectionHalo.visible = false;
+selectionHalo.renderOrder = 8;
+scene.add(selectionHalo);
 const spkNodes: SpkNode[] = [];
 const spkGroup = new THREE.Group();
 scene.add(spkGroup);
@@ -401,11 +450,8 @@ function getOrCreateObj(id: number): ObjNode {
 	sphere.renderOrder = 5;
 	scene.add(sphere);
 
-	const label = new THREE.Sprite(
-		new THREE.SpriteMaterial({ map: makeTextSpriteTexture(String(id + 1)), transparent: true, depthTest: false }),
-	);
+	const label = makeTextSprite(String(id + 1), 0.32);
 	label.renderOrder = 10;
-	label.scale.setScalar(0.32);
 	scene.add(label);
 
 	const dropGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
@@ -468,11 +514,8 @@ function setSpeakers(speakers: LiveSpeaker[]): void {
 		mesh.position.set(x, y, z);
 		spkGroup.add(mesh);
 
-		const label = new THREE.Sprite(
-			new THREE.SpriteMaterial({ map: makeTextSpriteTexture(s.name), transparent: true, depthTest: false }),
-		);
+		const label = makeTextSprite(s.name, 0.24);
 		label.position.set(x, y + 0.16, z);
-		label.scale.set(0.36, 0.24, 1);
 		label.renderOrder = 10;
 		spkGroup.add(label);
 
@@ -494,30 +537,49 @@ function updateFrame(objects: LiveObj[], chLevels: number[]): void {
 		node.mesh.scale.setScalar(isSpherical && active ? 0.95 + 0.55 * norm : 1.0);
 	}
 
+	latestObjects = objects;
+	updateObjects();
+}
+
+function updateObjects(): void {
+	const isSpherical = activeMode === "spherical";
+	selectionHalo.visible = false;
 	const seen = new Set<number>();
-	const floor = -HALF.y + 0.004;
-	for (const o of objects) {
+	const floor = -activeHalf().y + 0.004;
+	for (const o of latestObjects) {
 		seen.add(o.id);
 		const node = getOrCreateObj(o.id);
-		const visible = o.active && o.db > -80;
+		const selected = o.id === selectedObject;
+		const visible = selected || (o.active && o.db > -80);
 		node.sphere.visible = visible;
-		node.label.visible = visible && showLabels;
+		node.label.visible = visible && (showLabels || selected);
 		node.drop.visible = visible && showDrop && !isSpherical;
 		node.ring.visible = visible && showDrop && !isSpherical;
 		if (!visible) continue;
 
 		const [x, y, z] = roomToScene([o.x, o.y, o.z]);
 		const norm = dbToNorm(o.db, -60, -5);
-		const scale = 0.85 + 0.45 * norm;
+		const scale = 0.85 + 0.45 * norm + (selected ? 0.12 : 0);
+		const color = selected ? SELECTED_OBJECT_COLOR : node.color;
 
 		node.sphere.position.set(x, y, z);
 		node.sphere.scale.setScalar(scale);
 		const sm = node.sphere.material as THREE.MeshPhongMaterial;
-		sm.emissiveIntensity = 0.08 + 0.65 * norm;
+		sm.color.copy(color);
+		sm.emissive.copy(color);
+		sm.emissiveIntensity = selected ? 0.65 : 0.08 + 0.65 * norm;
+
+		if (selected) {
+			selectionHalo.visible = true;
+			selectionHalo.position.set(x, y, z);
+			selectionHalo.scale.setScalar(scale);
+		}
 
 		node.label.position.set(x, y + 0.18 * scale, z);
 
-		if (showDrop) {
+		if (showDrop && !isSpherical) {
+			(node.drop.material as THREE.LineDashedMaterial).color.copy(color);
+			(node.ring.material as THREE.MeshBasicMaterial).color.copy(color);
 			const posAttr = node.drop.geometry.getAttribute("position") as THREE.BufferAttribute;
 			posAttr.setXYZ(0, x, y, z);
 			posAttr.setXYZ(1, x, floor, z);
@@ -536,6 +598,11 @@ function updateFrame(objects: LiveObj[], chLevels: number[]): void {
 	}
 }
 
+function setSelectedObject(id: number | null): void {
+	selectedObject = id;
+	updateObjects();
+}
+
 function setView(preset: ViewPreset): void {
 	const target = viewCameraPos(preset);
 	camAnim = {
@@ -552,6 +619,7 @@ function setOptions(opts: { showLabels?: boolean; showDrop?: boolean; showSpeake
 	if (opts.showDrop !== undefined) showDrop = opts.showDrop;
 	if (opts.showSpeakers !== undefined) showSpeakers = opts.showSpeakers;
 	syncSpeakersVisibility();
+	updateObjects();
 }
 
 function setMode(mode: MonitorMode): void {
@@ -563,6 +631,7 @@ function setMode(mode: MonitorMode): void {
 		setSpeakers(spkNodes.map((n) => n.spec));
 	}
 	syncSpeakersVisibility();
+	updateObjects();
 }
 
 function setLayers(upper: boolean, middle: boolean, lower: boolean): void {
@@ -592,6 +661,7 @@ function animate(now: number): void {
 		if (camAnim.t >= 1) camAnim = null;
 	}
 	controls.update();
+	if (selectionHalo.visible) selectionHalo.quaternion.copy(cam.quaternion);
 	renderer.render(scene, cam);
 }
 requestAnimationFrame(animate);
@@ -599,7 +669,11 @@ requestAnimationFrame(animate);
 function setStyle(style: MonitorStyle): void {
 	const ud = roomGroup.userData as {
 		wallMat: THREE.MeshBasicMaterial;
+		logicWallMat: THREE.MeshBasicMaterial;
 		floorMat: THREE.MeshBasicMaterial;
+		logicFloorMat: THREE.MeshBasicMaterial;
+		floor: THREE.Mesh;
+		walls: THREE.Mesh[];
 		edges: THREE.LineSegments;
 		floorGrid: THREE.LineSegments;
 		screenIn: THREE.Mesh;
@@ -607,19 +681,51 @@ function setStyle(style: MonitorStyle): void {
 		ceilIn: THREE.Mesh;
 		ceilOut: THREE.Mesh;
 	};
+	const wasLogic = currentStyle === "logic";
 	currentStyle = style;
 	const isLogic = style === "logic";
+	const bgHex = isLogic ? 0x151b22 : 0x1a191d;
+	(scene.background as THREE.Color).setHex(bgHex);
+	renderer.setClearColor(bgHex, 1);
+	headMat.color.setHex(isLogic ? 0x636e7b : 0x526e8c);
+
 	roomGroup.scale.set(isLogic ? 4.0 / 3.0 : 1.0, isLogic ? 2.5 / 2.0 : 1.0, 1.0);
 	positionHead(activeHead);
 	activeHead.visible = activeMode === "spherical" || style !== "room";
+
+	const activeWallMat = isLogic ? ud.logicWallMat : ud.wallMat;
+	for (const w of ud.walls) {
+		w.visible = true;
+		w.material = activeWallMat;
+	}
+	ud.floor.material = isLogic ? ud.logicFloorMat : ud.floorMat;
 	ud.floorGrid.visible = style !== "room";
 	ud.screenIn.visible = !isLogic;
 	ud.screenOut.visible = !isLogic;
-	ud.ceilIn.visible = !isLogic;
-	ud.wallMat.transparent = isLogic;
-	ud.wallMat.opacity = isLogic ? 0.14 : 1.0;
-	ud.wallMat.depthWrite = !isLogic;
-	(ud.edges.material as THREE.LineBasicMaterial).color.setHex(isLogic ? 0x66829e : 0x383838);
+	ud.ceilIn.visible = true;
+	ud.ceilIn.material = activeWallMat;
+	ud.ceilOut.visible = !isLogic;
+
+	const edgeMat = ud.edges.material as THREE.LineBasicMaterial;
+	edgeMat.color.setHex(isLogic ? 0x647486 : 0x383838);
+	edgeMat.transparent = isLogic;
+	edgeMat.opacity = isLogic ? 0.78 : 1.0;
+
+	const gridMat = ud.floorGrid.material as THREE.LineBasicMaterial;
+	gridMat.color.setHex(isLogic ? 0x4b5969 : 0x66829e);
+	gridMat.opacity = isLogic ? 0.5 : 0.65;
+
+	if (wasLogic !== isLogic) {
+		if (activeMode === "room") {
+			const ratio = isLogic ? 8.2 / 6.8 : 6.8 / 8.2;
+			cam.position.sub(controls.target).multiplyScalar(ratio).add(controls.target);
+			controls.update();
+		}
+		if (spkNodes.length > 0 && activeMode === "room") {
+			setSpeakers(spkNodes.map((n) => n.spec));
+		}
+		updateObjects();
+	}
 }
 
 (window as unknown as Record<string, unknown>).liveMonitor = {
@@ -628,6 +734,7 @@ function setStyle(style: MonitorStyle): void {
 	setView,
 	setOptions,
 	setStyle,
+	setSelectedObject,
 	setMode,
 	setLayers,
 };

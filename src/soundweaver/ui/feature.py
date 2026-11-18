@@ -4,9 +4,23 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from PySide6.QtCore import QSettings, Signal
-from PySide6.QtWidgets import QDoubleSpinBox, QLineEdit, QSpinBox, QWidget
-from qfluentwidgets import CheckBox, CompactDoubleSpinBox, LineEdit
+from PySide6.QtCore import QSettings, QSignalBlocker, Signal
+from PySide6.QtWidgets import (
+    QDoubleSpinBox,
+    QHBoxLayout,
+    QLineEdit,
+    QSpinBox,
+    QVBoxLayout,
+    QWidget,
+)
+from qfluentwidgets import (
+    CheckBox,
+    CompactDoubleSpinBox,
+    IconWidget,
+    LineEdit,
+    SwitchButton,
+    TitleLabel,
+)
 
 from soundweaver.core.i18n import t
 from soundweaver.core.project import PlanContext, Project
@@ -219,3 +233,37 @@ class FeaturePanel(QWidget):
 
     def restore_extra(self) -> None:
         pass
+
+
+class PageHeader(QWidget):
+    """An output page's title with its on/off switch and current status line."""
+
+    def __init__(self, panel: FeaturePanel, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        icon = IconWidget(fluent.icon(panel.icon))
+        icon.setFixedSize(26, 26)
+        self.check = SwitchButton()
+        widgets.name_switch(self.check, t("switch.enable_disable", name=panel.title))
+        self.check.setOnText(t("switch.enabled"))
+        self.check.setOffText(t("switch.disabled"))
+        self.check.checkedChanged.connect(panel.set_enabled)
+        self.status = widgets.hint_label()
+        self.status.hide()
+        title = QHBoxLayout()
+        title.setSpacing(widgets.FIELD_SPACING)
+        title.addWidget(icon)
+        title.addWidget(TitleLabel(panel.title))
+        title.addStretch(1)
+        title.addWidget(self.check)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+        layout.addLayout(title)
+        layout.addWidget(self.status)
+
+    def sync(self, enabled: bool, text: str, problem: bool) -> None:
+        with QSignalBlocker(self.check):
+            self.check.setChecked(enabled)
+        self.status.setText(text)
+        self.status.setVisible(enabled and bool(text))
+        fluent.secondary(self.status, problem)
