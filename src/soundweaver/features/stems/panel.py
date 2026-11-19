@@ -49,6 +49,19 @@ class StemsPanel(FeaturePanel):
         self.crossover.setToolTip(t("stems.crossover_tip"))
         self.remember("crossover", self.crossover)
         self.adm = self.check("stem_adm", t("stems.adm_text"), False)
+        self.remove_bed_placeholders = self.check(
+            "stem_adm_remove_bed_placeholders",
+            t("stems.adm_remove_bed_placeholders"),
+            False,
+            t("stems.adm_remove_bed_placeholders_tip"),
+        )
+        self._adm_project: Project | None = None
+        self.remove_bed_placeholders.setEnabled(False)
+        self.adm.toggled.connect(self._refresh_adm_options)
+        self.remove_bed_placeholders.toggled.connect(self._refresh_adm_options)
+        adm_options = QVBoxLayout()
+        adm_options.addWidget(self.adm)
+        adm_options.addWidget(self.remove_bed_placeholders)
         self.binaural = self.check("stem_binaural", t("stems.binaural_text"), False)
         self.binaural.setToolTip(t("stems.binaural_tip"))
         self.av3a_encode = self.check("stem_av3a_encode", t("stems.av3a_text"), False)
@@ -112,7 +125,7 @@ class StemsPanel(FeaturePanel):
                         (t("label.cicp_layout"), self.cicp_box),
                         (t("label.crossover"), self.crossover),
                         (t("label.multichannel_export"), self.multichannel_box),
-                        (t("label.atmos_metadata"), self.adm),
+                        (t("label.atmos_metadata"), adm_options),
                         (t("label.binaural_export"), self.binaural),
                         (t("label.av3a_export"), self.av3a_encode),
                     ]
@@ -200,7 +213,22 @@ class StemsPanel(FeaturePanel):
             and info is not None
             and info.atmos
             and not info.is_av3a
+            and not info.adm_bwf
         )
+
+    def _refresh_adm_options(self) -> None:
+        self.remove_bed_placeholders.setEnabled(self.adm.isEnabled() and self.adm.isChecked())
+        project = self._adm_project
+        exists = bool(
+            project
+            and project.audio
+            and project.output_dir
+            and adm_target(
+                project.output_dir, project.audio,
+                remove_bed_placeholders=self.remove_bed_placeholders.isChecked(),
+            ).is_file()
+        )
+        self.adm.setText(t("stems.adm_text") + (t("stems.existing_suffix") if exists else ""))
 
     def _kinds(self, ctx: PlanContext) -> list[str]:
         """Stems the split must write: ticked outputs plus what other outputs need."""
@@ -223,15 +251,11 @@ class StemsPanel(FeaturePanel):
             self.grid.removeWidget(box)
             box.deleteLater()
         self.checks = {}
-        atmos = project.info is not None and project.info.atmos and not project.info.is_av3a
+        info = project.info
+        atmos = info is not None and info.atmos and not info.is_av3a and not info.adm_bwf
+        self._adm_project = project
         self.adm.setEnabled(atmos)
-        exists = bool(
-            project.audio
-            and project.output_dir
-            and adm_target(project.output_dir, project.audio).is_file()
-        )
-        adm_text = t("stems.adm_text") + (t("stems.existing_suffix") if exists else "")
-        self.adm.setText(adm_text)
+        self._refresh_adm_options()
         self.adm.setToolTip(t("stems.adm_tip") if atmos else t("stems.adm_disabled_tip"))
 
         is_mpegh = project.info is not None and project.info.is_mpegh
@@ -339,7 +363,9 @@ class StemsPanel(FeaturePanel):
         audio, out, info = project.audio, project.output_dir, project.info
         if audio is None or out is None or info is None:
             return []
-        adm = adm_target(out, audio) if self._adm(ctx) else None
+        export_adm = self._adm(ctx)
+        compact_adm = export_adm and self.remove_bed_placeholders.isChecked()
+        adm = adm_target(out, audio, remove_bed_placeholders=compact_adm) if export_adm else None
         kinds = [StemKind(k) for k in self._kinds(ctx)]
         mc = self._multichannel()
         mono = self._chosen_mono(project)
@@ -351,6 +377,7 @@ class StemsPanel(FeaturePanel):
             split_step(
                 audio, out, kinds, self.crossover.value(),
                 atmos=info.atmos, adm=adm, speakers=project.speakers,
+                remove_bed_placeholders=compact_adm,
                 multichannel=mc, mono_channels=mono,
                 cicp=self._cicp(), binaural=binaural,
                 av3a_encode=av3a_enc, hoa_order=info.hoa_order,

@@ -535,12 +535,7 @@ class PlaybackEngine(QObject):
                         )
                         peak = float(np.max(np.abs(raw[:, tr.channel_index])))
                         db = max(SILENCE_DB, 20.0 * math.log10(peak)) if peak > 1e-5 else SILENCE_DB
-                        blk = tr.blocks[0] if tr.blocks else None
-                        for b in tr.blocks:
-                            if b.start <= t_mid:
-                                blk = b
-                            else:
-                                break
+                        blk = source.adm.block_at(tr, t_mid)
                         ox, oy, oz = (blk.x, blk.y, blk.z) if blk else (0.5, 0.5, 0.0)
                         objs.append(ObjectSnapshot(obj_idx, ox, oy, oz, db if active_ms else SILENCE_DB, active_ms))
                         if active_ms:

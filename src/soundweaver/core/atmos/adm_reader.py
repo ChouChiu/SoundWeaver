@@ -7,6 +7,7 @@ any `SpeakerLayout`, and builds `ObjectTrace` for 3D soundfield video.
 
 from __future__ import annotations
 
+import bisect
 import logging
 import math
 import struct
@@ -365,6 +366,9 @@ class PreparedADM:
         self._fh = None
         tracks.sort(key=lambda t: t.channel_index)
         self.tracks = tuple(tracks)
+        self._block_starts: dict[int, tuple[float, ...]] = {
+            tr.channel_index: tuple(b.start for b in tr.blocks) for tr in self.tracks
+        }
         self.info = ADMInfo(
             sample_rate=self.sample_rate,
             channels=self.channels,
@@ -420,6 +424,18 @@ class PreparedADM:
 
         return arr.reshape(actual, self.channels)
 
+    def block_at(self, track: ADMTrack, time_s: float) -> ADMBlock | None:
+        """Find the active `ADMBlock` at `time_s` in O(log B) via binary search."""
+        blocks = track.blocks
+        if not blocks:
+            return None
+        starts = self._block_starts.get(track.channel_index)
+        if starts is None:
+            starts = tuple(b.start for b in blocks)
+            self._block_starts[track.channel_index] = starts
+        idx = bisect.bisect_right(starts, time_s) - 1
+        return blocks[max(0, idx)]
+
     def _track_gains_at(self, track: ADMTrack, time_s: float, layout: SpeakerLayout) -> np.ndarray:
         """Speaker gain vector for `track` at `time_s`."""
         if track.is_lfe:
@@ -439,16 +455,8 @@ class PreparedADM:
             )
             if pos is not None:
                 return _place(layout, *pos).astype(np.float32)
-        if not track.blocks:
-            return np.zeros(len(layout.channels), dtype=np.float32)
-        # Find active block at time_s
-        blk = track.blocks[0]
-        for b in track.blocks:
-            if b.start <= time_s:
-                blk = b
-            else:
-                break
-        if not blk.active or blk.gain <= 0.0:
+        blk = self.block_at(track, time_s)
+        if blk is None or not blk.active or blk.gain <= 0.0:
             return np.zeros(len(layout.channels), dtype=np.float32)
         return (_place(layout, blk.x, blk.y, blk.z) * blk.gain).astype(np.float32)
 

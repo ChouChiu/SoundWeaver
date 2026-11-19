@@ -18,6 +18,9 @@ The file is 24-bit PCM (format tag 1) with a 40-byte-per-track `chna`; a JUNK
 chunk reserves room for `ds64`, so a file past 4 GiB becomes RF64 (section
 7.1 rules out BW64).  Positions use ADM cartesian coordinates: X left -1 to
 right +1, Y back -1 to front +1, Z the listener's plane 0 to the ceiling +1.
+
+Without bed placeholders the writer uses general ITU ADM and explicitly
+identifies the LFE as a DirectSpeakers channel.
 """
 
 from __future__ import annotations
@@ -71,6 +74,11 @@ _BED_CHANNELS = {
     # at the back corners, where the 7.X rear pair RC_Lrs/RC_Rrs also stands.
     "Ls": ("RoomCentricLeftSurround", "RC_Ls", (-1.0, -1.0, 0.0)),
     "Rs": ("RoomCentricRightSurround", "RC_Rs", (1.0, -1.0, 0.0)),
+}
+_ITU_SPEAKER_LABELS = {
+    "L": "M+030", "R": "M-030", "C": "M+000", "LFE": "LFE",
+    "Ls": "M+110", "Rs": "M-110", "Lss": "M+090", "Rss": "M-090",
+    "Lrs": "M+135", "Rrs": "M-135", "Lts": "U+090", "Rts": "U-090",
 }
 
 DIRECT_SPEAKERS = ("0001", "DirectSpeakers")
@@ -261,6 +269,7 @@ class AdmFile:
         objects: int,
         *,
         layout: tuple[str, tuple[_Track, ...], tuple[_Track, ...]] | None = None,
+        remove_bed_placeholders: bool = False,
     ) -> None:
         self.target, self.sample_rate, self.length = target, sample_rate, length
         self.program, self.objects = program, objects
@@ -268,6 +277,9 @@ class AdmFile:
             self.bed_name, self.bed, self.others = layout
         else:
             self.bed_name, self.bed, self.others = _tracks(program, objects)
+        self.general_adm = remove_bed_placeholders
+        if self.general_adm:
+            self.bed = tuple(track for track in self.bed if track.source is not None)
         self.tracks = self.bed + self.others
         # which OAMD object each track of the file carries, for `adm_block`
         self.sources = tuple(t.source for t in self.tracks)
@@ -419,6 +431,8 @@ class AdmFile:
         )
         fmt = ET.SubElement(ET.SubElement(root, "coreMetadata"), "format")
         adm = ET.SubElement(fmt, "audioFormatExtended")
+        if self.general_adm:
+            adm.set("version", "ITU-R_BS.2076-1")
         programme = ET.SubElement(adm, "audioProgramme", {
             "audioProgrammeID": "APR_1001", "audioProgrammeName": "Atmos_Master",
             "start": _timecode(0), "end": _timecode(duration),
@@ -474,8 +488,9 @@ class AdmFile:
                 "formatLabel": "0001", "formatDefinition": "PCM",
             })  # fmt: skip
             ET.SubElement(stream, "audioChannelFormatIDRef").text = ids["channel"]
-            # BS.2076-0 has a stream name a channel or a pack; the profile has both (2.3)
-            ET.SubElement(stream, "audioPackFormatIDRef").text = packs[index]
+            # The Dolby profile requires both references on the stream (2.3).
+            if not self.general_adm:
+                ET.SubElement(stream, "audioPackFormatIDRef").text = packs[index]
             ET.SubElement(stream, "audioTrackFormatIDRef").text = ids["track"]
 
         for index, track in enumerate(self.tracks):
@@ -499,28 +514,53 @@ class AdmFile:
 
     def _object_name(self, kind: str, tracks: tuple[int, ...]) -> str:
         if kind == "DirectSpeakers":
+            if self.general_adm:
+                return "LFE" if len(self.bed) == 1 and self.bed[0].channel == "LFE" else "Bed"
             return f"Bed {self.bed_name}"
         return self.tracks[tracks[0]].name
 
-    @staticmethod
-    def _bed_block(channel: ET.Element, ids: dict[str, str], assignment: str) -> None:
+    def _bed_block(self, channel: ET.Element, ids: dict[str, str], assignment: str) -> None:
         # a bed channel holds one block for the whole programme, with no rtime or duration (2.5)
         _, speaker, position = _BED_CHANNELS[assignment]
+        if self.general_adm and assignment == "LFE":
+            ET.SubElement(channel, "frequency", typeDefinition="lowPass").text = "120"
         block = ET.SubElement(channel, "audioBlockFormat", {
             "audioBlockFormatID": f"AB_{ids['channel'][3:]}_00000001",
         })  # fmt: skip
+        axes = ("X", "Y", "Z")
+        if self.general_adm:
+            speaker = _ITU_SPEAKER_LABELS[assignment]
+            x, y, z = position
+            axes = ("azimuth", "elevation")
+            position = (
+                math.degrees(math.atan2(-x, y)),
+                math.degrees(math.atan2(z, math.hypot(x, y))),
+            )
         ET.SubElement(block, "speakerLabel").text = speaker
-        ET.SubElement(block, "cartesian").text = "1"
-        for axis, value in zip("XYZ", position, strict=True):
+        if not self.general_adm:
+            ET.SubElement(block, "cartesian").text = "1"
+        for axis, value in zip(axes, position, strict=True):
             ET.SubElement(block, "position", {"coordinate": axis}).text = _number(value)
 
-    @staticmethod
     def _object_blocks(
+        self,
         channel: ET.Element,
         ids: dict[str, str],
         events: list[tuple[float, tuple[float, float, float]]],
         duration: float,
     ) -> None:
+        if self.general_adm:
+            # Quantize boundaries once so consecutive durations match their rtimes.
+            # Keep the last position when events serialize to the same boundary.
+            ticks_per_second = 100_000
+            end_tick = round(duration * ticks_per_second)
+            by_tick = {
+                tick: position
+                for t, position in events
+                if (tick := round(t * ticks_per_second)) < end_tick
+            }
+            events = [(tick / ticks_per_second, position) for tick, position in by_tick.items()]
+            duration = end_tick / ticks_per_second
         ends = [t for t, _ in events[1:]] + [duration]
         for n, ((t, position), end) in enumerate(zip(events, ends, strict=True), 1):
             block = ET.SubElement(channel, "audioBlockFormat", {
@@ -530,7 +570,8 @@ class AdmFile:
             ET.SubElement(block, "cartesian").text = "1"
             for axis, value in zip("XYZ", _cartesian(*position), strict=True):
                 ET.SubElement(block, "position", {"coordinate": axis}).text = _number(value)
-            jump = ET.SubElement(
-                block, "jumpPosition", {"interpolationLength": "0" if n == 1 else _INTERPOLATION}
-            )
+            interpolation = "0" if n == 1 else _INTERPOLATION
+            if self.general_adm and n > 1:
+                interpolation = f"{min(float(_INTERPOLATION), end - t):.6f}"
+            jump = ET.SubElement(block, "jumpPosition", interpolationLength=interpolation)
             jump.text = "1"

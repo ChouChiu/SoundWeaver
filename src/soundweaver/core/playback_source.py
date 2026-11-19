@@ -282,43 +282,31 @@ def prepare_playback(
         elif info.is_mpegh:
             _prepare_mpegh(path, options, token, source, binaural)
         elif info.atmos:
-            if not binaural:
-                min_frames = round((max(0.0, start_at) + 15.0) * (info.sample_rate or 48000))
-                adm_progress = AdmReadAhead(token, min_frames=min_frames)
-
-                def _decode_adm(target: Path, publish) -> None:
-                    decoded = decode_atmos(
-                        path,
-                        token,
-                        lambda _f: None,
-                        layout=options.layout,
-                        speakers=False,
-                        adm=target,
-                        on_adm_chunk=publish,
-                    )
-                    source.trace = decoded.trace
-
-                try:
-                    adm_path = adm_progress.start(_decode_adm)
-                except BaseException:
-                    adm_progress.close()
-                    raise
-                source.adm_progress = adm_progress
+            tmp = Path(resources.enter_context(tempfile.TemporaryDirectory(dir=work_root())))
+            target = tmp / "decoded_adm.wav"
+            decoded = decode_atmos(
+                path,
+                token,
+                lambda _f: None,
+                layout=options.layout,
+                speakers=False,
+                adm=target,
+                restore_objects=True,
+            )
+            source.trace = decoded.trace
+            if target.is_file():
+                adm_path = target
             else:
-                tmp = Path(resources.enter_context(tempfile.TemporaryDirectory(dir=work_root())))
-                target = tmp / "decoded_adm.wav"
                 decoded = decode_atmos(
-                    path, token, lambda _f: None, layout=options.layout, speakers=False, adm=target
+                    path,
+                    token,
+                    lambda _f: None,
+                    layout=options.layout,
+                    speakers=True,
+                    restore_objects=True,
                 )
-                source.trace = decoded.trace
-                if target.is_file():
-                    adm_path = target
-                else:
-                    decoded = decode_atmos(
-                        path, token, lambda _f: None, layout=options.layout, speakers=True
-                    )
-                    if decoded.speakers is not None:
-                        source.audio = resources.enter_context(decoded.speakers)
+                if decoded.speakers is not None:
+                    source.audio = resources.enter_context(decoded.speakers)
         else:
             source.audio = resources.enter_context(load_audio(path, token))
             source.channels = (

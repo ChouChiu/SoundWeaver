@@ -21,8 +21,9 @@ _ATMOS_DECODE = 50
 _DECODE = 5
 
 
-def adm_target(output_dir: Path, source: Path) -> Path:
-    return output_dir / f"{source.stem}_adm.wav"
+def adm_target(output_dir: Path, source: Path, *, remove_bed_placeholders: bool = False) -> Path:
+    suffix = "_adm_compact.wav" if remove_bed_placeholders else "_adm.wav"
+    return output_dir / f"{source.stem}{suffix}"
 
 
 def multichannel_target(
@@ -53,6 +54,7 @@ def split_stems(
     atmos: bool,
     adm: Path | None,
     speakers: SpeakerLayout | None,
+    remove_bed_placeholders: bool = False,
     multichannel: str = "none",
     mono_channels: tuple[str, ...] = (),
     cicp: int = 13,
@@ -92,6 +94,7 @@ def split_stems(
             source, token,
             lambda f: report(round(f * _ATMOS_DECODE), t("step.decode_atmos_progress", percent=f)),
             layout=speakers or DEFAULT_ATMOS, speakers=need_pcm, adm=adm,
+            remove_bed_placeholders=remove_bed_placeholders,
         )  # fmt: skip
         audio, start = decoded.speakers, _ATMOS_DECODE
     elif mpegh.is_mpegh_file(source):
@@ -176,6 +179,7 @@ def split_step(
     atmos: bool,
     adm: Path | None,
     speakers: SpeakerLayout | None,
+    remove_bed_placeholders: bool = False,
     multichannel: str = "none",
     mono_channels: tuple[str, ...] = (),
     cicp: int = 13,
@@ -194,6 +198,7 @@ def split_step(
             atmos=atmos,
             adm=adm,
             speakers=speakers,
+            remove_bed_placeholders=remove_bed_placeholders,
             multichannel=multichannel,
             mono_channels=mono_channels,
             cicp=cicp,

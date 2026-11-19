@@ -40,7 +40,7 @@ from soundweaver.core.paths import cache_dir, content_key, work_root
 from soundweaver.core.pcm import AudioData, create_pcm_audio
 from soundweaver.core.speakers import DEFAULT_ATMOS, SpeakerLayout
 
-from .adm import AdmFile
+from .adm import AdmFile, _tracks
 from .bitstream import BitstreamError
 from .chunk import (
     CORE_CHANNELS,
@@ -53,7 +53,16 @@ from .chunk import (
 )
 from .eac3 import INDEPENDENT, syncframes
 from .emdf import JOC_PAYLOAD, OAMD_PAYLOAD, object_payloads
-from .oamd import OamdDecoder
+from .oamd import OamdDecoder, Program
+from .obj_restore import (
+    RestoreConfig,
+    SlotFeatures,
+    build_fingerprints,
+    build_restored_trace,
+    eval_keys_on_grid,
+    plan_object_restoration,
+    write_restored_adm,
+)
 from .render import Renderer, joc_objects
 from .trace import ObjectTrace, Tracer
 
@@ -90,6 +99,8 @@ def decode_atmos(
     speakers: bool = False,
     adm: Path | None = None,
     on_adm_chunk: Callable[[Path, int], None] | None = None,
+    restore_objects: bool = True,
+    remove_bed_placeholders: bool = False,
 ) -> AtmosDecode:
     """Decode the first audio track of `source` once and produce every output asked for.
 
@@ -100,20 +111,34 @@ def decode_atmos(
     from soundweaver.core import ac4  # ac4 builds on this package's modules
 
     if ac4.is_ac4(source):
-        trace, out = ac4.decode_objects(source, token, on_fraction, layout, speakers, adm, on_adm_chunk)
-        _store_trace(source, layout, trace)
+        trace, out = ac4.decode_objects(
+            source,
+            token,
+            on_fraction,
+            layout,
+            speakers,
+            adm,
+            on_adm_chunk,
+            restore_objects=restore_objects,
+            remove_bed_placeholders=remove_bed_placeholders,
+        )
+        if restore_objects:
+            _store_trace(source, layout, trace)
         return AtmosDecode(trace, out, layout)
     with _prepare(source, token) as (frames, core, rate, first, length):
         out = create_pcm_audio(len(layout.channels), length, rate) if speakers else None
         try:
-            trace = _Decode(frames, core, rate, first, length, layout, out, adm).run(
-                token, on_fraction, on_adm_chunk
-            )
+            trace = _Decode(
+                frames, core, rate, first, length, layout, out, adm,
+                restore_objects=restore_objects,
+                remove_bed_placeholders=remove_bed_placeholders,
+            ).run(token, on_fraction, on_adm_chunk)
         except BaseException:
             if out is not None:
                 out.cleanup()
             raise
-    _store_trace(source, layout, trace)
+    if restore_objects:
+        _store_trace(source, layout, trace)
     return AtmosDecode(trace, out, layout)
 
 
@@ -122,13 +147,18 @@ def trace_atmos(
     token: CancellationToken,
     on_fraction: Callable[[float], None] = lambda _f: None,
     layout: SpeakerLayout = DEFAULT_ATMOS,
+    *,
+    restore_objects: bool = True,
 ) -> ObjectTrace:
     """Where each dynamic object is, how loud it is and how `layout` shares it out."""
-    cached = _cached_trace(source, layout)
-    if cached is not None:
-        on_fraction(1.0)
-        return cached
-    return decode_atmos(source, token, on_fraction, layout=layout).trace
+    if restore_objects:
+        cached = _cached_trace(source, layout)
+        if cached is not None:
+            on_fraction(1.0)
+            return cached
+    return decode_atmos(
+        source, token, on_fraction, layout=layout, restore_objects=restore_objects
+    ).trace
 
 
 class _Decode:
@@ -142,10 +172,15 @@ class _Decode:
         layout: SpeakerLayout,
         speakers: AudioData | None,
         adm: Path | None,
+        *,
+        restore_objects: bool = True,
+        remove_bed_placeholders: bool = False,
     ) -> None:
         self.frames, self.core, self.rate, self.layout = frames, core, rate, layout
         self.first, self.length = first, length
         self.speakers, self.adm_path = speakers, adm
+        self.restore_objects = restore_objects
+        self.remove_bed_placeholders = remove_bed_placeholders
         total = len(frames)
         workers = min(_MAX_WORKERS, max(1, (os.process_cpu_count() or 2) - 1))
         count = max(1, min(workers * _CHUNKS_PER_WORKER, total // _MIN_CHUNK_FRAMES))
@@ -162,6 +197,12 @@ class _Decode:
         oamd = OamdDecoder()
         renderer: Renderer | None = None
         adm: AdmFile | None = None
+        do_restore = self.restore_objects and on_adm_chunk is None
+        first_program: Program | None = None
+        first_objects = 0
+        raw_adm_path: Path | None = None
+        raw_adm_sources: tuple[int | None, ...] = ()
+        restore_cfg = RestoreConfig()
         oamd_payloads: list[bytes] = []
         joc_payloads: list[bytes] = []
         snapshots: list[tuple] = []
@@ -191,24 +232,41 @@ class _Decode:
                         raise AtmosError(t("atmos.bad_metadata", frame=k, error=error)) from error
                     if renderer is None:
                         renderer = Renderer(len(joc_objects(meta)), self.layout)
+                        first_program = meta.program
+                        first_objects = meta.object_count
                         if meta.program.isf_objects:
                             logger.info(
                                 "%d ISF objects on rings %s", meta.program.isf_objects,
                                 meta.program.isf_rings,
                             )  # fmt: skip
-                        if self.adm_path is not None:
+                        if do_restore and meta.program.dynamic_objects > 0:
+                            _, bed_tr, other_tr = _tracks(meta.program, meta.object_count)
+                            raw_adm_sources = tuple(tr.source for tr in (bed_tr + other_tr))
+                            if self.adm_path is not None:
+                                raw_adm_path = Path(scratch) / "raw_adm.f32"
+                                mm = np.memmap(
+                                    raw_adm_path,
+                                    dtype=np.float32,
+                                    mode="w+",
+                                    shape=(len(raw_adm_sources), self.length),
+                                )
+                                mm.flush()
+                                del mm
+                        elif self.adm_path is not None:
                             adm = AdmFile(
                                 self.adm_path,
                                 self.rate,
                                 self.length,
                                 meta.program,
                                 meta.object_count,
+                                remove_bed_placeholders=self.remove_bed_placeholders,
                             )
+                            raw_adm_sources = adm.sources
                     elif len(joc_objects(meta)) != renderer.current.shape[0]:
                         raise AtmosError(t("atmos.object_count_changed", frame=k))
-                    if adm is not None and (
-                        meta.object_count != adm.objects
-                        or meta.program.bed_labels != adm.program.bed_labels
+                    if self.adm_path is not None and first_program is not None and (
+                        meta.object_count != first_objects
+                        or meta.program.bed_labels != first_program.bed_labels
                     ):
                         raise AtmosError(t("atmos.adm_layout_changed"))
                     if starts_chunk:
@@ -216,14 +274,29 @@ class _Decode:
                     tracer.metadata(k, meta)
                     renderer.advance(meta, FRAME)
                     # a stretch can start once its last frame and the one after are read
+                    extract_feat = bool(
+                        do_restore and first_program is not None and first_program.dynamic_objects > 0
+                    )
                     while done < len(snapshots) and min(self.chunks[done][1], total - 1) <= k:
                         pending.append(
                             pool.apply_async(
                                 decode_chunk,
-                                (self._job(done, snapshots[done], oamd_payloads, joc_payloads,
-                                           Path(scratch), adm),),
+                                (
+                                    self._job(
+                                        done,
+                                        snapshots[done],
+                                        oamd_payloads,
+                                        joc_payloads,
+                                        Path(scratch),
+                                        adm,
+                                        raw_adm_path,
+                                        raw_adm_sources,
+                                        extract_feat,
+                                        restore_cfg.hop_samples,
+                                    ),
+                                ),
                             )
-                        )  # fmt: skip
+                        )
                         done += 1
                     if k % 64 == 0:
                         progress(k)
@@ -256,6 +329,85 @@ class _Decode:
                 clipped = sum(r.clipped for r in results)
                 if clipped:
                     logger.warning("adm: %d samples clipped at full scale", clipped)
+            if (
+                do_restore
+                and first_program is not None
+                and first_program.dynamic_objects > 0
+                and results
+                and all(r.features is not None for r in results)
+            ):
+                bark = np.concatenate([r.features["bark_power"] for r in results], axis=1)  # type: ignore[index]
+                rms = np.concatenate([r.features["rms"] for r in results], axis=1)  # type: ignore[index]
+                peak = np.concatenate([r.features["peak"] for r in results], axis=1)  # type: ignore[index]
+                flat = np.concatenate([r.features["flatness_3"] for r in results], axis=1)  # type: ignore[index]
+                harm = np.concatenate([r.features["harmonicity"] for r in results], axis=1)  # type: ignore[index]
+                fp = build_fingerprints(bark, flat, harm)
+                n_dyn_raw, t_len = rms.shape
+                hop = restore_cfg.hop_samples
+                times = (np.arange(t_len, dtype=np.float64) * hop + 0.5 * hop - self.first) / self.rate
+                dyn_indices = sorted(tracer.keys)
+                pos = np.empty((n_dyn_raw, t_len, 3), dtype=np.float32)
+                active = np.empty((n_dyn_raw, t_len), dtype=bool)
+                for slot_i, meta_idx in enumerate(dyn_indices):
+                    pos[slot_i], active[slot_i] = eval_keys_on_grid(tracer.keys[meta_idx], times)
+                feats = SlotFeatures(
+                    sample_rate=float(self.rate),
+                    hop_samples=hop,
+                    hop_start_sample=-self.first,
+                    bark_power=bark,
+                    fingerprint=fp,
+                    rms=rms,
+                    peak=peak,
+                    pos=pos,
+                    active=active,
+                )
+                plan = plan_object_restoration(feats, restore_cfg)
+                logger.info(
+                    "atmos: restored %d -> %d dynamic objects (%d splits)",
+                    plan.input_objects,
+                    len(plan.objects),
+                    plan.splits_applied,
+                )
+                exact_levels = None
+                if raw_adm_path is not None and self.adm_path is not None:
+                    raw_mm = np.memmap(
+                        raw_adm_path,
+                        dtype=np.float32,
+                        mode="r",
+                        shape=(len(raw_adm_sources), self.length),
+                    )
+                    n_static = len(raw_adm_sources) - n_dyn_raw
+                    raw_bed_indices = [i for i in range(n_static) if raw_adm_sources[i] is not None]
+                    raw_dyn_indices = list(range(n_static, len(raw_adm_sources)))
+                    exact_levels, _ = write_restored_adm(
+                        raw_mm,
+                        raw_bed_indices,
+                        (),
+                        raw_dyn_indices,
+                        plan,
+                        first_program,
+                        self.adm_path,
+                        self.rate,
+                        self.length,
+                        restore_cfg,
+                        syncframe_samples=FRAME,
+                        first_sample=self.first,
+                        n_syncframes=total,
+                        token=token,
+                        remove_bed_placeholders=self.remove_bed_placeholders,
+                    )
+                    del raw_mm
+                on_fraction(1.0)
+                return build_restored_trace(
+                    plan,
+                    first_program,
+                    self.layout,
+                    total,
+                    FRAME,
+                    self.first,
+                    self.length,
+                    exact_levels=exact_levels,
+                )
         on_fraction(1.0)
         return tracer.result([m for r in results for m in r.measured])
 
@@ -267,6 +419,10 @@ class _Decode:
         joc_payloads: list[bytes],
         scratch: Path,
         adm: AdmFile | None,
+        raw_adm: Path | None,
+        raw_adm_sources: tuple[int | None, ...],
+        extract_features: bool,
+        feature_hop: int,
     ) -> ChunkJob:
         start, stop = self.chunks[index]
         joc_from = max(0, start - 2)
@@ -286,7 +442,10 @@ class _Decode:
             layout=self.layout,
             speakers=self.speakers.backing_path if self.speakers is not None else None,
             adm=scratch / f"adm-{index}.pcm" if adm is not None else None,
-            adm_sources=adm.sources if adm is not None else (),
+            adm_sources=adm.sources if adm is not None else raw_adm_sources,
+            raw_adm=raw_adm,
+            extract_features=extract_features,
+            feature_hop=feature_hop,
         )
 
     @contextmanager
@@ -306,7 +465,7 @@ class _Decode:
 _TRACE_SUFFIX = ".trace.pickle"
 _KEEP_TRACES = 16
 # bumped whenever a layout's shares or the decoded objects change, so older traces go unread
-_TRACE_VERSION = 6
+_TRACE_VERSION = 7
 
 
 def _trace_path(source: Path, layout: SpeakerLayout) -> Path:

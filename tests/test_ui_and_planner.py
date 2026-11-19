@@ -14,7 +14,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
 
 import numpy as np
-from PySide6.QtCore import QObject, QPoint, QPointF, Qt, Signal
+from PySide6.QtCore import QObject, QPoint, QPointF, QSettings, Qt, Signal
 from PySide6.QtGui import QWheelEvent
 from PySide6.QtMultimedia import QAudio
 from PySide6.QtTest import QSignalSpy, QTest
@@ -29,7 +29,7 @@ from soundweaver.core.planning import dir_problem
 from soundweaver.core.playback import ObjectSnapshot, PlaybackEngine
 from soundweaver.core.playback_buffer import BLOCK, PlaybackBuffer
 from soundweaver.core.playback_source import PlaybackSource
-from soundweaver.core.project import Project
+from soundweaver.core.project import PlanContext, Project
 from soundweaver.core.speakers import BY_NAME
 from soundweaver.core.task import Step
 from soundweaver.features.batch.planner import build_batch_plan, find_target_clash
@@ -435,6 +435,40 @@ class UiAndPlannerTests(unittest.TestCase):
         finally:
             release.set()
             engine.shutdown()
+
+    def test_compact_adm_export_option_in_single_and_batch_plans(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings = QSettings(str(root / "settings.ini"), QSettings.Format.IniFormat)
+            panel = StemsPanel(settings)
+            audio = root / "track.m4a"
+            audio.touch()
+            project = Project(
+                audio=audio, output_dir=root, info=AudioInfo(6, 3.0, atmos=True)
+            )
+            ctx = PlanContext(project)
+            panel.refresh(project)
+            self.assertFalse(panel.remove_bed_placeholders.isChecked())
+            self.assertFalse(panel.remove_bed_placeholders.isEnabled())
+            panel.adm.setChecked(True)
+            self.assertTrue(panel.remove_bed_placeholders.isEnabled())
+            self.assertEqual(panel.plan(ctx)[0].targets, (root / "track_adm.wav",))
+
+            panel.remove_bed_placeholders.setChecked(True)
+            target = root / "track_adm_compact.wav"
+            batch = build_batch_plan([panel], [project], None, is_album=False)
+            for step in (panel.plan(ctx)[0], batch.steps[0]):
+                self.assertEqual(step.targets, (target,))
+                with patch("soundweaver.features.stems.service.decode_atmos") as decode:
+                    decode.return_value.speakers = None
+                    step.run(CancellationToken(), lambda *_: None)
+                    self.assertTrue(decode.call_args.kwargs["remove_bed_placeholders"])
+                    self.assertEqual(decode.call_args.kwargs["adm"], target)
+
+            panel.save()
+            restored = StemsPanel(settings)
+            restored.restore()
+            self.assertTrue(restored.remove_bed_placeholders.isChecked())
 
     def test_batch_planner_and_inspector_dialog(self) -> None:
         win = MainWindow()
