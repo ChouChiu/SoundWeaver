@@ -26,7 +26,6 @@ from . import joc
 from .adm import adm_block, pcm24
 from .bitstream import BitstreamError
 from .oamd import Frame, OamdDecoder, OamdState
-from .obj_restore import HopFeatureExtractor
 from .qmf import BANDS, DELAY, LENGTH, Analysis, Synthesis
 from .render import Renderer, RendererState, joc_objects
 from .sinks import RenderedFrame, container_span, speaker_feeds
@@ -73,16 +72,12 @@ class ChunkJob:
     speakers: Path | None  # planar float32 (speakers, container samples) buffer to fill
     adm: Path | None  # where this stretch's ADM PCM goes
     adm_sources: tuple[int | None, ...]  # the OAMD object on each ADM track; None is silence
-    raw_adm: Path | None = None  # planar float32 (adm_tracks, container samples) for object restoration
-    extract_features: bool = False
-    feature_hop: int = 512
 
 
 @dataclass(frozen=True, slots=True)
 class ChunkResult:
     measured: list[Measure]  # one entry per rendered frame
     clipped: int  # ADM samples clipped at full scale
-    features: dict[str, np.ndarray] | None = None
 
 
 class _Chunk:
@@ -106,13 +101,6 @@ class _Chunk:
             else None
         )
         self.adm = job.adm.open("wb") if job.adm is not None else None
-        self.raw_adm = (
-            np.memmap(job.raw_adm, dtype=np.float32, mode="r+").reshape(len(job.adm_sources), -1)
-            if job.raw_adm is not None
-            else None
-        )
-        self._extractor: HopFeatureExtractor | None = None
-        self._feature_chunks: list[dict[str, np.ndarray]] = []
 
     def params(self, k: int) -> joc.JocFrame:
         try:
@@ -152,17 +140,7 @@ class _Chunk:
             self.adm.close()
         if self.speakers is not None:
             self.speakers.flush()
-        if self.raw_adm is not None:
-            self.raw_adm.flush()
-        features = (
-            {
-                key: np.concatenate([c[key] for c in self._feature_chunks], axis=1)
-                for key in self._feature_chunks[0]
-            }
-            if self._feature_chunks
-            else None
-        )
-        return ChunkResult(self.measured, self.clipped, features)
+        return ChunkResult(self.measured, self.clipped)
 
     def warm_up(self, k: int) -> None:
         """Put every filter bank where a run from the start would have it after frame `k`."""
@@ -204,23 +182,6 @@ class _Chunk:
         )  # fmt: skip
         self.objects = self.objects[:, FRAME:]
         self.measured.append(measure(f))
-        if self.job.extract_features:
-            anchored = meta.program.anchored
-            dyn_rows = [o for o, index in enumerate(joc_objects(meta)) if index >= anchored]
-            if dyn_rows:
-                if self._extractor is None:
-                    self._extractor = HopFeatureExtractor(
-                        len(dyn_rows),
-                        float(self.pcm.samplerate),
-                        hop_samples=self.job.feature_hop,
-                    )
-                pick = (
-                    slice(dyn_rows[0], dyn_rows[-1] + 1)
-                    if len(dyn_rows) == dyn_rows[-1] - dyn_rows[0] + 1
-                    else dyn_rows
-                )
-                dyn_audio = f.essence[pick] * f.envelope[pick]
-                self._feature_chunks.append(self._extractor.process(dyn_audio))
         if f.span.start == f.span.stop:
             return
         if self.speakers is not None:
@@ -228,9 +189,6 @@ class _Chunk:
             self.speakers[:, at : at + f.span.stop - f.span.start] = speaker_feeds(
                 f, job.layout.index.get("LFE")
             )
-        if self.raw_adm is not None:
-            at = k * FRAME + f.span.start - job.first
-            self.raw_adm[:, at : at + f.span.stop - f.span.start] = adm_block(f, job.adm_sources)
         if self.adm is not None:
             data, clipped = pcm24(adm_block(f, job.adm_sources))
             self.adm.write(data)
