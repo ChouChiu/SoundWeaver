@@ -4,6 +4,8 @@
 
 import * as THREE from "three";
 
+export const SPATIAL_TINT = 0x5c7a99;
+
 export const FLOOR_DB = -60;
 export const TOP_DB = -10;
 
@@ -20,25 +22,39 @@ export function dbToNorm(db: number, floorDb = FLOOR_DB, topDb = TOP_DB): number
 	return Math.max(0, Math.min(1, (db - floorDb) / (topDb - floorDb)));
 }
 
-/** Crisp outlined sprite texture for 3D labels (object IDs, speaker names). */
-export function makeTextSprite(text: string, height: number): THREE.Sprite {
+export function makeTextTexture(text: string, style: "outlined" | "compact" = "outlined"): THREE.CanvasTexture {
 	const c = document.createElement("canvas");
 	c.width = 96;
 	c.height = 64;
 	const ctx = c.getContext("2d")!;
-	ctx.font = "bold 28px sans-serif";
 	ctx.textAlign = "center";
-	ctx.textBaseline = "middle";
-	ctx.lineWidth = 5;
-	ctx.strokeStyle = "rgba(0,0,0,0.88)";
-	ctx.strokeText(text, c.width / 2, c.height / 2);
-	ctx.fillStyle = "#ffffff";
-	ctx.fillText(text, c.width / 2, c.height / 2);
+	if (style === "compact") {
+		ctx.font = "32px system-ui, sans-serif";
+		ctx.fillStyle = "#e0e2e6";
+		ctx.textBaseline = "alphabetic";
+		const { actualBoundingBoxAscent, actualBoundingBoxDescent } = ctx.measureText(text);
+		const baseline = (c.height + actualBoundingBoxAscent - actualBoundingBoxDescent) / 2;
+		ctx.fillText(text, c.width / 2, baseline);
+	} else {
+		ctx.font = "bold 28px sans-serif";
+		ctx.textBaseline = "middle";
+		ctx.lineWidth = 5;
+		ctx.strokeStyle = "rgba(0,0,0,0.88)";
+		ctx.strokeText(text, c.width / 2, c.height / 2);
+		ctx.fillStyle = "#ffffff";
+		ctx.fillText(text, c.width / 2, c.height / 2);
+	}
 	const tex = new THREE.CanvasTexture(c);
 	tex.colorSpace = THREE.SRGBColorSpace;
+	return tex;
+}
+
+/** Crisp outlined sprite for 3D labels (object IDs, speaker names). */
+export function makeTextSprite(text: string, height: number): THREE.Sprite {
+	const tex = makeTextTexture(text);
 	const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
 		map: tex, transparent: true, depthTest: false,
 	}));
-	sprite.scale.set(height * c.width / c.height, height, 1);
+	sprite.scale.set(height * tex.image.width / tex.image.height, height, 1);
 	return sprite;
 }

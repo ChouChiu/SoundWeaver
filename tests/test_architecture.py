@@ -54,8 +54,6 @@ class ArchitectureTests(unittest.TestCase):
         features_dir = SRC / "features"
         for py in features_dir.rglob("*.py"):
             rel = py.relative_to(features_dir)
-            if rel.parts[0] == "registry.py":
-                continue
             own_feature = rel.parts[0]
             for mod in _imported_modules(py):
                 if mod.startswith("soundweaver.features."):
@@ -64,10 +62,34 @@ class ArchitectureTests(unittest.TestCase):
                         violations.append(f"{py.relative_to(ROOT)} -> {mod}")
         self.assertEqual(violations, [])
 
+    def test_feature_services_and_planners_are_qt_free(self) -> None:
+        paths = [
+            py
+            for name in ("service.py", "planner.py")
+            for py in (SRC / "features").rglob(name)
+        ]
+        violations = [
+            f"{py.relative_to(ROOT)} -> {module}"
+            for py in paths
+            for module in _imported_modules(py)
+            if module.startswith(("PySide6", "qfluentwidgets", "soundweaver.ui"))
+        ]
+        self.assertEqual(violations, [])
+
     def test_native_binaries_staged(self) -> None:
         bin_dir = SRC / "bin"
-        for name in ("vivid", "vivid_encode", "vivid_binaural", "ia_mpeghd_testbench"):
-            p = bin_dir / name
+        engines = (
+            "soundweaver_av3a", "soundweaver_mpegh",
+            "vivid_encode", "ia_mpeghd_testbench",
+        )
+        present = all(
+            (bin_dir / (name + (".exe" if os.name == "nt" else ""))).is_file()
+            for name in engines
+        )
+        if not present:
+            self.skipTest("native binaries not built; run scripts/build_native.py")
+        for name in engines:
+            p = bin_dir / (name + (".exe" if os.name == "nt" else ""))
             self.assertTrue(p.is_file(), f"Missing native binary: {p}")
             self.assertTrue(os.access(p, os.X_OK), f"Binary not executable: {p}")
         self.assertTrue((bin_dir / "model.bin").is_file())

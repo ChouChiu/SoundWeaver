@@ -90,6 +90,6 @@ class _Task(QRunnable):
     def run(self) -> None:
         try:
             result = self._call()
-        except Exception as error:  # noqa: BLE001 - handed to the caller, who reports it
+        except Exception as error:
             result = error
         self._deliver(result)

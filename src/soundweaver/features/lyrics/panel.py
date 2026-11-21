@@ -48,7 +48,7 @@ class LyricsPanel(FeaturePanel):
         layout.addWidget(
             widgets.section(
                 t("section.video"),
-                widgets.two_column_grid([
+                widgets.SettingsGrid([
                     (t("label.size"), widgets.size_row(self.width_spin, self.height_spin), t("label.fps"), self.fps),
                 ]),
             )
@@ -56,7 +56,7 @@ class LyricsPanel(FeaturePanel):
         layout.addWidget(
             widgets.section(
                 t("section.typography"),
-                widgets.two_column_grid([
+                widgets.SettingsGrid([
                     (t("label.font_size"), self.font_size, t("label.fade"), self.fade),
                     (t("label.translation_opacity"), self.translation, None, None),
                     (t("label.content"), self.filter_credits, None, None),

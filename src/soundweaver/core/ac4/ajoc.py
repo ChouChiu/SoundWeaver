@@ -374,7 +374,7 @@ class Reconstructor:
                 # a new ramp starts here and takes its first step in this slot
                 length = frame.points[dp][1]
                 self.steps = tuple(
-                    (t - c) / length for t, c in zip(targets[dp], (self.dry, self.wet, self.pre))
+                    (t - c) / length for t, c in zip(targets[dp], (self.dry, self.wet, self.pre), strict=False)
                 )
                 self.ramp.remaining = length
                 self.final = targets[dp]
@@ -388,7 +388,7 @@ class Reconstructor:
                 if self.ramp.remaining == 0:
                     current = tuple(m.copy() for m in self.final)
                 else:
-                    current = tuple(c + step * ramp for c, step in zip(current, self.steps))
+                    current = tuple(c + step * ramp for c, step in zip(current, self.steps, strict=False))
                 self.dry, self.wet, self.pre = current
             if ts + ramp < stop:
                 runs.append((ts + ramp, stop, current, None))

@@ -1,10 +1,7 @@
 cmake_minimum_required (VERSION 3.8)
 
-project (MPEG-H_Decoder VERSION 1.6)
+project (MPEG-H_Decoder VERSION 1.6 LANGUAGES C)
 
-set(CMAKE_CXX_STANDARD 11)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_SUPPRESS_REGENERATION true)
 
 option(LC_LEVEL_4 "Enables low complexity level 4 decoder" OFF)
@@ -33,6 +30,7 @@ add_library (
 	decoder/impd_drc_static_payload.c
 	decoder/impeghd_3d_vec_basic_ops.c
 	decoder/impeghd_api.c
+	decoder/soundweaver_state.c
 	decoder/impeghd_binaural.c
 	decoder/impeghd_binaural_filter_design.c
 	decoder/impeghd_binaural_renderer.c

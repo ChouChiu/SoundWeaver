@@ -190,26 +190,25 @@ class SettingsPage(QWidget):
         group.addSettingCard(card)
 
         engines = available_engines()
-        av3a_ok = engines["vivid"].available
+        av3a_ok = engines["av3a"].available
         enc_ok = engines["vivid_encode"].available
-        bin_ok = engines["vivid_binaural"].available
         mpegh_ok = engines["mpegh"].available
         spatial_ok = av3a_ok and mpegh_ok
-        summary_parts = [
-            f"AV3A: {'OK' if av3a_ok else '-'}",
-            f"Encode: {'OK' if enc_ok else '-'}",
-            f"Binaural: {'OK' if bin_ok else '-'}",
-            f"360RA: {'OK' if mpegh_ok else '-'}",
-        ]
+        ready, missing = t("settings.status_ready"), t("settings.state_missing")
         spatial_card = SettingCard(
             FluentIcon.SPEAKERS,
             t("settings.spatial_engines"),
-            " · ".join(summary_parts),
+            t(
+                "settings.engines_summary",
+                av3a=ready if av3a_ok else missing,
+                encode=ready if enc_ok else missing,
+                mpegh=ready if mpegh_ok else missing,
+            ),
             group,
         )
         spatial_badge = (
             InfoBadge.success(t("settings.status_ready"), parent=spatial_card)
-            if (spatial_ok and enc_ok and bin_ok)
+            if (spatial_ok and enc_ok)
             else InfoBadge.warning(t("settings.status_partial"), parent=spatial_card)
         )
         self._trailing(spatial_card, spatial_badge)

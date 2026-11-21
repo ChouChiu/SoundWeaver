@@ -61,7 +61,7 @@ class WaveformPanel(FeaturePanel):
         layout.addWidget(
             widgets.section(
                 t("section.video"),
-                widgets.two_column_grid([
+                widgets.SettingsGrid([
                     (t("label.size"), widgets.size_row(self.screen_w, self.screen_h), t("label.fps"), self.fps),
                     (t("label.scroll_speed"), self.pps, t("label.encoder"), self.encoder),
                 ]),
@@ -70,7 +70,7 @@ class WaveformPanel(FeaturePanel):
         layout.addWidget(
             widgets.section(
                 t("section.color_style"),
-                widgets.two_column_grid([
+                widgets.SettingsGrid([
                     (t("label.background"), self.background, t("label.waveform"), self.wave_color),
                     (t("label.playhead"), self.playhead, t("label.unplayed_opacity"), self.unplayed),
                 ]),

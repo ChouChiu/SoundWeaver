@@ -93,7 +93,7 @@ class SoundfieldPanel(FeaturePanel):
         layout.addWidget(
             widgets.section(
                 t("section.frame_camera"),
-                widgets.two_column_grid([
+                widgets.SettingsGrid([
                     (t("label.size"), widgets.size_row(self.width_spin, self.height_spin), t("label.fps"), self.fps),
                     (t("label.view"), self.view, None, None),
                     (t("label.head_model"), head_row, None, None),
@@ -103,7 +103,7 @@ class SoundfieldPanel(FeaturePanel):
         layout.addWidget(
             widgets.section(
                 t("section.space_objects"),
-                widgets.two_column_grid([
+                widgets.SettingsGrid([
                     (t("label.object_size"), self.object_scale, t("label.head_size"), self.head_scale),
                     (t("label.mute_gate"), self.gate, t("label.fade"), self.fade),
                     (t("label.outside_opacity"), self.dim, t("label.level_response"), self.level_response),

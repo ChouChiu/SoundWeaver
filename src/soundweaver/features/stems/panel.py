@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QSettings
+from dataclasses import dataclass
+
+from PySide6.QtCore import QSettings, QSignalBlocker
 from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QVBoxLayout
 from qfluentwidgets import CheckBox, CompactDoubleSpinBox, PushButton
 
+from soundweaver.core.audio import AudioInfo
 from soundweaver.core.codecs import av3a, mpegh
 from soundweaver.core.i18n import t
 from soundweaver.core.project import ATMOS_LAYOUT_KEY, PlanContext, Project
@@ -13,11 +16,41 @@ from soundweaver.core.speakers import DEFAULT_ATMOS, LAYOUTS, atmos_layout
 from soundweaver.core.stems import StemKind
 from soundweaver.core.task import Step
 from soundweaver.features.stems.pipeline import CROSSOVER_RANGE, DEFAULT_CROSSOVER_HZ
-from soundweaver.features.stems.service import adm_target, av3a_target, binaural_target, split_step
+from soundweaver.features.stems.service import adm_target, av3a_target, split_step
 from soundweaver.ui import fluent, widgets
 from soundweaver.ui.feature import FeaturePanel
 
 COLUMNS = 3
+
+
+@dataclass(frozen=True, slots=True)
+class SplitSelection:
+    kinds: tuple[StemKind, ...]
+    adm: bool
+    multichannel: str
+    mono: tuple[str, ...]
+    av3a: bool
+
+    def has_outputs(self) -> bool:
+        return bool(
+            self.kinds or self.adm or self.multichannel != "none"
+            or self.mono or self.av3a
+        )
+
+
+def _adm_supported(info: AudioInfo | None) -> bool:
+    """ADM can describe a Dolby Atmos track's objects and a 360RA track's objects alike."""
+    source = info is not None and (info.atmos or info.is_mpegh)
+    return source and not info.is_av3a and not info.adm_bwf
+
+
+def _av3a_supported(project: Project) -> bool:
+    info = project.info
+    if info is None:
+        return False
+    layout = project.speakers
+    channels = len(layout.channels) if layout else info.channels
+    return (info.hoa_order > 0 or channels in (1, 2, 4, 6, 8, 10, 12)) and av3a.find_encoder() is not None
 
 
 class StemsPanel(FeaturePanel):
@@ -46,6 +79,7 @@ class StemsPanel(FeaturePanel):
         self.crossover.setSingleStep(10)
         self.crossover.setSuffix(" Hz")
         self.crossover.setValue(DEFAULT_CROSSOVER_HZ)
+        widgets.fixed_width(self.crossover)
         self.crossover.setToolTip(t("stems.crossover_tip"))
         self.remember("crossover", self.crossover)
         self.adm = self.check("stem_adm", t("stems.adm_text"), False)
@@ -55,15 +89,10 @@ class StemsPanel(FeaturePanel):
             False,
             t("stems.adm_remove_bed_placeholders_tip"),
         )
-        self._adm_project: Project | None = None
+        self._project = Project()
         self.remove_bed_placeholders.setEnabled(False)
         self.adm.toggled.connect(self._refresh_adm_options)
         self.remove_bed_placeholders.toggled.connect(self._refresh_adm_options)
-        adm_options = QVBoxLayout()
-        adm_options.addWidget(self.adm)
-        adm_options.addWidget(self.remove_bed_placeholders)
-        self.binaural = self.check("stem_binaural", t("stems.binaural_text"), False)
-        self.binaural.setToolTip(t("stems.binaural_tip"))
         self.av3a_encode = self.check("stem_av3a_encode", t("stems.av3a_text"), False)
         self.av3a_encode.setToolTip(t("stems.av3a_tip"))
         self.multichannel_box = self.combo(
@@ -125,8 +154,10 @@ class StemsPanel(FeaturePanel):
                         (t("label.cicp_layout"), self.cicp_box),
                         (t("label.crossover"), self.crossover),
                         (t("label.multichannel_export"), self.multichannel_box),
-                        (t("label.atmos_metadata"), adm_options),
-                        (t("label.binaural_export"), self.binaural),
+                        # the ADM switches are one setting split over two rows, so the
+                        # label lines up with the first checkbox instead of the stack's middle
+                        (t("label.atmos_metadata"), self.adm),
+                        ("", self.remove_bed_placeholders),
                         (t("label.av3a_export"), self.av3a_encode),
                     ]
                 ),
@@ -141,9 +172,8 @@ class StemsPanel(FeaturePanel):
 
     def _check_all(self, on: bool) -> None:
         for box in self.checks.values():
-            box.blockSignals(True)
-            box.setChecked(on)
-            box.blockSignals(False)
+            with QSignalBlocker(box):
+                box.setChecked(on)
         self._remember()
 
     def _remember(self) -> None:
@@ -157,71 +187,53 @@ class StemsPanel(FeaturePanel):
         self.changed.emit()
 
     def _select_mono(self, mode: str) -> None:
-        layout = atmos_layout(str(self.layout_box.currentData() or DEFAULT_ATMOS.name))
-        heights = set(layout.heights)
-        for ch, box in self.mono_checks.items():
-            box.blockSignals(True)
-            if mode == "all":
-                box.setChecked(True)
-            elif mode == "none":
-                box.setChecked(False)
-            elif mode == "ear":
-                box.setChecked(ch not in heights)
-            elif mode == "top":
-                box.setChecked(ch in heights)
-            box.blockSignals(False)
+        speakers = self._project.speakers
+        heights = set(speakers.heights) if speakers else set()
+        channels = self.mono_checks.keys()
+        selected = {
+            "all": channels,
+            "none": (),
+            "ear": channels - heights,
+            "top": channels & heights,
+        }[mode]
+        for channel, box in self.mono_checks.items():
+            with QSignalBlocker(box):
+                box.setChecked(channel in selected)
         self._remember_mono()
 
-    def _chosen_mono(self, project: Project) -> tuple[str, ...]:
-        if project.speakers is None or not self.enabled:
-            return ()
-        return tuple(ch for ch in project.speakers.channels if ch in self._mono_selected)
-
-    def _multichannel(self) -> str:
-        return str(self.multichannel_box.currentData() or "none") if self.enabled else "none"
-
     def _cicp(self) -> int:
-        return int(self.cicp_box.currentData() or 13)
-
-    def _binaural(self, ctx: PlanContext) -> bool:
-        info = ctx.project.info
-        return (
-            self.enabled
-            and self.binaural.isChecked()
-            and info is not None
-            and av3a.find_binaural_renderer() is not None
-            and (info.atmos or info.adm_bwf or info.channels >= 4 or info.is_mpegh)
-        )
-
-    def _av3a_encode(self, ctx: PlanContext) -> bool:
-        info = ctx.project.info
-        if not self.enabled or not self.av3a_encode.isChecked() or info is None:
-            return False
-        if av3a.find_encoder() is None:
-            return False
-        ch = info.channels if info.hoa_order > 0 else (len(ctx.project.speakers.channels) if ctx.project.speakers else info.channels)
-        return info.hoa_order > 0 or ch in (1, 2, 4, 6, 8, 10, 12)
+        return self.cicp_box.currentData()
 
     def _chosen(self, project: Project) -> set[str]:
         return {track.key for track in project.stems if track.key not in self._skip}
 
-    def _adm(self, ctx: PlanContext) -> bool:
-        info = ctx.project.info
-        return (
-            self.enabled
-            and self.adm.isChecked()
-            and info is not None
-            and info.atmos
-            and not info.is_av3a
-            and not info.adm_bwf
+    def _selection(self, ctx: PlanContext) -> SplitSelection:
+        project = ctx.project
+        chosen = self._chosen(project) if self.enabled else set()
+        kinds = ctx.required_stems | chosen
+        layout = project.speakers
+        mono = (
+            tuple(channel for channel in layout.channels if channel in self._mono_selected)
+            if self.enabled and layout else ()
+        )
+        return SplitSelection(
+            kinds=tuple(StemKind(track.key) for track in project.stems if track.key in kinds),
+            adm=self.enabled and self.adm.isChecked() and _adm_supported(project.info),
+            multichannel=self.multichannel_box.currentData() if self.enabled else "none",
+            mono=mono,
+            av3a=self.enabled and self.av3a_encode.isChecked() and _av3a_supported(project),
         )
 
     def _refresh_adm_options(self) -> None:
-        self.remove_bed_placeholders.setEnabled(self.adm.isEnabled() and self.adm.isChecked())
-        project = self._adm_project
+        # Only the Dolby writer pads a bed; 360RA writes the objects the stream carries.
+        info = self._project.info
+        padding = bool(info is not None and info.atmos)
+        self.remove_bed_placeholders.setEnabled(
+            padding and self.adm.isEnabled() and self.adm.isChecked()
+        )
+        project = self._project
         exists = bool(
-            project
-            and project.audio
+            project.audio
             and project.output_dir
             and adm_target(
                 project.output_dir, project.audio,
@@ -230,17 +242,10 @@ class StemsPanel(FeaturePanel):
         )
         self.adm.setText(t("stems.adm_text") + (t("stems.existing_suffix") if exists else ""))
 
-    def _kinds(self, ctx: PlanContext) -> list[str]:
-        """Stems the split must write: ticked outputs plus what other outputs need."""
-        kinds = set(ctx.required_stems)
-        if self.enabled:
-            kinds |= self._chosen(ctx.project)
-        return [track.key for track in ctx.project.stems if track.key in kinds]
-
-    def _implicit(self, ctx: PlanContext) -> bool:
-        """The split runs only because another output needs a stem that is not there yet."""
-        chosen = self._chosen(ctx.project) or self._adm(ctx)
-        return bool(self._kinds(ctx)) and not (self.enabled and chosen)
+    def _implicit(self, ctx: PlanContext, selection: SplitSelection) -> bool:
+        return bool(selection.kinds) and not (
+            self.enabled and (self._chosen(ctx.project) or selection.adm)
+        )
 
     # ---- hooks -----------------------------------------------------------------------
 
@@ -252,8 +257,8 @@ class StemsPanel(FeaturePanel):
             box.deleteLater()
         self.checks = {}
         info = project.info
-        atmos = info is not None and info.atmos and not info.is_av3a and not info.adm_bwf
-        self._adm_project = project
+        atmos = _adm_supported(info)
+        self._project = project
         self.adm.setEnabled(atmos)
         self._refresh_adm_options()
         self.adm.setToolTip(t("stems.adm_tip") if atmos else t("stems.adm_disabled_tip"))
@@ -261,17 +266,7 @@ class StemsPanel(FeaturePanel):
         is_mpegh = project.info is not None and project.info.is_mpegh
         self.cicp_box.setEnabled(is_mpegh)
 
-        has_binaural = av3a.find_binaural_renderer() is not None and (
-            project.info is not None and (project.info.atmos or project.info.adm_bwf or project.info.channels >= 4 or project.info.is_mpegh)
-        )
-        self.binaural.setEnabled(has_binaural)
-        bin_exists = bool(
-            project.audio and project.output_dir and binaural_target(project.output_dir, project.audio).is_file()
-        )
-        self.binaural.setText(t("stems.binaural_text") + (t("stems.existing_suffix") if bin_exists else ""))
-
-        has_enc = av3a.find_encoder() is not None and project.info is not None
-        self.av3a_encode.setEnabled(has_enc)
+        self.av3a_encode.setEnabled(_av3a_supported(project))
         av3a_exists = bool(
             project.audio and project.output_dir and av3a_target(project.output_dir, project.audio).is_file()
         )
@@ -300,7 +295,8 @@ class StemsPanel(FeaturePanel):
             self.mono_grid.removeWidget(box)
             box.deleteLater()
         self.mono_checks = {}
-        channels = project.speakers.channels if project.speakers is not None else ()
+        speakers = project.speakers
+        channels = speakers.channels if speakers is not None else ()
         for i, ch in enumerate(channels):
             box = CheckBox(ch)
             box.setChecked(ch in self._mono_selected)
@@ -312,75 +308,60 @@ class StemsPanel(FeaturePanel):
             b.setEnabled(has_ch)
 
     def is_active(self, ctx: PlanContext) -> bool:
-        return (
-            bool(self._kinds(ctx))
-            or self._adm(ctx)
-            or self._multichannel() != "none"
-            or bool(self._chosen_mono(ctx.project))
-            or self._binaural(ctx)
-            or self._av3a_encode(ctx)
-        )
+        return self._selection(ctx).has_outputs()
 
     def problem(self, ctx: PlanContext) -> str | None:
-        if (
-            ctx.project.info is not None
-            and not self._chosen(ctx.project)
-            and not self._adm(ctx)
-            and self._multichannel() == "none"
-            and not self._chosen_mono(ctx.project)
-            and not self._binaural(ctx)
-            and not self._av3a_encode(ctx)
-        ):
+        if ctx.project.info is not None and not self._selection(ctx).has_outputs():
             return t("stems.prompt_pick_one")
         return None
 
     def summary(self, ctx: PlanContext) -> str | None:
-        kinds = self._kinds(ctx)
-        parts = [t("stems.summary", count=len(kinds))] if kinds else []
-        if self._adm(ctx):
+        selection = self._selection(ctx)
+        parts = []
+        if selection.kinds:
+            parts.append(t("stems.summary", count=len(selection.kinds)))
+        if selection.adm:
             parts.append("ADM BWF")
-        mc = self._multichannel()
-        if mc != "none":
-            parts.append(mc.upper())
-        mono = self._chosen_mono(ctx.project)
-        if mono:
-            parts.append(t("stems.mono_channels_count", count=len(mono)))
-        if self._binaural(ctx):
-            parts.append("Binaural")
-        if self._av3a_encode(ctx):
+        if selection.multichannel != "none":
+            parts.append(selection.multichannel.upper())
+        if selection.mono:
+            parts.append(t("stems.mono_channels_count", count=len(selection.mono)))
+        if selection.av3a:
             parts.append("AV3A")
         if not parts:
             return None
         sep = t("common.list_sep")
-        note = t("stems.needed_by", by=sep.join(ctx.requested_by)) if self._implicit(ctx) else ""
-        return sep.join(parts) + note
+        summary = sep.join(parts)
+        if self._implicit(ctx, selection):
+            summary += t("stems.needed_by", by=sep.join(ctx.requested_by))
+        return summary
 
     def notes(self, ctx: PlanContext) -> list[str]:
-        return [t("stems.implicit_note")] if self._implicit(ctx) else []
+        return [t("stems.implicit_note")] if self._implicit(ctx, self._selection(ctx)) else []
 
     def plan(self, ctx: PlanContext) -> list[Step]:
         project = ctx.project
         audio, out, info = project.audio, project.output_dir, project.info
         if audio is None or out is None or info is None:
             return []
-        export_adm = self._adm(ctx)
-        compact_adm = export_adm and self.remove_bed_placeholders.isChecked()
-        adm = adm_target(out, audio, remove_bed_placeholders=compact_adm) if export_adm else None
-        kinds = [StemKind(k) for k in self._kinds(ctx)]
-        mc = self._multichannel()
-        mono = self._chosen_mono(project)
-        binaural = self._binaural(ctx)
-        av3a_enc = self._av3a_encode(ctx)
-        if not kinds and adm is None and mc == "none" and not mono and not binaural and not av3a_enc:
+        selection = self._selection(ctx)
+        if not selection.has_outputs():
             return []
+        compact = (
+            selection.adm and info.atmos and self.remove_bed_placeholders.isChecked()
+        )
+        # The container's own length: a 360RA master follows it where the decoder pads.
+        length = round(info.duration * info.sample_rate) or None if info.duration else None
+        adm = adm_target(out, audio, remove_bed_placeholders=compact) if selection.adm else None
         return [
             split_step(
-                audio, out, kinds, self.crossover.value(),
+                audio, out, list(selection.kinds), self.crossover.value(),
                 atmos=info.atmos, adm=adm, speakers=project.speakers,
-                remove_bed_placeholders=compact_adm,
-                multichannel=mc, mono_channels=mono,
-                cicp=self._cicp(), binaural=binaural,
-                av3a_encode=av3a_enc, hoa_order=info.hoa_order,
+                remove_bed_placeholders=compact,
+                multichannel=selection.multichannel, mono_channels=selection.mono,
+                cicp=self._cicp(),
+                av3a_encode=selection.av3a, hoa_order=info.hoa_order,
+                length=length,
             )
         ]  # fmt: skip
 

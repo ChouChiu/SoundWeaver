@@ -20,12 +20,12 @@ from __future__ import annotations
 import logging
 import multiprocessing
 import os
-import pickle
+import subprocess
 import tempfile
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
-from dataclasses import dataclass
+from contextlib import ExitStack, closing, contextmanager
+from dataclasses import dataclass, replace
 from itertools import pairwise
 from multiprocessing.pool import AsyncResult
 from pathlib import Path
@@ -34,10 +34,12 @@ import numpy as np
 import soundfile as sf
 
 from soundweaver.core.cancel import CancellationToken
-from soundweaver.core.ffmpeg import run_ffmpeg
+from soundweaver.core.codecs.native import NativePcmStream
+from soundweaver.core.ffmpeg import base_command, first_audio_stream, probe, run_ffmpeg
 from soundweaver.core.i18n import get_language, t
 from soundweaver.core.paths import cache_dir, content_key, work_root
 from soundweaver.core.pcm import AudioData, create_pcm_audio
+from soundweaver.core.process import NO_WINDOW
 from soundweaver.core.speakers import DEFAULT_ATMOS, SpeakerLayout
 
 from .adm import AdmFile
@@ -55,7 +57,7 @@ from .eac3 import INDEPENDENT, syncframes
 from .emdf import JOC_PAYLOAD, OAMD_PAYLOAD, object_payloads
 from .oamd import OamdDecoder
 from .render import Renderer, joc_objects
-from .trace import ObjectTrace, Tracer
+from .trace import TRACE_SUFFIX, ObjectTrace, Tracer, load_cached_trace, store_cached_trace
 
 logger = logging.getLogger(__name__)
 
@@ -107,13 +109,14 @@ def decode_atmos(
         )
         _store_trace(source, layout, trace)
         return AtmosDecode(trace, out, layout)
-    with _prepare(source, token) as (frames, core, rate, first, length):
+    playback = on_adm_chunk is not None and adm is not None and not speakers
+    with _prepare(source, token, playback) as (frames, core, rate, first, length, fill_core):
         out = create_pcm_audio(len(layout.channels), length, rate) if speakers else None
         try:
             trace = _Decode(
                 frames, core, rate, first, length, layout, out, adm,
                 remove_bed_placeholders=remove_bed_placeholders,
-            ).run(token, on_fraction, on_adm_chunk)
+            ).run(token, on_fraction, on_adm_chunk, fill_core)
         except BaseException:
             if out is not None:
                 out.cleanup()
@@ -164,8 +167,14 @@ class _Decode:
     def run(
         self, token: CancellationToken, on_fraction: Callable[[float], None],
         on_adm_chunk: Callable[[Path, int], None] | None,
+        fill_core: Callable[[int, int], int] | None,
     ) -> ObjectTrace:
         total = len(self.frames)
+        if fill_core is not None:
+            # Publish the first half second quickly, then keep a few stretches in flight.
+            first_stop = min(total, 1 + (self.first + self.rate // 2) // FRAME)
+            self.chunks = list(pairwise([0, *range(first_stop, total, 48), total]))
+            self.workers = min(3, self.workers)
         tracer = Tracer(self.rate, self.first, self.length, FRAME, self.layout)
         oamd = OamdDecoder()
         renderer: Renderer | None = None
@@ -174,11 +183,35 @@ class _Decode:
         joc_payloads: list[bytes] = []
         snapshots: list[tuple] = []
         pending: list[AsyncResult] = []
+        playback_jobs: list[ChunkJob] = []
+        results: list[ChunkResult | None] = [None] * len(self.chunks)
+        delivered = 0
+        readback: Path | None = None
         done = 0
 
         def progress(k: int) -> None:
             finished = sum(r.ready() for r in pending)
             on_fraction(_PASS_SHARE * k / total + (1 - _PASS_SHARE) * finished / len(self.chunks))
+
+        def deliver(index: int) -> None:
+            """Append chunk `index`'s PCM in order and hand the readable prefix to playback."""
+            nonlocal delivered
+            result = pending[index]
+            while not result.ready():
+                token.raise_if_cancelled()
+                result.wait(0.1)
+                progress(total)
+            results[index] = result.get()
+            if adm is not None:
+                part = Path(scratch) / f"adm-{index}.pcm"
+                adm.append(part)
+                part.unlink()
+            if readback is not None and on_adm_chunk is not None:
+                adm.file.flush()
+                if adm.frames_written:
+                    on_adm_chunk(readback, adm.frames_written)
+                adm.refresh()  # the timeline grows past the PCM that just shipped
+            delivered += 1
 
         with tempfile.TemporaryDirectory(dir=work_root()) as scratch, self._pool() as pool:
             try:
@@ -226,32 +259,39 @@ class _Decode:
                     renderer.advance(meta, FRAME)
                     # a stretch can start once its last frame and the one after are read
                     while done < len(snapshots) and min(self.chunks[done][1], total - 1) <= k:
-                        pending.append(
-                            pool.apply_async(
-                                decode_chunk,
-                                (self._job(done, snapshots[done], oamd_payloads, joc_payloads,
-                                           Path(scratch), adm),),
-                            )
-                        )  # fmt: skip
+                        job = self._job(
+                            done, snapshots[done], oamd_payloads, joc_payloads, Path(scratch), adm
+                        )
+                        if fill_core is None:
+                            pending.append(pool.apply_async(decode_chunk, (job,)))
+                        else:
+                            playback_jobs.append(job)
+                            if done == 0:
+                                last = fill_core(job.stop, total)
+                                initial = replace(job, last=last, raw_rate=self.rate)
+                                pending.append(pool.apply_async(decode_chunk, (initial,)))
                         done += 1
+                    if readback is None and adm is not None and on_adm_chunk is not None and done:
+                        # Publish the partial timeline now: chunk 0's PCM follows without
+                        # waiting for the rest of the metadata scan.
+                        readback = adm.prepare_readback(tracer.keys, tracer.size_keys)
+                    if readback is not None:
+                        # finished chunks ship while the scan keeps running
+                        while delivered < len(pending) and pending[delivered].ready():
+                            deliver(delivered)
+                    if adm is not None:
+                        # keep the published timeline ahead of the playhead as the scan runs
+                        adm.refresh()
                     if k % 64 == 0:
                         progress(k)
-                results: list[ChunkResult] = []
-                readback = adm.prepare_readback(tracer.keys) if adm and on_adm_chunk else None
-                for index, result in enumerate(pending):
-                    while not result.ready():
-                        token.raise_if_cancelled()
-                        result.wait(0.1)
-                        progress(total)
-                    results.append(result.get())
-                    if adm is not None:
-                        part = Path(scratch) / f"adm-{index}.pcm"
-                        adm.append(part)
-                        part.unlink()
-                        if readback is not None and on_adm_chunk is not None:
-                            adm.file.flush()
-                            if adm.frames_written:
-                                on_adm_chunk(readback, adm.frames_written)
+                for index in range(delivered, len(self.chunks)):
+                    if fill_core is not None:
+                        while len(pending) < min(len(self.chunks), index + self.workers):
+                            job = playback_jobs[len(pending)]
+                            last = fill_core(job.stop, total)
+                            job = replace(job, last=last, raw_rate=self.rate)
+                            pending.append(pool.apply_async(decode_chunk, (job,)))
+                    deliver(index)
             except BaseException:
                 pool.terminate()
                 if adm is not None:
@@ -259,10 +299,12 @@ class _Decode:
                 raise
             if adm is not None:
                 if readback is not None:
+                    adm.refresh(force=True)  # the final timeline, regardless of the span gate
+                    tracer.length = adm.frames_written
                     adm.file.close()
                 else:
-                    adm.close(tracer.keys)
-                clipped = sum(r.clipped for r in results)
+                    adm.close(tracer.keys, tracer.size_keys)
+                clipped = sum(r.clipped for r in results if r is not None)
                 if clipped:
                     logger.warning("adm: %d samples clipped at full scale", clipped)
         on_fraction(1.0)
@@ -312,50 +354,58 @@ class _Decode:
             pool.join()
 
 
-_TRACE_SUFFIX = ".trace.pickle"
-_KEEP_TRACES = 16
 # bumped whenever a layout's shares or the decoded objects change, so older traces go unread
 _TRACE_VERSION = 8
 
 
 def _trace_path(source: Path, layout: SpeakerLayout) -> Path:
     # the shares are the layout's, so each layout keeps a trace of its own
-    return cache_dir() / f"{content_key(source)}.{layout.name}.v{_TRACE_VERSION}{_TRACE_SUFFIX}"
+    return cache_dir() / f"{content_key(source)}.{layout.name}.v{_TRACE_VERSION}{TRACE_SUFFIX}"
 
 
 def _cached_trace(source: Path, layout: SpeakerLayout) -> ObjectTrace | None:
-    path = _trace_path(source, layout)
-    try:
-        with path.open("rb") as file:
-            trace = pickle.load(file)
-    except FileNotFoundError:
-        return None
-    except Exception:
-        logger.warning("atmos: discarding unreadable trace cache %s", path, exc_info=True)
-        path.unlink(missing_ok=True)
-        return None
-    fits = isinstance(trace, ObjectTrace) and trace.speakers == layout.channels
-    return trace if fits else None
+    return load_cached_trace(_trace_path(source, layout), layout.channels, component="atmos")
 
 
 def _store_trace(source: Path, layout: SpeakerLayout, trace: ObjectTrace) -> None:
-    directory = cache_dir()
-    path = _trace_path(source, layout)
-    partial = path.with_suffix(".partial")
-    with partial.open("wb") as file:
-        pickle.dump(trace, file, protocol=pickle.HIGHEST_PROTOCOL)
-    partial.replace(path)
-    old = sorted(directory.glob("*" + _TRACE_SUFFIX), key=lambda p: p.stat().st_mtime)
-    for stale in old[:-_KEEP_TRACES]:
-        stale.unlink(missing_ok=True)
+    store_cached_trace(trace, _trace_path(source, layout), suffix=TRACE_SUFFIX)
+
+
+def _extract(source: Path, stream: Path, token: CancellationToken) -> list:
+    run_ffmpeg(
+        ["-i", str(source), "-map", "0:a:0", "-c", "copy", "-f", "eac3", str(stream)], token
+    )
+    try:
+        all_frames = list(syncframes(stream.read_bytes()))
+    except BitstreamError as error:
+        raise AtmosError(t("atmos.bad_syncframes", error=error)) from error
+    if not all_frames:
+        raise AtmosError(t("atmos.no_frames"))
+    frames = [f for f in all_frames if f.stream_type == INDEPENDENT and f.substream == 0]
+    if not frames:
+        raise AtmosError(t("atmos.no_substream"))
+    if len(frames) != len(all_frames):
+        logger.info(
+            "atmos: filtered %d frames (dependent/secondary substreams) -> %d independent substream 0 frames",
+            len(all_frames), len(frames),
+        )
+        stream.write_bytes(b"".join(f.data for f in frames))
+    return frames
 
 
 @contextmanager
-def _prepare(source: Path, token: CancellationToken) -> Iterator[tuple[list, Path, int, int, int]]:
-    """Syncframes, the decoded core, its rate, and the container's span of its timeline."""
+def _prepare(
+    source: Path, token: CancellationToken, playback: bool,
+) -> Iterator[tuple[list, Path, int, int, int, Callable[[int, int], int] | None]]:
+    """Syncframes, the core, its rate, and the container's span of its timeline."""
     with tempfile.TemporaryDirectory(dir=work_root()) as scratch:
         work = Path(scratch)
         stream, core, reference = work / "stream.ec3", work / "core.wav", work / "reference.wav"
+        if playback:
+            frames = _extract(source, stream, token)
+            with _playback_core(source, stream, work / "core.f32", len(frames), token) as setup:
+                yield (frames, *setup)
+            return
 
         # The front left channel as the container presents it, to find its timeline by;
         # decoded alongside the core, each a full pass over the file.
@@ -366,29 +416,7 @@ def _prepare(source: Path, token: CancellationToken) -> Iterator[tuple[list, Pat
                  "-c:a", "pcm_f32le", str(reference)],
                 token,
             )  # fmt: skip
-            run_ffmpeg(
-                ["-i", str(source), "-map", "0:a:0", "-c", "copy", "-f", "eac3", str(stream)], token
-            )
-            try:
-                all_frames = list(syncframes(stream.read_bytes()))
-            except BitstreamError as error:
-                raise AtmosError(t("atmos.bad_syncframes", error=error)) from error
-            if not all_frames:
-                raise AtmosError(t("atmos.no_frames"))
-
-            # Atmos JOC and OAMD metadata are carried in independent substream 0.
-            # If dependent substreams (e.g. 7.1) or secondary substreams are present,
-            # filter to independent substream 0 so FFmpeg decodes the 5.1 core for JOC reconstruction.
-            frames = [f for f in all_frames if f.stream_type == INDEPENDENT and f.substream == 0]
-            if not frames:
-                raise AtmosError(t("atmos.no_substream"))
-            if len(frames) != len(all_frames):
-                logger.info(
-                    "atmos: filtered %d frames (dependent/secondary substreams) -> %d independent substream 0 frames",
-                    len(all_frames),
-                    len(frames),
-                )
-                stream.write_bytes(b"".join(f.data for f in frames))
+            frames = _extract(source, stream, token)
 
             run_ffmpeg(["-f", "eac3", "-i", str(stream), "-c:a", "pcm_f32le", str(core)], token)
             front.result()
@@ -403,7 +431,83 @@ def _prepare(source: Path, token: CancellationToken) -> Iterator[tuple[list, Pat
             "atmos: %d syncframes, container starts %d samples in, %d samples long",
             len(frames), start, length,
         )  # fmt: skip
-        yield frames, core, rate, start, length
+        yield frames, core, rate, start, length, None
+
+
+@contextmanager
+def _playback_core(
+    source: Path, stream: Path, target: Path, total: int, token: CancellationToken,
+) -> Iterator[tuple[Path, int, int, int, Callable[[int, int], int]]]:
+    """Decode only the PCM prefixes needed by the upcoming JOC stretches."""
+    core_format = first_audio_stream(probe(stream))
+    rate = int(core_format.get("sample_rate") or 48000)
+    channels = int(core_format.get("channels") or 0)
+    if channels != CORE_CHANNELS:
+        raise AtmosError(t("atmos.core_mismatch", channels=channels, frames=0))
+    cmd = base_command()
+    output = ["-c:a", "pcm_f32le", "-f", "f32le", "pipe:1"]
+    with ExitStack() as resources:
+        pcm = resources.enter_context(closing(NativePcmStream(
+            [*cmd, "-f", "eac3", "-i", str(stream), *output],
+            pcm_format=(rate, CORE_CHANNELS), token=token,
+        )))
+        ref = resources.enter_context(closing(NativePcmStream(
+            [*cmd, "-i", str(source), "-map", "0:a:0", "-af",
+             "channelmap=map=FL:channel_layout=mono", *output],
+            pcm_format=(rate, 1), token=token,
+        )))
+        cache = resources.enter_context(target.open("wb"))
+        reach = _MAX_LEAD_FRAMES * FRAME
+        head = ref.read_frames(rate)[:, 0]
+        ref_frames = len(head)
+        ref_eof = ref_frames < rate
+        prefix = min(total * FRAME, rate + reach)
+        lead = pcm.read_frames(prefix)
+        decoded = len(lead)
+        if decoded != prefix:
+            raise AtmosError(t("atmos.core_mismatch", channels=CORE_CHANNELS, frames=decoded))
+        cache.write(lead.tobytes())
+        cache.flush()
+        at = _loudest_match(head)
+        if at is not None and decoded >= at + _MATCH_SAMPLES:
+            start = _match_offset(lead[at:at + _MATCH_SAMPLES + reach, 0], head[at:at + _MATCH_SAMPLES])
+        else:
+            start = _packet_skip(source)
+        length = total * FRAME - start
+
+        def fill(stop: int, total_frames: int) -> int:
+            nonlocal decoded, ref_frames, ref_eof
+            until = min(stop + 1, total_frames) * FRAME
+            if decoded < until:
+                block = pcm.read_frames(until - decoded)
+                decoded += len(block)
+                if decoded != until:
+                    raise AtmosError(t("atmos.core_mismatch", channels=CORE_CHANNELS, frames=decoded))
+                cache.write(block.tobytes())
+                cache.flush()
+            count = stop * FRAME - start - ref_frames
+            if count > 0 and not ref_eof:
+                n = len(ref.read_frames(count))
+                ref_frames += n
+                ref_eof = n < count
+            return start + ref_frames
+
+        yield target, rate, start, length, fill
+
+
+def _packet_skip(source: Path) -> int:
+    """Use the container's skip side data when the entire matching window is silent."""
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "a:0", "-read_intervals", "%+#1",
+         "-show_entries", "packet=:packet_side_data=skip_samples",
+         "-of", "default=nw=1", str(source)],
+        check=False, capture_output=True, text=True, timeout=10, creationflags=NO_WINDOW,
+    )
+    for line in result.stdout.splitlines():
+        name, _, value = line.partition("=")
+        if name == "skip_samples" and value.isdecimal():
+            return int(value)
+    return 0
 
 
 def _container_offset(pcm: sf.SoundFile, ref: sf.SoundFile) -> int:
@@ -412,14 +516,19 @@ def _container_offset(pcm: sf.SoundFile, ref: sf.SoundFile) -> int:
     Both come from the same decoder, so a stretch with signal in it matches
     sample for sample at exactly one offset.
     """
-    probe_start = _loudest_block(ref)
+    ref.seek(0)
+    head = ref.read(min(ref.frames, 60 * ref.samplerate), dtype="float32", always_2d=True)[:, 0]
+    probe_start = _loudest_match(head)
     if probe_start is None:
         return 0
-    ref.seek(probe_start)
-    probe = ref.read(_MATCH_SAMPLES, dtype="float32", always_2d=True)[:, 0]
+    probe = head[probe_start : probe_start + _MATCH_SAMPLES]
     reach = _MAX_LEAD_FRAMES * FRAME
     pcm.seek(probe_start)
     span = pcm.read(reach + _MATCH_SAMPLES, dtype="float32", always_2d=True)[:, 0]
+    return _match_offset(span, probe)
+
+
+def _match_offset(span: np.ndarray, probe: np.ndarray) -> int:
     if span.size < probe.size:
         return 0
     windows = np.lib.stride_tricks.sliding_window_view(span, probe.size)
@@ -435,10 +544,8 @@ def _container_offset(pcm: sf.SoundFile, ref: sf.SoundFile) -> int:
     return offset
 
 
-def _loudest_block(ref: sf.SoundFile) -> int | None:
+def _loudest_match(head: np.ndarray) -> int | None:
     """Start of the loudest match-sized block in the first minute, None if all silent."""
-    ref.seek(0)
-    head = ref.read(min(ref.frames, 60 * ref.samplerate), dtype="float32", always_2d=True)[:, 0]
     usable = head.size - head.size % _MATCH_SAMPLES
     if usable == 0:
         return None

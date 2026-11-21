@@ -13,7 +13,7 @@ from functools import cache
 
 import numpy as np
 
-from soundweaver.core.atmos.bitstream import BitReader
+from soundweaver.core.atmos.bitstream import BitReader, BitstreamError
 
 from .asf import Layout
 from .codes import huffman
@@ -149,8 +149,6 @@ def three(selector: int, m0: Matrix, m1: Matrix, x: list[np.ndarray]) -> list[np
         11: ((d1, a0 * c1, b0 * c1), (b1, a0 * a1, b0 * a1), (0, c0, d0)),
     }.get(selector)
     if rows is None:
-        from soundweaver.core.atmos.bitstream import BitstreamError
-
         raise BitstreamError(f"reserved chel_matsel {selector}")
     return [r[0] * i0 + r[1] * i1 + r[2] * i2 for r in rows]
 

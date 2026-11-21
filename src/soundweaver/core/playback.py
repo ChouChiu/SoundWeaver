@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import math
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,72 +11,26 @@ import numpy as np
 from PySide6.QtCore import QIODevice, QObject, Qt, QTimer, Signal, Slot
 from PySide6.QtMultimedia import QAudio, QAudioFormat, QAudioSink, QMediaDevices
 
-from soundweaver.core.atmos import ObjectTrace
 from soundweaver.core.audio import AudioInfo
 from soundweaver.core.cancel import CancellationToken, ProcessingCancelled
 from soundweaver.core.codecs import mpegh
-from soundweaver.core.codecs.av3a import VvmTimelineHeader, read_vvm1_frame
-from soundweaver.core.playback_mix import cap_stream_peak, monitor_gain
+from soundweaver.core.playback_buffer import START_SECONDS
+from soundweaver.core.playback_mix import (
+    SILENCE_DB,
+    ObjectSnapshot,
+    channel_mask,
+    fold_matrix,
+    mix_adm_block,
+    peaks_dbfs,
+    stereo_mix,
+    vivid_snapshots,
+)
 from soundweaver.core.playback_source import PlaybackOptions, PlaybackSource, prepare_playback
 from soundweaver.core.speakers import DEFAULT_ATMOS, SpeakerLayout
 
+__all__ = ["SILENCE_DB", "ObjectSnapshot", "PlaybackEngine", "fold_matrix"]
+
 logger = logging.getLogger(__name__)
-
-SILENCE_DB = -96.0
-
-
-def fold_matrix(channel_names: tuple[str, ...] | list[str]) -> np.ndarray:
-    """Stereo fold-down matrix of shape `(len(channel_names), 2)`."""
-    n = len(channel_names)
-    mat = np.zeros((n, 2), dtype=np.float32)
-    for i, name in enumerate(channel_names):
-        if name in ("LFE", "LFE2"):
-            continue
-        if name == "ACN0":
-            mat[i, 0] = 0.7071
-            mat[i, 1] = 0.7071
-            continue
-        if name == "ACN1":  # Y axis (+left / -right) -> stereo difference
-            mat[i, 0] = 0.7071
-            mat[i, 1] = -0.7071
-            continue
-        if name.startswith("ACN"):
-            continue
-        low = name.lower()
-        if name in ("C", "Cb", "Cv", "Cvr", "Cs", "Ts", "Tfc", "Tsc", "Tbc", "Bfc"):
-            mat[i, 0] = 0.7071
-            mat[i, 1] = 0.7071
-        elif low.startswith(("l", "tl", "tf", "ts", "tb", "bf")) and "r" not in low:
-            mat[i, 0] = 1.0 if name in ("L", "Lfc", "Lc", "Lv") else 0.7071
-        elif low.startswith(("r", "tr", "bf")) or "r" in low:
-            mat[i, 1] = 1.0 if name in ("R", "Rfc", "Rc", "Rv") else 0.7071
-        else:
-            mat[i, 0] = 0.5
-            mat[i, 1] = 0.5
-    return mat
-
-
-def _peaks_dbfs(block: np.ndarray) -> list[float]:
-    """Per-column peak dBFS for shape `(frames, channels)`."""
-    if block.shape[0] == 0:
-        return [SILENCE_DB] * block.shape[1]
-    peaks = np.max(np.abs(block), axis=0)
-    out: list[float] = []
-    for p in peaks:
-        val = float(p)
-        out.append(max(SILENCE_DB, 20.0 * math.log10(val)) if val > 1e-5 else SILENCE_DB)
-    return out
-
-
-@dataclass(frozen=True, slots=True)
-class ObjectSnapshot:
-    index: int
-    x: float
-    y: float
-    z: float
-    level_db: float
-    active: bool
-
 
 @dataclass(frozen=True, slots=True)
 class _LoadRequest:
@@ -111,11 +64,11 @@ class _PCMBufferDevice(QIODevice):
         return 0
 
     def bytesAvailable(self) -> int:
-        return self._engine.readable_frames * 8 + super().bytesAvailable()
+        return self._engine._playable_frames() * 8 + super().bytesAvailable()
 
 
 class PlaybackEngine(QObject):
-    """Streaming spatial audio player supporting Atmos, ADM, AV3A/HOA, 360RA/CICP, and Binaural."""
+    """Streaming spatial audio player supporting Atmos, ADM, AV3A/HOA, and 360RA/CICP."""
 
     track_loaded = Signal(object, object)  # (Path, AudioInfo)
     load_failed = Signal(str)
@@ -133,7 +86,6 @@ class PlaybackEngine(QObject):
         self._lock = threading.RLock()
         self._layout: SpeakerLayout = DEFAULT_ATMOS
         self._cicp: int = 13
-        self._binaural: bool = False
         self._active_channels: tuple[str, ...] = DEFAULT_ATMOS.channels
         self._fold = fold_matrix(self._active_channels)
 
@@ -145,6 +97,7 @@ class PlaybackEngine(QObject):
         self._cursor = 0
         self._playing = False
         self._buffering = False
+        self._waiting_for_pcm = False
         self._volume = 1.0
         self._muted_ch: set[int] = set()
         self._soloed_ch: set[int] = set()
@@ -171,10 +124,6 @@ class PlaybackEngine(QObject):
     @property
     def cicp(self) -> int:
         return self._cicp
-
-    @property
-    def binaural(self) -> bool:
-        return self._binaural
 
     @property
     def active_channels(self) -> tuple[str, ...]:
@@ -207,6 +156,17 @@ class PlaybackEngine(QObject):
                 frames, eof, _ = self._source.progress.state()
                 return eof and self._cursor >= frames
             return self._cursor >= self._total_frames
+
+    def _playable_frames(self) -> int:
+        with self._lock:
+            source = self._source
+            if source is None or source.progress is None:
+                return self._total_frames - self._cursor
+            frames, eof, _ = source.progress.state()
+            available = max(0, frames - self._cursor)
+            if self._waiting_for_pcm and not eof and available < self._sample_rate * START_SECONDS:
+                return 0
+            return available
 
     def _set_buffering(self, buffering: bool) -> None:
         if buffering != self._buffering:
@@ -257,15 +217,6 @@ class PlaybackEngine(QObject):
         if self._path is not None and self.info is not None and self.info.is_mpegh:
             self.load(self._path, start_at=self.position, auto_play=self._playing)
 
-    def set_binaural(self, enabled: bool) -> None:
-        if self._binaural == enabled:
-            return
-        self._binaural = enabled
-        if self._reload_pending():
-            return
-        if self._path is not None:
-            self.load(self._path, start_at=self.position, auto_play=self._playing)
-
     def _toggle_set(self, target: set[int], idx: int) -> None:
         with self._lock:
             target.symmetric_difference_update((idx,))
@@ -304,17 +255,22 @@ class PlaybackEngine(QObject):
         self.load(request.path, request.start_at, request.auto_play)
         return True
 
+    def _close_async(self, source: PlaybackSource | None) -> None:
+        """Retire a source on its own thread; its close may wait on subprocesses."""
+        if source is not None:
+            threading.Thread(target=source.close, daemon=True).start()
+
     def load(self, path: Path, start_at: float = 0.0, auto_play: bool = True) -> None:
         self.stop()
         with self._lock:
-            if self._source is not None and self._source.progress is not None:
-                self._source.close()
-                self._source = None
-                self._total_frames = 0
+            stale, self._source = self._source, None
+            self._total_frames = 0
+        # closing a source can wait on decoder subprocesses; never on the UI thread
+        self._close_async(stale)
         self._set_buffering(True)
         token = CancellationToken()
         self._path = path
-        options = PlaybackOptions(self._layout, self._cicp, self._binaural)
+        options = PlaybackOptions(self._layout, self._cicp)
         request = _LoadRequest(path, start_at, auto_play, options, token)
         self._request = request
 
@@ -352,7 +308,8 @@ class PlaybackEngine(QObject):
             return
         with self._lock:
             source, self._pending_source = self._pending_source, None
-            assert source is not None
+            if source is None:
+                return
             previous, self._source = self._source, source
             self._request = None
             self._active_channels = self._layout.channels if source.adm else source.channels
@@ -369,10 +326,10 @@ class PlaybackEngine(QObject):
             else:
                 self._sample_rate, self._total_frames = 48000, 0
             self._cursor = min(self._total_frames, max(0, int(request.start_at * self._sample_rate)))
+            self._waiting_for_pcm = False
             self.clear_ms()
             self._last_ch_dbs, self._last_objs = [], []
-        if previous is not None:
-            previous.close()
+        self._close_async(previous)
         self._set_buffering(False)
         self.track_loaded.emit(request.path, source.info)
         self.position_changed.emit(self.position)
@@ -385,8 +342,7 @@ class PlaybackEngine(QObject):
                 self._request.token.cancel()
                 self._request = None
             pending, self._pending_source = self._pending_source, None
-        if pending is not None:
-            pending.close()
+        self._close_async(pending)
 
     def unload(self) -> None:
         self.stop()
@@ -396,8 +352,7 @@ class PlaybackEngine(QObject):
             self._total_frames = 0
             self._last_ch_dbs, self._last_objs = [], []
             self.clear_ms()
-        if source is not None:
-            source.close()
+        self._close_async(source)
         self.track_cleared.emit()
 
     def shutdown(self) -> None:
@@ -474,6 +429,9 @@ class PlaybackEngine(QObject):
         with self._lock:
             self._playing = False
             self._cursor = 0
+            self._waiting_for_pcm = False
+            if self._source is not None:
+                self._source.request(0)
         self._meter_timer.stop()
         if self._sink is not None:
             self._sink.stop()
@@ -485,8 +443,9 @@ class PlaybackEngine(QObject):
     def seek(self, seconds: float) -> None:
         with self._lock:
             self._cursor = min(self._total_frames, max(0, int(seconds * self._sample_rate)))
-            if self._source is not None and self._source.buffer is not None:
-                self._source.buffer.request(self._cursor)
+            self._waiting_for_pcm = False
+            if self._source is not None and self._source.progress is not None:
+                self._source.request(self._cursor)
         sink = self._sink
         if sink is not None:
             was_playing = self._playing
@@ -500,157 +459,62 @@ class PlaybackEngine(QObject):
 
     def _pull_stereo(self, frames: int) -> np.ndarray:
         with self._lock:
-            if not self._playing or self.readable_frames == 0:
+            if not self._playing:
                 return np.empty((0, 2), dtype=np.float32)
 
-            avail = min(frames, self.readable_frames)
+            avail = min(frames, self._playable_frames())
+            if avail == 0:
+                self._waiting_for_pcm = not self.at_end
+                return np.empty((0, 2), dtype=np.float32)
+            self._waiting_for_pcm = False
             start = self._cursor
             self._cursor += avail
 
             source = self._source
-            assert source is not None
-            streamed_stereo = None
-            if source.buffer is not None:
-                block = source.buffer.read(start, avail)
-                buf = block[:, : source.buffer.channels]
-                if source.buffer.stereo:
-                    streamed_stereo = block[:, source.buffer.channels :]
-                self._last_objs = []
-                if source.vvm1_header is not None and source.vvm1_path is not None:
-                    frame = start // source.vvm1_header.frame_samples
-                    row = read_vvm1_frame(source.vvm1_path, source.vvm1_header, frame)
-                    if row is not None:
-                        self._last_objs = self._eval_vvm1_row(source.vvm1_header, row)
-            elif source.adm is not None:
-                raw = source.adm.read_frames(start, avail)
-                t_mid = (start + avail * 0.5) / self._sample_rate
-                spk_buf = np.zeros((avail, len(self._layout.channels)), dtype=np.float32)
-                objs: list[ObjectSnapshot] = []
-                obj_idx = 0
-                for tr in source.adm.tracks:
-                    if tr.is_object:
-                        active_ms = (
-                            obj_idx not in self._muted_obj
-                            and (not self._soloed_obj or obj_idx in self._soloed_obj)
-                        )
-                        peak = float(np.max(np.abs(raw[:, tr.channel_index])))
-                        db = max(SILENCE_DB, 20.0 * math.log10(peak)) if peak > 1e-5 else SILENCE_DB
-                        blk = source.adm.block_at(tr, t_mid)
-                        ox, oy, oz = (blk.x, blk.y, blk.z) if blk else (0.5, 0.5, 0.0)
-                        objs.append(ObjectSnapshot(obj_idx, ox, oy, oz, db if active_ms else SILENCE_DB, active_ms))
-                        if active_ms:
-                            g = source.adm._track_gains_at(tr, t_mid, self._layout)
-                            if np.any(g):
-                                spk_buf += raw[:, tr.channel_index : tr.channel_index + 1] * g[np.newaxis, :]
-                        obj_idx += 1
-                    elif not self._soloed_obj:
-                        g = source.adm._track_gains_at(tr, t_mid, self._layout)
-                        if np.any(g):
-                            spk_buf += raw[:, tr.channel_index : tr.channel_index + 1] * g[np.newaxis, :]
-                self._last_objs = objs
-                buf = spk_buf
-            elif source.audio is not None:
-                buf = np.ascontiguousarray(source.audio.samples[:, start : start + avail].T)
-                if source.vvm1_frames is not None and source.vvm1_header is not None:
-                    self._last_objs = self._eval_vvm1(start, source.vvm1_header, source.vvm1_frames)
-                elif source.trace is not None:
-                    t_mid = (start + avail * 0.5) / self._sample_rate
-                    self._last_objs = self._eval_trace(t_mid, source.trace)
-                else:
-                    self._last_objs = []
-            else:
-                return np.zeros((frames, 2), dtype=np.float32)
+            if source is None:
+                return np.empty((0, 2), dtype=np.float32)
+            block, streamed_stereo, objects = self._read_block(source, start, avail)
+            self._last_objs = objects
+            mask = channel_mask(block.shape[1], self._muted_ch, self._soloed_ch)
+            masked = block * mask
+            self._last_ch_dbs = peaks_dbfs(masked)
 
-            # Channel M/S & metering reflect bed/speaker channels
-            bed_limit = (
-                source.vvm1_header.bed_channels
-                if source.vvm1_header is not None and source.vvm1_header.bed_channels > 0
-                else buf.shape[1]
+            if self._muted_ch or self._soloed_ch or self._muted_obj or self._soloed_obj:
+                streamed_stereo = None
+            return stereo_mix(
+                masked, mask, self._fold, source.mpegh_matrix, streamed_stereo, self._volume,
             )
-            meter_buf = buf[:, :bed_limit]
-            n_ch = meter_buf.shape[1]
-            mask = np.ones(n_ch, dtype=np.float32)
-            for idx in range(n_ch):
-                if idx in self._muted_ch or (self._soloed_ch and idx not in self._soloed_ch):
-                    mask[idx] = 0.0
-            masked = meter_buf * mask[np.newaxis, :]
-            self._last_ch_dbs = _peaks_dbfs(masked)
 
-            gain = self._volume
-            alternate = source.stereo_audio
-            mpegh_mix = source.mpegh_monitor
-            unchanged = not (self._muted_ch or self._soloed_ch or self._muted_obj or self._soloed_obj)
-            if streamed_stereo is not None and unchanged:
-                return cap_stream_peak(streamed_stereo, gain)
-            if alternate is not None and unchanged:
-                stereo = np.zeros((avail, 2), dtype=np.float32)
-                samples = alternate.samples[:, start : start + avail].T
-                stereo[: len(samples)] = samples
-                if mpegh_mix is not None:
-                    gain = monitor_gain(gain, mpegh_mix.stereo_peak)
-            elif mpegh_mix is not None:
-                stereo = masked @ mpegh_mix.matrix
-                if source.buffer is not None:
-                    if n_ch <= 2:
-                        return cap_stream_peak(stereo, gain)
-                    bound = float((np.abs(mpegh_mix.matrix) * mask[:, None]).sum(axis=0).max())
-                else:
-                    bound = mpegh_mix.fold_peak
-                gain = monitor_gain(gain, bound)
-            elif n_ch == 1:
-                stereo = np.repeat(masked, 2, axis=1)
-            elif n_ch == 2:
-                stereo = masked
-            elif n_ch == self._fold.shape[0]:
-                stereo = masked @ self._fold
-            else:
-                stereo = masked[:, :2]
+    def _read_block(
+        self, source: PlaybackSource, start: int, frames: int,
+    ) -> tuple[np.ndarray, np.ndarray | None, list[ObjectSnapshot]]:
+        if source.adm is not None:
+            if source.adm_progress is not None:
+                source.adm_progress.request(start + frames)
+            block, objects = mix_adm_block(
+                source.adm, self._layout, start, frames, self._muted_obj, self._soloed_obj,
+            )
+            return block, None, objects
 
-            return np.clip(stereo * gain, -1.0, 1.0).astype(np.float32, copy=False)
+        if source.buffer is not None:
+            block = source.buffer.read(start, frames)
+            channels = source.buffer.channels
+            stereo = block[:, channels:] if source.buffer.stereo else None
+            objects = []
+            reader = source.vvm1
+            if reader is not None:
+                header = reader.header
+                row = reader.row(start // header.frame_samples)
+                if row is not None:
+                    objects = vivid_snapshots(header, row, self._muted_obj, self._soloed_obj)
+                if header.bed_channels > 0:
+                    channels = header.bed_channels
+            return block[:, : min(channels, source.buffer.channels)], stereo, objects
 
-    def _eval_vvm1(
-        self, start_frame: int, hdr: VvmTimelineHeader, frames_arr: np.ndarray
-    ) -> list[ObjectSnapshot]:
-        idx = min(frames_arr.shape[0] - 1, max(0, start_frame // hdr.frame_samples))
-        return self._eval_vvm1_row(hdr, frames_arr[idx])
-
-    def _eval_vvm1_row(self, hdr: VvmTimelineHeader, row: np.ndarray) -> list[ObjectSnapshot]:
-        objs: list[ObjectSnapshot] = []
-        for oi in range(hdr.object_count):
-            ch_idx = hdr.bed_channels + oi
-            active_ms = oi not in self._muted_obj and (not self._soloed_obj or oi in self._soloed_obj)
-            vx, vy, vz, peak, _ = row[ch_idx]
-            ox = max(0.0, min(1.0, float((vx + 1.0) * 0.5)))
-            oy = max(0.0, min(1.0, float((1.0 - vy) * 0.5)))
-            oz = max(0.0, min(1.0, float(vz)))
-            db = max(SILENCE_DB, 20.0 * math.log10(float(peak))) if peak > 1e-5 else SILENCE_DB
-            shown = active_ms and db > -80.0
-            objs.append(ObjectSnapshot(oi, ox, oy, oz, db if shown else SILENCE_DB, shown))
-        return objs
-
-    def _eval_trace(self, t_mid: float, trace: ObjectTrace) -> list[ObjectSnapshot]:
-        objs: list[ObjectSnapshot] = []
-        step_idx = int((t_mid - trace.level_start) / trace.level_step) if trace.level_step > 0 else 0
-        for oi, path in enumerate(trace.objects):
-            active_ms = oi not in self._muted_obj and (not self._soloed_obj or oi in self._soloed_obj)
-            ox, oy, oz, active = 0.5, 0.5, 0.0, True
-            prev_x, prev_y, prev_z = 0.5, 0.5, 0.0
-            for k_t, k_ramp, kx, ky, kz, ka in path.keys:
-                if t_mid < k_t:
-                    break
-                if k_ramp > 0.0 and t_mid < k_t + k_ramp:
-                    f = (t_mid - k_t) / k_ramp
-                    ox = prev_x + (kx - prev_x) * f
-                    oy = prev_y + (ky - prev_y) * f
-                    oz = prev_z + (kz - prev_z) * f
-                    active = bool(ka)
-                    break
-                ox, oy, oz, active = kx, ky, kz, bool(ka)
-                prev_x, prev_y, prev_z = kx, ky, kz
-            db = float(path.levels[step_idx]) if 0 <= step_idx < len(path.levels) else SILENCE_DB
-            shown = active and active_ms and db > -80.0
-            objs.append(ObjectSnapshot(oi, ox, oy, oz, db if shown else SILENCE_DB, shown))
-        return objs
+        # A source without samples exposes zero playable frames; stay silent if not.
+        if source.audio is None:
+            return np.zeros((frames, 0), dtype=np.float32), None, []
+        return source.audio.samples[:, start : start + frames].T, None, []
 
     def _emit_telemetry(self) -> None:
         source = self._source
@@ -671,8 +535,9 @@ class PlaybackEngine(QObject):
                 if self.at_end:
                     self._finish_if_drained(sink)
                     return
-                self._set_buffering(not self.readable_frames)
-                if self.readable_frames:
+                playable = self._playable_frames()
+                self._set_buffering(not playable)
+                if playable:
                     self._io.readyRead.emit()
             else:
                 self._set_buffering(False)

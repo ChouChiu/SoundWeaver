@@ -67,7 +67,7 @@ class AudioData:
             self.backing_path.unlink(missing_ok=True)
 
 
-def _scratch() -> Path:
+def scratch() -> Path:
     fd, name = tempfile.mkstemp(prefix="pcm-", suffix=".f32", dir=work_root())
     os.close(fd)
     return Path(name)
@@ -77,7 +77,7 @@ def create_pcm_audio(
     channels: int, frames: int, sample_rate: int, bit_depth: int = DEFAULT_BIT_DEPTH
 ) -> AudioData:
     """A silent planar float32 buffer, mapped from a scratch file under the work root."""
-    path = _scratch()
+    path = scratch()
     try:
         samples = np.memmap(path, mode="w+", dtype=np.float32, shape=(channels, frames))
     except BaseException:
@@ -92,24 +92,24 @@ def _bit_depth(subtype: str) -> int:
 
 
 def decode_audio(path: Path, token: CancellationToken, stream: dict | None = None) -> AudioData:
-    """Decode with ffmpeg straight into a scratch file, used in place as interleaved float32."""
+    """Decode with ffmpeg straight into a spill file, used in place as interleaved float32."""
     if stream is None:
         stream = ffmpeg.first_audio_stream(ffmpeg.probe(path))
     channels, rate = int(stream["channels"]), int(stream["sample_rate"])
-    scratch = _scratch()
+    spill = scratch()
     try:
         ffmpeg.run_ffmpeg(
-            ["-i", str(path), "-map", "0:a:0", "-c:a", "pcm_f32le", "-f", "f32le", str(scratch)],
+            ["-i", str(path), "-map", "0:a:0", "-c:a", "pcm_f32le", "-f", "f32le", str(spill)],
             token,
         )
-        frames = scratch.stat().st_size // (4 * channels)
+        frames = spill.stat().st_size // (4 * channels)
         if frames <= 0:
             raise ValueError(t("error.no_samples", name=path.name))
-        interleaved = np.memmap(scratch, dtype=np.float32, mode="r", shape=(frames, channels))
+        interleaved = np.memmap(spill, dtype=np.float32, mode="r", shape=(frames, channels))
     except BaseException:
-        scratch.unlink(missing_ok=True)
+        spill.unlink(missing_ok=True)
         raise
-    return AudioData(interleaved.T, rate, DEFAULT_BIT_DEPTH, scratch)
+    return AudioData(interleaved.T, rate, DEFAULT_BIT_DEPTH, spill)
 
 
 def read_audio(path: Path, token: CancellationToken) -> AudioData:

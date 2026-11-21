@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import multiprocessing
 import sys
+import threading
 from pathlib import Path
 
 # Required for PyInstaller frozen executables on Windows:
@@ -37,6 +38,13 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setOrganizationName("SoundWeaver")
     app.setApplicationName("SoundWeaver")
+
+    # Warm the font catalogue while the rest of startup runs: the first font list
+    # otherwise runs `fc-list` on the GUI thread and delays first paint. QFontDatabase
+    # needs the application object, so this waits for it; Qt 6 reads are thread-safe.
+    from soundweaver.ui.fonts import font_names
+
+    threading.Thread(target=font_names, daemon=True).start()
 
     # Initialize localization
     settings = QSettings()

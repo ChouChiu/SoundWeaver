@@ -1,9 +1,9 @@
 """Build all bundled native spatial audio engines into `src/soundweaver/bin/`.
 
 Builds:
-  - `vivid`: Audio Vivid (AVS3-P3) decoder (channel beds, objects, HOA)
+  - `soundweaver_av3a`: Audio Vivid (AVS3-P3) frame decoder
+  - `soundweaver_mpegh`: MPEG-H 3D Audio (360RA) frame decoder
   - `vivid_encode`: Audio Vivid (AVS3-P3) encoder + `model.bin`
-  - `vivid_binaural`: Audio Vivid / ADM BWF binaural HRTF renderer
   - `ia_mpeghd_testbench`: MPEG-H 3D Audio (360RA) decoder (LC Level 4)
 
 Run: `uv run python scripts/build_native.py`
@@ -22,7 +22,19 @@ NATIVE_DIR = ROOT / "native"
 BUILD_DIR = NATIVE_DIR / ".build"
 BIN_DIR = ROOT / "src" / "soundweaver" / "bin"
 
-TARGETS = ("vivid", "vivid_encode", "vivid_binaural", "ia_mpeghd_testbench")
+TARGETS = ("soundweaver_av3a", "soundweaver_mpegh", "vivid_encode", "ia_mpeghd_testbench")
+
+
+def stage(source: Path, dest: Path) -> None:
+    """Copy a built artifact into place atomically.
+
+    A running SoundWeaver holds its worker binaries open, and writing onto them
+    in place fails with "Text file busy"; replacing the directory entry leaves
+    the running process on the inode it already has.
+    """
+    partial = dest.with_name(f"{dest.name}.tmp")
+    shutil.copy2(source, partial)
+    os.replace(partial, dest)
 
 
 def main() -> int:
@@ -60,12 +72,12 @@ def main() -> int:
             print(f"error: built target {name!r} not found in {BUILD_DIR}", file=sys.stderr)
             return 1
         dest = BIN_DIR / found.name
-        shutil.copy2(found, dest)
+        stage(found, dest)
         print(f"staged {dest.relative_to(ROOT)}")
 
     model = NATIVE_DIR / "av3a" / "model.bin"
     if model.is_file():
-        shutil.copy2(model, BIN_DIR / "model.bin")
+        stage(model, BIN_DIR / "model.bin")
         print(f"staged {(BIN_DIR / 'model.bin').relative_to(ROOT)}")
 
     return 0

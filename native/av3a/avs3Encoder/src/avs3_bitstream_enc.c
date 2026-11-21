@@ -951,7 +951,7 @@ static void Avs3WriteBsFrameHeaderCompat(
 #endif
 
 
-void Avs3FlushBitstream(AVS3EncoderHandle stAvs3, FILE *fBitstream)
+void Avs3FlushBitstream(AVS3EncoderHandle stAvs3, FILE *fBitstream, int payload_only)
 {
     size_t retBits = 0;
     uint8_t* bitstream = stAvs3->bitstream;
@@ -961,9 +961,17 @@ void Avs3FlushBitstream(AVS3EncoderHandle stAvs3, FILE *fBitstream)
     /* bit stream verification */
     assert((bitsFrame - stAvs3->totalSideBits) < AVS3_BS_PADDING);
 
+    if (payload_only) {
+        uint8_t length[] = {bytesFrame, bytesFrame >> 8, bytesFrame >> 16, bytesFrame >> 24};
+        if (fwrite(length, 1, sizeof(length), fBitstream) != sizeof(length)) {
+            fprintf(stderr, "Error writing Audio Vivid payload length.\n");
+            exit(-1);
+        }
+    }
 #ifdef BS_HEADER_COMPAT
-    /* Write frame header */
-    Avs3WriteBsFrameHeaderCompat(stAvs3, fBitstream);
+    else {
+        Avs3WriteBsFrameHeaderCompat(stAvs3, fBitstream);
+    }
 #endif
 
     /* write side information */

@@ -6,7 +6,7 @@
 #include <string.h>
 #include <unistd.h>
 
-extern int avs3_encoder(int argc, char *argv[]);
+#include "avs3_extern_encoder.h"
 
 int main(int argc, char *argv[]) {
     if (!getenv("AVS3_MODEL_PATH")) {
@@ -21,5 +21,11 @@ int main(int argc, char *argv[]) {
             }
         }
     }
-    return avs3_encoder(argc, argv);
+    int payload_only = argc > 1 && strcmp(argv[1], "--payload-only") == 0;
+    if (payload_only) {
+        argv[1] = argv[0];
+        ++argv;
+        --argc;
+    }
+    return payload_only ? avs3_encoder_payload(argc, argv) : avs3_encoder(argc, argv);
 }

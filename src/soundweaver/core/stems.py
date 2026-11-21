@@ -73,7 +73,7 @@ def layout_for(channels: int, atmos: bool = False) -> StemLayout:
     return StemLayout.MONO if channels == 1 else StemLayout.STEREO
 
 
-def surround_stems(speakers: SpeakerLayout) -> tuple[StemKind, ...]:
+def _surround_stems(speakers: SpeakerLayout) -> tuple[StemKind, ...]:
     """What a discrete master of `speakers` splits into: every pair it has, then the folds.
 
     Every surround layout has L, R, C, LFE and a surround pair.  A layout with
@@ -112,7 +112,7 @@ def layout_stems(layout: StemLayout, speakers: SpeakerLayout | None) -> tuple[St
         or len(speakers.channels) < SURROUND_CHANNELS
     ):
         return _STEREO_STEMS
-    return surround_stems(speakers)
+    return _surround_stems(speakers)
 
 
 def stem_path(source: Path, output_dir: Path, kind: StemKind) -> Path:

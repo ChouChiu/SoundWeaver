@@ -8,7 +8,7 @@ from PySide6.QtWidgets import QHBoxLayout, QWidget
 from qfluentwidgets import CaptionLabel, ToggleButton, setCustomStyleSheet, themeColor
 
 from soundweaver.core.i18n import t
-from soundweaver.core.playback import SILENCE_DB
+from soundweaver.core.playback_mix import SILENCE_DB
 from soundweaver.ui import fluent, widgets
 
 SELECTED_OBJECT_COLOR = "#e0fbff"
@@ -146,8 +146,8 @@ class MeterRow(QWidget):
         padding = "ToggleButton[hasIcon=false] { padding: 0px; }"
         setCustomStyleSheet(
             button,
-            padding + "ToggleButton:focus { border: 2px solid #242424; }",
-            padding + "ToggleButton:focus { border: 2px solid #ffffff; }",
+            padding + f"ToggleButton:focus {{ border: 2px solid {fluent.focus_stroke_hex(False)}; }}",
+            padding + f"ToggleButton:focus {{ border: 2px solid {fluent.focus_stroke_hex(True)}; }}",
         )
         button.clicked.connect(lambda: signal.emit(self.index))
         row.addWidget(button)
@@ -184,12 +184,8 @@ class MeterRow(QWidget):
         xy: tuple[float, float] | None = None,
     ) -> None:
         self.db_lbl.setText("-∞" if db <= -80.0 else f"{db:.0f}")
-        self.btn_m.blockSignals(True)
         self.btn_m.setChecked(muted)
-        self.btn_m.blockSignals(False)
-        self.btn_s.blockSignals(True)
         self.btn_s.setChecked(soloed)
-        self.btn_s.blockSignals(False)
         if self.xy_view is not None and xy is not None:
             self.xy_view.set_xy(*xy)
         self.bar.set_db(db)

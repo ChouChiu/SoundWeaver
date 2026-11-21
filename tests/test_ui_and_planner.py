@@ -23,6 +23,7 @@ from qfluentwidgets import FluentWindow
 
 from soundweaver.core.audio import AudioInfo
 from soundweaver.core.cancel import CancellationToken
+from soundweaver.core.codecs.mpegh import cicp_layout
 from soundweaver.core.paths import atomic_output
 from soundweaver.core.pcm import AudioData
 from soundweaver.core.planning import dir_problem
@@ -34,10 +35,11 @@ from soundweaver.core.speakers import BY_NAME
 from soundweaver.core.task import Step
 from soundweaver.features.batch.planner import build_batch_plan, find_target_clash
 from soundweaver.features.monitor.playlist_metadata import TrackMetadata
+from soundweaver.features.monitor.speakers import room_speakers, spherical_speakers
 from soundweaver.features.source.inspector import StreamInspectorDialog
 from soundweaver.features.stems.panel import StemsPanel
 from soundweaver.features.tasks.panel import TasksPage
-from soundweaver.ui import fluent
+from soundweaver.ui import fluent, widgets
 from soundweaver.ui.main_window import MainWindow
 from soundweaver.ui.scrolling import DirectScrollArea
 
@@ -107,6 +109,51 @@ class UiAndPlannerTests(unittest.TestCase):
             win.deleteLater()
             self.app.processEvents()
 
+    def test_segmented_input_mode_uses_arrow_keys_and_exposes_selection(self) -> None:
+        win = MainWindow()
+        try:
+            win._go("inputs")
+            win.mode.setCurrentIndex(0)
+            win.show()
+            win.activateWindow()
+            QTest.qWait(320)
+            single = win.mode_bar.widget("single")
+            batch = win.mode_bar.widget("batch")
+            single.setFocus()
+            self.assertTrue(single.isChecked())
+            QTest.keyClick(single, Qt.Key.Key_Right)
+            self.assertEqual(win.mode.currentIndex(), 1)
+            self.assertTrue(batch.isChecked())
+            self.assertTrue(batch.hasFocus())
+            QTest.keyClick(batch, Qt.Key.Key_Space)
+            self.assertTrue(batch.isChecked())
+            QTest.keyClick(batch, Qt.Key.Key_Left)
+            self.assertEqual(win.mode.currentIndex(), 0)
+            self.assertTrue(single.isChecked())
+        finally:
+            win.close_without_asking()
+            win.deleteLater()
+            self.app.processEvents()
+
+    def test_export_fields_keep_order_when_reflowing(self) -> None:
+        first, second = widgets.spin(1, 100, 24), widgets.spin(1, 100, 60)
+        grid = widgets.SettingsGrid([("Width", first, "Frame rate", second)])
+        try:
+            grid.show()
+            grid.resize(800, 200)
+            self.app.processEvents()
+            self.assertEqual(first.y(), second.y())
+            grid.resize(max(200, grid.minimumSizeHint().width()), 200)
+            self.app.processEvents()
+            self.assertLess(first.y(), second.y())
+            self.assertEqual(first.value(), 24)
+            self.assertEqual(second.value(), 60)
+            self.assertEqual(first.accessibleName(), "Width")
+        finally:
+            grid.close()
+            grid.deleteLater()
+            self.app.processEvents()
+
     def test_wheel_responds_immediately_to_pixels_and_detents(self) -> None:
         area = DirectScrollArea()
         try:
@@ -156,7 +203,7 @@ class UiAndPlannerTests(unittest.TestCase):
             stems = win.stackedWidget.currentWidget()
             bar = stems.verticalScrollBar()
             self.assertGreater(bar.maximum(), 0)
-            bar.setValue(min(80, bar.maximum()))
+            bar.setValue(min(80, bar.maximum() // 2))
             previous = bar.value()
 
             win.navigationInterface.widget("settings").click()
@@ -490,7 +537,6 @@ class UiAndPlannerTests(unittest.TestCase):
                 proj = Project(audio=audio_p, info=info, output_dir=out_dir, atmos_layout=BY_NAME["5.1.4"])
                 stems_panel = next(p for p in win.panels if isinstance(p, StemsPanel))
                 stems_panel.set_enabled(True)
-                stems_panel.binaural.setChecked(True)
                 stems_panel.av3a_encode.setChecked(True)
 
                 plan = build_batch_plan(win.panels, [proj], None, is_album=False)
@@ -505,6 +551,20 @@ class UiAndPlannerTests(unittest.TestCase):
             win.close_without_asking()
             win.deleteLater()
             self.app.processEvents()
+
+
+class MonitorSpeakerTests(unittest.TestCase):
+    def test_meter_indices_follow_pcm_order_in_both_projections(self) -> None:
+        surround = BY_NAME["5.1"]
+        room = {speaker.name: speaker.channel for speaker in room_speakers(surround)}
+        self.assertEqual(room, {name: surround.index[name] for name in surround.positions})
+        self.assertEqual(room["Ls"], 4)  # LFE occupies index 3 without a room marker
+
+        layout = cicp_layout(13)
+        dome = {speaker.name: speaker.channel for speaker in spherical_speakers(layout)}
+        self.assertEqual(dome, {
+            speaker.name: i for i, speaker in enumerate(layout.speakers) if not speaker.is_lfe
+        })
 
 
 class OutputPathTests(unittest.TestCase):

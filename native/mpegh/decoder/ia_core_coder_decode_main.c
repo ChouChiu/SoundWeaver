@@ -237,6 +237,18 @@ static VOID ia_core_coder_samples_sat(WORD8 *outbuffer, WORD32 num_samples_out, 
 
   switch (pcmsize)
   {
+  case IMPEGHD_PCM_FLOAT32:
+  {
+    FLOAT32 *out_float = (FLOAT32 *)outbuffer;
+    for (sample = delay_samples; sample < num_samples_out; sample++)
+    {
+      for (ch = 0; ch < num_channel_out; ch++)
+      {
+        *out_float++ = out_samples[channel_pos[ch]][sample];
+      }
+    }
+  }
+  break;
   case 24:
   {
     WORD8 *out_24bit = (WORD8 *)out_buf;

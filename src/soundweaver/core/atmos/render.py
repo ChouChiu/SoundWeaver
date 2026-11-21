@@ -57,7 +57,7 @@ def _rows(y: float, rows: tuple[Row, ...]) -> list[tuple[float, tuple[str, ...]]
     return [(a, a_names), (b, b_names)]
 
 
-def _place(layout: SpeakerLayout, x: float, y: float, z: float) -> np.ndarray:
+def place(layout: SpeakerLayout, x: float, y: float, z: float) -> np.ndarray:
     g = np.zeros(len(layout.channels))
     floor, top = _pair(z) if layout.top else (1.0, 0.0)
     for layer, rows in ((floor, layout.floor), (top, layout.top)):
@@ -123,11 +123,25 @@ def _nearest(layout: SpeakerLayout, mask: np.ndarray, x: float, y: float, z: flo
     """All of the object on the allowed speaker closest to it."""
     positions = {s: p for s, p in layout.positions.items() if mask[layout.index[s]]}
     nearest = min(
-        positions, key=lambda s: sum((p - q) ** 2 for p, q in zip(positions[s], (x, y, z)))
+        positions, key=lambda s: sum((p - q) ** 2 for p, q in zip(positions[s], (x, y, z), strict=False))
     )
     g = np.zeros(len(layout.channels))
     g[layout.index[nearest]] = 1.0
     return g
+
+
+def room_gains(layout: SpeakerLayout, x: float, y: float, z: float) -> np.ndarray:
+    """Speaker gains of an object standing at room `(x, y, z)`, power-normalized.
+
+    The Atmos path reaches this through `object_gains`, which also knows about
+    zones, trims and snapping; a 360RA object brings only a position, and the
+    renderer places it the same way.
+    """
+    g = place(layout, x, y, z)
+    power = float(np.sum(g**2))
+    if power > 0:
+        return g / math.sqrt(power)
+    return _nearest(layout, _zone_mask(layout, 0), x, y, z)
 
 
 @lru_cache(maxsize=4096)
@@ -148,7 +162,7 @@ def object_gains(layout: SpeakerLayout, render: Render, trim: Levels | None = No
     if render.snap:
         g = _nearest(layout, mask, x, y, z)
     else:
-        g = _place(layout, x, y, z) * mask
+        g = place(layout, x, y, z) * mask
         power = np.sum(g**2)
         g = g / np.sqrt(power) if power > 0 else _nearest(layout, mask, x, y, z)
     g = _trim(layout, g, z, trim)
@@ -178,7 +192,7 @@ def bed_gains(
         g[layout.index[label]] = 1.0
     else:
         x, y, z = (SIDE_POSITIONS if backs else {}).get(label, BED_POSITIONS[label])
-        g = _place(layout, x, y, z)
+        g = place(layout, x, y, z)
     trimmed = _trim(layout, g, z, trim)
     trimmed.flags.writeable = False
     return trimmed

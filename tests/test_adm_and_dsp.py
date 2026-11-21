@@ -1,26 +1,32 @@
-"""Tests for ADM BWF reader/caching, trace builder, and stem pipeline + binaural/AV3A exports."""
+"""Tests for ADM BWF reader/caching, trace builder, and stem pipeline and AV3A export."""
 
 from __future__ import annotations
 
 import struct
 import tempfile
+import time
 import unittest
 from pathlib import Path
-from threading import Event
+from threading import Event, Thread
 
 import numpy as np
 
 from soundweaver.core.atmos.adm import AdmFile
-from soundweaver.core.atmos.adm_reader import PreparedADM, is_adm_bwf
-from soundweaver.core.atmos.oamd import Program
+from soundweaver.core.atmos.adm_reader import PreparedADM, _parse_axml, is_adm_bwf
+from soundweaver.core.atmos.oamd import Frame, Program, Render, Update
+from soundweaver.core.atmos.trace import Tracer
 from soundweaver.core.cancel import CancellationToken
 from soundweaver.core.codecs.mpegh import cicp_layout
-from soundweaver.core.pcm import AudioData
 from soundweaver.core.playback_buffer import AdmReadAhead
-from soundweaver.core.playback_mix import cicp_fold_matrix, fold_peak_bound, monitor_gain
+from soundweaver.core.playback_mix import (
+    SILENCE_DB,
+    cicp_fold_matrix,
+    mix_adm_block,
+    monitor_gain,
+)
 from soundweaver.core.speakers import BY_NAME
 from soundweaver.core.stems import StemKind
-from soundweaver.features.stems.service import av3a_target, binaural_target, split_stems
+from soundweaver.features.stems.service import av3a_target, split_stems
 
 AXML_SAMPLE = """<?xml version="1.0" encoding="UTF-8"?>
 <ituADM>
@@ -113,7 +119,9 @@ class AdmAndDspTests(unittest.TestCase):
         pcm[center, 0] = -0.9
         full_mix = pcm.T @ matrix
         self.assertLess(full_mix[0, 0], 1)
-        peak = fold_peak_bound(AudioData(pcm, 48000), matrix, CancellationToken())
+        # The same analytic mute/solo bound `stereo_mix` applies before capping.
+        mask = np.ones(layout.channels)
+        peak = float((np.abs(matrix) * mask[:, None]).sum(axis=0).max())
         pcm[center, 0] = 0
         solo_mix = pcm.T @ matrix
         self.assertGreater(solo_mix[0, 0], 1)
@@ -141,8 +149,27 @@ class AdmAndDspTests(unittest.TestCase):
             finally:
                 adm.close()
 
+    def test_adm_monitor_keeps_object_solo_and_bed_mix_in_sync(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            wav = Path(tmp) / "monitor.wav"
+            _write_adm_wav(wav)
+            adm = PreparedADM(wav)
+            try:
+                layout = BY_NAME["5.1"]
+                full, objects = mix_adm_block(adm, layout, 0, 1024, set(), set())
+                bed, muted = mix_adm_block(adm, layout, 0, 1024, {0}, set())
+                solo, selected = mix_adm_block(adm, layout, 0, 1024, set(), {0})
+                np.testing.assert_allclose(full, bed + solo, atol=1e-7)
+                self.assertGreater(float(np.abs(solo).max()), 0)
+                self.assertEqual(len(objects), 1)
+                self.assertEqual(selected, objects)
+                self.assertFalse(muted[0].active)
+                self.assertEqual(muted[0].level_db, SILENCE_DB)
+            finally:
+                adm.close()
+
     def test_adm_playback_file_survives_decoder_completion(self) -> None:
-        progress = AdmReadAhead(CancellationToken())
+        progress = AdmReadAhead(CancellationToken(), sample_rate=4)
         release = Event()
         finished = Event()
 
@@ -181,7 +208,225 @@ class AdmAndDspTests(unittest.TestCase):
                 reader.close()
             progress.close()
 
-    def test_stems_split_binaural_and_av3a_encode(self) -> None:
+    def test_adm_size_respects_authored_ramp_and_jump(self) -> None:
+        data = b"""
+        <audioFormatExtended>
+          <audioChannelFormat audioChannelFormatID="AC_00031001" typeLabel="0003">
+            <audioBlockFormat rtime="0" duration="1">
+              <position coordinate="azimuth">0</position>
+            </audioBlockFormat>
+            <audioBlockFormat rtime="1" duration="1">
+              <position coordinate="azimuth">0</position>
+              <height>180</height>
+              <jumpPosition>0</jumpPosition>
+            </audioBlockFormat>
+            <audioBlockFormat rtime="2" duration="1">
+              <position coordinate="azimuth">0</position>
+              <jumpPosition>1</jumpPosition>
+            </audioBlockFormat>
+          </audioChannelFormat>
+        </audioFormatExtended>
+        """
+        channels, _, _ = _parse_axml(data)
+        _, _, blocks, _ = channels["AC_00031001"]
+        self.assertEqual(blocks[0].size_at(0.5), 0.0)
+        self.assertEqual(blocks[1].size_at(1.5), 0.25)
+        self.assertEqual(blocks[1].size_at(2.0), 0.5)
+        self.assertEqual(blocks[2].size_at(2.0), 0.0)
+
+    def test_atmos_size_only_updates_survive_adm_export_and_playback(self) -> None:
+        rate = 48000
+        program = Program((), 0, 1)
+        tracer = Tracer(rate, 0, rate, rate // 8, BY_NAME["5.1"])
+        for frame, size, ramp in ((0, 0.0, 0), (2, 0.75, rate // 8), (6, 0.0, 0)):
+            update = Update(0, ramp, True, 0.0, Render(size=(size,) * 3))
+            tracer.metadata(frame, Frame(1, program, [[update]]))
+        self.assertEqual(len(tracer.keys[0]), 1)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            for playback in (False, True):
+                with self.subTest(playback=playback):
+                    path = Path(tmp) / f"size-{playback}.wav"
+                    writer = AdmFile(path, rate, rate, program, 1)
+                    try:
+                        if playback:
+                            writer.prepare_readback(tracer.keys, tracer.size_keys)
+                        writer.write_pcm(bytes(3 * rate))
+                        if playback:
+                            writer.file.flush()
+                        else:
+                            writer.close(tracer.keys, tracer.size_keys)
+                        reader = PreparedADM(path)
+                        try:
+                            track = reader.tracks[0]
+                            self.assertEqual(reader.block_at(track, 0.125).size, 0.0)
+                            growing = reader.block_at(track, 0.32)
+                            self.assertGreater(growing.size, 0.0)
+                            self.assertLess(growing.size, 0.75)
+                            self.assertEqual(reader.block_at(track, 0.5).size, 0.75)
+                            self.assertEqual(reader.block_at(track, 0.875).size, 0.0)
+                            self.assertEqual({(b.x, b.y, b.z) for b in track.blocks}, {(0.5, 0.5, 0.0)})
+                        finally:
+                            reader.close()
+                    finally:
+                        writer.discard()
+
+    def test_adm_playback_file_grows_its_metadata_while_playing(self) -> None:
+        """The published ADM keeps its PCM readable while the axml timeline is rewritten."""
+        rate = 48000
+        program = Program((), 0, 1)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "grow.wav"
+            writer = AdmFile(path, rate, rate, program, 1)
+            try:
+                keys = {0: [(0.0, 0.0, 0.5, 0.5, 0.0, True)]}
+                readback = writer.prepare_readback(keys)
+                writer.write_pcm(bytes(3 * rate // 2))  # the first half second
+                writer.file.flush()
+                reader = PreparedADM(readback)
+                try:
+                    self.assertEqual(reader.frame_count, rate)
+                    self.assertEqual(
+                        (reader.block_at(reader.tracks[0], 0.75).x,
+                         reader.block_at(reader.tracks[0], 0.75).z),
+                        (0.5, 0.0),
+                    )
+                    self.assertFalse(reader.refresh())  # nothing grew yet
+
+                    # the scan moves the object and the PCM keeps appending underneath
+                    keys[0].append((0.5, 0.0, -1.0, 1.0, 1.0, True))
+                    writer.refresh(force=True)
+                    time.sleep(0.11)  # past the reader's probe interval
+                    self.assertTrue(reader.refresh())
+                    self.assertEqual(
+                        (reader.block_at(reader.tracks[0], 0.75).x,
+                         reader.block_at(reader.tracks[0], 0.75).z),
+                        (0.0, 1.0),
+                    )
+
+                    writer.write_pcm(b"\x01\x00\x00" * (rate // 2))
+                    writer.file.flush()
+                    pcm = reader.read_frames(0, rate)
+                    self.assertEqual(pcm.shape, (rate, 1))
+                    self.assertTrue((pcm[: rate // 2] == 0.0).all())
+                    self.assertTrue((pcm[rate // 2 :] == 1 / 8388608).all())
+                finally:
+                    reader.close()
+            finally:
+                writer.discard()
+
+    def test_prepared_adm_refresh_keeps_tracks_when_the_rewrite_tears(self) -> None:
+        rate = 48000
+        program = Program((), 0, 1)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "torn.wav"
+            writer = AdmFile(path, rate, rate, program, 1)
+            try:
+                keys = {0: [(0.0, 0.0, 0.5, 0.5, 0.0, True)]}
+                readback = writer.prepare_readback(keys)
+                reader = PreparedADM(readback)
+                try:
+                    self.assertFalse(reader.refresh())
+                    time.sleep(0.11)
+
+                    # a rewrite that died between the length field and the body
+                    with path.open("r+b") as fh:
+                        fh.seek(reader._axml_offset - 4)
+                        fh.write(struct.pack("<I", 4096))
+                    self.assertFalse(reader.refresh())  # truncated body: keep the old tracks
+                    self.assertEqual(reader.tracks[0].blocks[0].x, 0.5)
+                    time.sleep(0.11)
+
+                    writer.keys[0].append((0.5, 0.0, -1.0, 1.0, 1.0, True))
+                    writer.refresh(force=True)
+                    self.assertTrue(reader.refresh())
+                    self.assertEqual(reader.tracks[0].blocks[-1].x, 0.0)
+                finally:
+                    reader.close()
+            finally:
+                writer.discard()
+
+    def test_adm_reader_tracks_a_growing_axml_while_pcm_appends(self) -> None:
+        """A writer thread appends PCM and rewrites the axml; the mixer-side reader never errors."""
+        rate = 48000
+        program = Program((), 0, 1)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "race.wav"
+            writer = AdmFile(path, rate, rate * 2, program, 1)
+            keys = {0: [(0.0, 0.0, 0.5, 0.5, 0.0, True)]}
+            readback = writer.prepare_readback(keys)
+            reader = PreparedADM(readback)
+            errors: list[Exception] = []
+            reached: list[float] = []
+            stop = Event()
+            try:
+
+                def play() -> None:
+                    t = 0.0
+                    try:
+                        while not stop.is_set() and t < 1.9:
+                            reader.refresh()
+                            point = reader.block_at(reader.tracks[0], t)
+                            if point is not None:
+                                reached.append(point.x)
+                            reader.read_frames(min(rate - 1, int(t * rate)), 64)
+                            t += 0.05
+                            # pace the playhead so its last polls land after the
+                            # writer's final rewrite and the probes picked it up
+                            time.sleep(0.02)
+                    except Exception as error:  # the audio path must never see these
+                        errors.append(error)
+
+                player = Thread(target=play, daemon=True)
+                player.start()
+                for step in range(1, 20):
+                    keys[0].append((step * 0.1, 0.0, min(1.0, step / 10), 0.5, 0.0, True))
+                    writer.refresh(force=True)
+                    writer.write_pcm(bytes(3 * rate // 20))
+                    writer.file.flush()
+                    time.sleep(0.005)
+                # the reader walks the whole timeline past the writer's last rewrite
+                player.join(2)
+                stop.set()
+                player.join(1)
+            finally:
+                stop.set()
+                reader.close()
+                writer.discard()
+        self.assertEqual(errors, [])
+        # the reader picked up the growing timeline: x walks to the right edge
+        self.assertGreater(max(reached, default=0.0), 0.95)
+
+    def test_adm_playback_limits_decode_ahead_and_restarts_after_seek(self) -> None:
+        rate = 4
+        progress = AdmReadAhead(CancellationToken(), sample_rate=rate)
+        release = Event()
+        first_window = Event()
+        advanced = Event()
+
+        def decode(target, publish):
+            publish(target, rate // 2)
+            if not release.wait(2):
+                raise TimeoutError("playback did not open the initial buffer")
+            first_window.set()
+            publish(target, rate * 6)
+            advanced.set()
+            publish(target, rate * 7)
+
+        try:
+            progress.start(decode)
+            self.assertEqual(progress.state(), (2, False, None))
+            release.set()
+            self.assertTrue(first_window.wait(2))
+            self.assertFalse(advanced.wait(0.05))
+            progress.request(rate * 4)
+            self.assertTrue(advanced.wait(2))
+            self.assertEqual(progress.wait_for(rate * 8), rate * 7)
+        finally:
+            release.set()
+            progress.close()
+
+    def test_stems_split_and_av3a_encode(self) -> None:
         import soundfile as sf
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -205,12 +450,10 @@ class AdmAndDspTests(unittest.TestCase):
                 atmos=False,
                 adm=None,
                 speakers=BY_NAME["5.1"],
-                binaural=True,
                 av3a_encode=True,
                 token=CancellationToken(),
                 report=lambda _pct, _msg: None,
             )
             self.assertTrue((out_dir / "bed51_surround.wav").is_file())
-            self.assertTrue(binaural_target(out_dir, src).is_file())
             self.assertTrue(av3a_target(out_dir, src).is_file())
 

@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import struct
 from collections.abc import Iterator
+from contextlib import closing
+from dataclasses import dataclass
+from itertools import islice, pairwise
 from pathlib import Path
 
-_MP4_SUFFIXES = (".mp4", ".m4a", ".mov")
+_MP4_SUFFIXES = (".mp4", ".m4a", ".m4v", ".mov")
 _TS_PACKET_SIZES = (188, 192, 204)
 
 
@@ -67,36 +70,129 @@ def find_mp4_moov(path: Path) -> bytes | None:
     return None
 
 
-def _stsd_has_entry(stbl: bytes, s_start: int, s_end: int, entry_codes: tuple[bytes, ...]) -> bool:
-    for btype, start, end in iter_boxes(stbl, s_start, s_end):
-        if btype == b"stsd" and end - start >= 8:
-            for entry_type, _, _ in iter_boxes(stbl, start + 8, end):
-                if entry_type in entry_codes:
-                    return True
-    return False
+@dataclass(frozen=True, slots=True)
+class SampleEntry:
+    track_id: int
+    index: int
+    kind: bytes
+    data: bytes
+    table: bytes
+    fragmented: bool
 
 
-def find_stbl_for_entries(moov: bytes, entry_codes: tuple[bytes, ...]) -> bytes | None:
-    """Return the `stbl` payload bytes whose `stsd` contains any of `entry_codes`."""
-    for btype, s, e in iter_boxes(moov):
-        if btype != b"trak":
+def find_sample_entry(moov: bytes, entry_codes: tuple[bytes, ...]) -> SampleEntry | None:
+    """Locate a sample description and the table of its own track."""
+    fragmented = any(kind == b"mvex" for kind, _, _ in iter_boxes(moov))
+    for kind, start, end in iter_boxes(moov):
+        if kind != b"trak":
             continue
-        for ttype, ts, te in iter_boxes(moov, s, e):
+        track_id = 0
+        for kind, pos, stop in iter_boxes(moov, start, end):
+            if kind == b"tkhd" and stop - pos >= 16:
+                offset = 20 if moov[pos] == 1 else 12
+                if pos + offset + 4 <= stop:
+                    track_id = struct.unpack_from(">I", moov, pos + offset)[0]
+        for ttype, ts, te in iter_boxes(moov, start, end):
             if ttype != b"mdia":
                 continue
             for mtype, ms, me in iter_boxes(moov, ts, te):
                 if mtype != b"minf":
                     continue
                 for ntype, ns, ne in iter_boxes(moov, ms, me):
-                    if ntype == b"stbl" and _stsd_has_entry(moov, ns, ne, entry_codes):
-                        return moov[ns:ne]
+                    if ntype != b"stbl":
+                        continue
+                    for stype, ss, se in iter_boxes(moov, ns, ne):
+                        if stype != b"stsd" or se - ss < 8:
+                            continue
+                        for index, (tag, es, ee) in enumerate(iter_boxes(moov, ss + 8, se), 1):
+                            if tag in entry_codes:
+                                return SampleEntry(
+                                    track_id, index, tag, moov[es:ee], moov[ns:ne], fragmented,
+                                )
     return None
 
 
 def has_mp4_sample_entry(path: Path, entry_codes: tuple[bytes, ...]) -> bool:
-    """True when `path` is an MP4/M4A/MOV carrying a track with `stsd` sample entry in `entry_codes`."""
+    """True when the container carries a track with one of the given sample entries."""
     moov = find_mp4_moov(path)
-    return moov is not None and find_stbl_for_entries(moov, entry_codes) is not None
+    return moov is not None and find_sample_entry(moov, entry_codes) is not None
+
+
+@dataclass(frozen=True, slots=True)
+class SampleTable:
+    count: int
+    fixed_size: int
+    sizes: bytes
+    offsets: tuple[int, ...]
+    runs: tuple[tuple[int, int, int], ...]
+
+    def read_chunks(self, path: Path, index: int) -> Iterator[bytes]:
+        """Read contiguous samples in file order within each selected track chunk."""
+        sizes = (size for (size,) in struct.iter_unpack(">I", self.sizes))
+        run = 0
+        read = 0
+        with path.open("rb") as source:
+            file_size = source.seek(0, 2)
+            for chunk, offset in enumerate(self.offsets, 1):
+                while run + 1 < len(self.runs) and self.runs[run + 1][0] <= chunk:
+                    run += 1
+                _, samples, description = self.runs[run]
+                count = min(samples, self.count - read)
+                length = count * self.fixed_size if self.fixed_size else sum(islice(sizes, count))
+                read += count
+                if description != index:
+                    raise ValueError("MP4 audio sample description changes within the track.")
+                if offset + length > file_size:
+                    raise ValueError("Truncated MP4 audio chunk.")
+                source.seek(offset)
+                # A chunk can contain an entire track, so keep reads bounded.
+                while length:
+                    part = source.read(min(length, 65536))
+                    if not part:
+                        raise ValueError("Truncated MP4 audio chunk.")
+                    length -= len(part)
+                    yield part
+                if read == self.count:
+                    break
+        if read != self.count:
+            raise ValueError("MP4 audio sample table ended before the last sample.")
+
+
+def _table_entries(box: bytes, start: int, count: int, fmt: str) -> Iterator[tuple]:
+    size = struct.calcsize(fmt)
+    end = start + count * size
+    if end > len(box):
+        raise ValueError("Truncated MP4 audio sample table.")
+    return struct.iter_unpack(fmt, box[start:end])
+
+
+def read_sample_table(entry: SampleEntry) -> SampleTable | None:
+    if entry.fragmented:
+        return None
+    count = fixed = 0
+    sizes = b""
+    offsets: tuple[int, ...] = ()
+    runs: tuple[tuple[int, int, int], ...] = ()
+    for kind, start, end in iter_boxes(entry.table):
+        box = entry.table[start:end]
+        if kind == b"stsz" and len(box) >= 12:
+            fixed, count = struct.unpack_from(">II", box, 4)
+            if not fixed:
+                if 12 + count * 4 > len(box):
+                    raise ValueError("Truncated MP4 audio sample sizes.")
+                sizes = box[12 : 12 + count * 4]
+        elif kind in (b"stco", b"co64", b"stsc") and len(box) >= 8:
+            length = struct.unpack_from(">I", box, 4)[0]
+            if kind == b"stsc":
+                runs = tuple(_table_entries(box, 8, length, ">III"))
+            else:
+                fmt = ">Q" if kind == b"co64" else ">I"
+                offsets = tuple(value for (value,) in _table_entries(box, 8, length, fmt))
+    if not count or not offsets or not runs:
+        return None
+    if runs[0][0] != 1 or any(x[0] >= y[0] for x, y in pairwise(runs)):
+        raise ValueError("Invalid MP4 chunk-to-sample table.")
+    return SampleTable(count, fixed, sizes, offsets, runs)
 
 
 def extract_elementary_stream(
@@ -104,54 +200,13 @@ def extract_elementary_stream(
 ) -> bool:
     """Extract raw elementary stream frames from an MP4 track matching `entry_codes`."""
     moov = find_mp4_moov(mp4_path)
-    if moov is None:
+    entry = find_sample_entry(moov, entry_codes) if moov is not None else None
+    table = read_sample_table(entry) if entry else None
+    if entry is None or table is None:
         return False
-    stbl = find_stbl_for_entries(moov, entry_codes)
-    if stbl is None:
-        return False
-
-    sample_sizes: list[int] = []
-    chunk_offsets: list[int] = []
-    stsc_entries: list[tuple[int, int]] = []
-
-    for btype, s, e in iter_boxes(stbl):
-        box = stbl[s:e]
-        if btype == b"stsz" and len(box) >= 12:
-            fixed_sz, count = struct.unpack(">II", box[4:12])
-            if fixed_sz > 0:
-                sample_sizes = [fixed_sz] * count
-            else:
-                n = min(count, (len(box) - 12) // 4)
-                sample_sizes = [struct.unpack(">I", box[12 + i * 4 : 16 + i * 4])[0] for i in range(n)]
-        elif btype == b"stco" and len(box) >= 8:
-            count = min(struct.unpack(">I", box[4:8])[0], (len(box) - 8) // 4)
-            chunk_offsets = [struct.unpack(">I", box[8 + i * 4 : 12 + i * 4])[0] for i in range(count)]
-        elif btype == b"co64" and len(box) >= 8:
-            count = min(struct.unpack(">I", box[4:8])[0], (len(box) - 8) // 8)
-            chunk_offsets = [struct.unpack(">Q", box[8 + i * 8 : 16 + i * 8])[0] for i in range(count)]
-        elif btype == b"stsc" and len(box) >= 8:
-            count = min(struct.unpack(">I", box[4:8])[0], (len(box) - 8) // 12)
-            for i in range(count):
-                first_chunk, spc, _ = struct.unpack(">III", box[8 + i * 12 : 20 + i * 12])
-                stsc_entries.append((first_chunk, spc))
-
-    if not sample_sizes or not chunk_offsets or not stsc_entries:
-        return False
-
-    with mp4_path.open("rb") as in_fh, out_path.open("wb") as out_fh:
-        sample_idx = 0
-        stsc_idx = 0
-        for c_idx, offset in enumerate(chunk_offsets):
-            chunk_num = c_idx + 1
-            while stsc_idx + 1 < len(stsc_entries) and stsc_entries[stsc_idx + 1][0] <= chunk_num:
-                stsc_idx += 1
-            spc = stsc_entries[stsc_idx][1]
-            in_fh.seek(offset)
-            for _ in range(spc):
-                if sample_idx >= len(sample_sizes):
-                    break
-                out_fh.write(in_fh.read(sample_sizes[sample_idx]))
-                sample_idx += 1
+    with closing(table.read_chunks(mp4_path, entry.index)) as chunks, out_path.open("wb") as output:
+        for chunk in chunks:
+            output.write(chunk)
     return out_path.stat().st_size > 0
 
 

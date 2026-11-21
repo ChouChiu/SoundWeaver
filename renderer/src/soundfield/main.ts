@@ -8,7 +8,8 @@ import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import type { SoundfieldOptions, SoundfieldScene } from "../shared/api";
 import { setFrameSize, setLineResolution } from "./lines";
 import { ObjectView } from "./objects";
-import { camera, placeHead, ROOM_HALF, silhouette, speakerMarkers, tint, world } from "./scene";
+import { placeHead, silhouette } from "../shared/listener";
+import { camera, ROOM_HALF, speakerMarkers, tint, world } from "./scene";
 import * as timeline from "./timeline";
 import { KeyedError } from "../shared/errors";
 
@@ -95,7 +96,9 @@ async function load(data: SoundfieldScene, options: SoundfieldOptions, glb: stri
 		scaleFor = () => SILHOUETTE_SCALE * options.headScale;
 	}
 	tint(head);
-	scene.add(placeHead(head, scaleFor));
+	const listener = placeHead(head, scaleFor);
+	listener.position.set(0, -ROOM_HALF.y, 0.05);
+	scene.add(listener);
 
 	if (options.showSpeakers && data.speakers?.length) {
 		scene.add(speakerMarkers(data.speakers));

@@ -37,5 +37,6 @@
 
 /* extern avs3 encoder */
 int avs3_encoder(int argc, char* argv[]);
+int avs3_encoder_payload(int argc, char* argv[]);
 
 #endif

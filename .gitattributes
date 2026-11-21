@@ -1,0 +1,8 @@
+# native/ bundles upstream codec sources (MPEG-H 3D.codec fork, AVS3 decoder/encoder,
+# the reference Audio Vivid CLI). It is vendored upstream code, not first-party
+# Python/TS, so keep it out of repository language statistics.
+native/** linguist-vendored=true
+
+# Precompiled model and staged worker binaries never diff meaningfully.
+native/av3a/model.bin binary
+src/soundweaver/bin/** binary

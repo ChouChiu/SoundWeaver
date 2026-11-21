@@ -31,28 +31,33 @@ from qfluentwidgets import (
     InfoBarPosition,
     NavigationItemPosition,
     PushButton,
-    SegmentedWidget,
     TitleLabel,
 )
 
 from soundweaver.core import ffmpeg
 from soundweaver.core.i18n import get_language, set_language, t
-from soundweaver.core.planning import build_context, dir_problem, find_target_clash, output_problems
+from soundweaver.core.planning import find_target_clash
 from soundweaver.core.playback import PlaybackEngine
-from soundweaver.core.project import PlanContext, Project
+from soundweaver.core.project import Project
 from soundweaver.core.runner import Outcome
 from soundweaver.core.sources import kind_of
 from soundweaver.features.batch.panel import BatchPanel
-from soundweaver.features.batch.planner import BatchPlan, build_batch_plan
+from soundweaver.features.batch.planner import BatchPlan
 from soundweaver.features.monitor import MonitorPage
-from soundweaver.features.registry import output_panels
+from soundweaver.features.monitor.player_bar import PlayerBar
 from soundweaver.features.source.panel import SourcePanel
 from soundweaver.features.tasks.panel import TasksPage
 from soundweaver.ui import fluent, widgets
 from soundweaver.ui.action_bar import ActionBar
-from soundweaver.ui.feature import FeaturePanel, PageHeader
+from soundweaver.ui.export_workflow import (
+    BatchSelection,
+    ExportAssessment,
+    assess_exports,
+    plan_single,
+)
+from soundweaver.ui.feature import PageHeader
+from soundweaver.ui.feature_registry import output_panels
 from soundweaver.ui.outputs import OutputList
-from soundweaver.ui.player_bar import PlayerBar
 from soundweaver.ui.scrolling import DirectScrollArea, use_direct_wheel
 from soundweaver.ui.settings import SettingsPage
 
@@ -128,8 +133,11 @@ class MainWindow(FluentWindow):
         self.panels = output_panels(self.settings)
         for inputs in (self.source, self.batch):
             inputs.changed.connect(self._sources_changed)
+        # Replanning walks every track x every panel; coalesce setting bursts so
+        # a run of toggles recomputes once, after 150 quiet milliseconds.
+        self._ready_debounce = widgets.Debouncer(self._update_ready, ms=150, parent=self)
         for panel in self.panels:
-            panel.changed.connect(self._update_ready)
+            panel.changed.connect(self._ready_debounce.poke)
             panel.tracks_changed.connect(self._tracks_changed)
 
         self.stackedWidget.setAnimationEnabled(False)
@@ -143,45 +151,48 @@ class MainWindow(FluentWindow):
         self._sources_changed()
 
     def _build_actions(self) -> None:
-        def action(text: str, icon: str, slot, shortcut=None) -> Action:
-            act = Action(fluent.icon(icon), text, self)
+        self._action_keys: list[tuple[Action, str]] = []
+
+        def action(key: str, icon: str, slot, shortcut=None) -> Action:
+            act = Action(fluent.icon(icon), t(key), self)
             if shortcut is not None:
                 act.setShortcut(shortcut)
                 keys = act.shortcut().toString(QKeySequence.SequenceFormat.NativeText)
-                act.setToolTip(t("common.with_note", text=text, note=keys))
+                act.setToolTip(t("common.with_note", text=t(key), note=keys))
             act.triggered.connect(slot)
             self.addAction(act)
+            self._action_keys.append((act, key))
             return act
 
         self.act_audio = action(
-            t("action.open_audio"), "document-open", self._single(self.source.pick_audio),
+            "action.open_audio", "document-open", self._single(self.source.pick_audio),
             QKeySequence.StandardKey.Open,
         )
         self.act_batch_files = action(
-            t("action.batch_add"), "list-add", self._batch_files, QKeySequence("Ctrl+Shift+B")
+            "action.batch_add", "list-add", self._batch_files, QKeySequence("Ctrl+Shift+B")
         )
         self.act_batch_folder = action(
-            t("action.add_album_folder"), "folder-add", self._batch_folder, QKeySequence("Ctrl+Shift+M")
+            "action.add_album_folder", "folder-add", self._batch_folder, QKeySequence("Ctrl+Shift+M")
         )
         self.act_cover = action(
-            t("action.select_cover"), "insert-image", self._single(self.source.pick_cover),
+            "action.select_cover", "insert-image", self._single(self.source.pick_cover),
             QKeySequence("Ctrl+Shift+O"),
         )
         self.act_ttml = action(
-            t("action.select_lyrics"), "text-xml", self._single(self.source.pick_ttml),
+            "action.select_lyrics", "text-xml", self._single(self.source.pick_ttml),
             QKeySequence("Ctrl+L"),
         )
         self.act_open_dir = action(
-            t("action.open_output_dir"), "folder-open", self._open_output_dir, QKeySequence("Ctrl+E")
+            "action.open_output_dir", "folder-open", self._open_output_dir, QKeySequence("Ctrl+E")
         )
         self.act_quit = action(
-            t("action.quit"), "application-exit", self.close, QKeySequence.StandardKey.Quit
+            "action.quit", "application-exit", self.close, QKeySequence.StandardKey.Quit
         )
         self.act_start = action(
-            t("action.start"), "media-playback-start", self._start, QKeySequence("Ctrl+Return")
+            "action.start", "media-playback-start", self._start, QKeySequence("Ctrl+Return")
         )
         self.act_cancel = action(
-            t("action.cancel"), "process-stop", self._handle_escape, QKeySequence("Escape")
+            "action.cancel", "process-stop", self._handle_escape, QKeySequence("Escape")
         )
         self.act_cancel.setEnabled(False)
         self.input_actions = (
@@ -209,23 +220,24 @@ class MainWindow(FluentWindow):
         nav.vBoxLayout.setContentsMargins(0, 48, 0, 4)
         self.widgetLayout.setContentsMargins(0, 44, 0, 0)
         self._routes: dict[str, QWidget] = {}
+        self._nav_keys: list[tuple[QWidget, str]] = []
 
         inputs_page = self._build_inputs_page()
         inputs_page.setObjectName(ROUTE_INPUTS)
-        self._add_route(ROUTE_INPUTS, "home", t("nav.materials"), inputs_page)
-        self.navigationInterface.addItemHeader(t("nav.outputs_header"))
+        self._add_route(ROUTE_INPUTS, "home", "nav.materials", inputs_page)
+        self.outputs_header = self.navigationInterface.addItemHeader(t("nav.outputs_header"))
         self.headers: list[PageHeader] = []
         for index, panel in enumerate(self.panels):
             header = PageHeader(panel)
             self.headers.append(header)
             route = f"{ROUTE_OUTPUT}{index}"
             page = _scroll_page(route, header, widgets.hint_label(panel.description), panel)
-            self._add_route(route, panel.icon, panel.title, page)
+            self._add_route(route, panel.icon, panel.title_key, page)
 
         self._add_route(
             ROUTE_MONITOR,
             "audio-speakers-symbolic",
-            t("nav.monitor"),
+            "nav.monitor",
             _scroll_page(ROUTE_MONITOR, self.monitor_page, stretch_last=True),
             NavigationItemPosition.BOTTOM,
         )
@@ -234,7 +246,7 @@ class MainWindow(FluentWindow):
         self.tasks_page.progress.connect(self._on_progress)
         self.tasks_page.finished.connect(self._on_finished)
         self._add_route(
-            ROUTE_TASKS, "view-list-details", t("nav.tasks_logs"), self.tasks_page,
+            ROUTE_TASKS, "view-list-details", "nav.tasks_logs", self.tasks_page,
             NavigationItemPosition.BOTTOM,
         )
         self.settings_page = SettingsPage(
@@ -249,7 +261,7 @@ class MainWindow(FluentWindow):
         self.settings_page.language_picked.connect(self._set_language)
         self.settings_page.about_requested.connect(self._about)
         self._add_route(
-            ROUTE_SETTINGS, "preferences-system", t("nav.settings"), self.settings_page,
+            ROUTE_SETTINGS, "preferences-system", "nav.settings", self.settings_page,
             NavigationItemPosition.BOTTOM,
         )
 
@@ -286,13 +298,15 @@ class MainWindow(FluentWindow):
         self,
         key: str,
         icon: str,
-        text: str,
+        text_key: str,
         page: QWidget,
         position: NavigationItemPosition = NavigationItemPosition.TOP,
     ) -> None:
         self._routes[key] = page
+        text = t(text_key)
         self.addSubInterface(page, fluent.icon(icon), text, position)
         item = self.navigationInterface.widget(key)
+        self._nav_keys.append((item, text_key))
         widgets.keyboard_activate(item, text, item.click)
 
     def _on_route_changed(self) -> None:
@@ -304,15 +318,15 @@ class MainWindow(FluentWindow):
             self.monitor_page.exit_full_window()
 
     def _build_inputs_page(self) -> QWidget:
-        self.mode_bar = SegmentedWidget()
+        self.mode_bar = widgets.SegmentedChoice()
         self.mode = widgets.CurrentPageStack()
         for key, text, icon, page in (
             (MODES[SINGLE], t("inputs.single_mode"), "audio-x-generic", self.source),
             (MODES[BATCH], t("inputs.batch_mode"), "view-media-playlist", self.batch),
         ):
             self.mode.addWidget(page)
-            self.mode_bar.addItem(
-                key, text, lambda _=False, p=page: self.mode.setCurrentWidget(p), fluent.icon(icon)
+            self.mode_bar.add_choice(
+                key, text, lambda p=page: self.mode.setCurrentWidget(p), fluent.icon(icon)
             )
         self.mode_bar.setCurrentItem(MODES[SINGLE])
         self.mode.currentChanged.connect(self._mode_changed)
@@ -405,41 +419,17 @@ class MainWindow(FluentWindow):
     def _project(self) -> Project:
         return self.batch.current_project() if self._is_batch else self.source.project()
 
-    def _context(self) -> PlanContext:
-        return build_context(self.panels, self._project(), batch=self._is_batch)
-
-    def _active(self, ctx: PlanContext) -> list[FeaturePanel]:
-        return [panel for panel in self.panels if panel.is_active(ctx)]
-
-    def _batch_plan(self) -> BatchPlan:
-        album = self.batch.is_album
-        return build_batch_plan(
-            self.panels,
-            self.batch.projects(),
-            self.batch.album_project() if album else None,
-            is_album=album,
-        )
-
-    def _blocker(self, ctx: PlanContext, problems: dict[int, str], batch_plan: BatchPlan | None) -> str | None:
-        if self._missing_tools:
-            return t(
-                "status.missing_dependencies_blocker",
-                tools=t("common.list_sep").join(self._missing_tools),
+    def _assess_export(self) -> ExportAssessment:
+        batch = None
+        if self._is_batch:
+            is_album = self.batch.is_album
+            batch = BatchSelection(
+                self.batch.projects(),
+                self.batch.album_project() if is_album else None,
+                is_album,
+                self.batch.busy,
             )
-        if not any(panel.enabled for panel in self.panels):
-            return t("status.no_output_selected")
-        if batch_plan is not None:
-            if not self.batch.tracks:
-                return t("batch.blocker_no_tracks")
-            if self.batch.busy:
-                return t("batch.reading_track_info")
-            if not batch_plan.steps:
-                return t("batch.blocker_no_runnable")
-            return None
-        if problems:
-            index, text = next(iter(problems.items()))
-            return t("common.labeled", label=self.panels[index].title, text=text)
-        return dir_problem(ctx.project.output_dir)
+        return assess_exports(self.panels, self._project(), self._missing_tools, batch)
 
     def _tracks_changed(self) -> None:
         self.source.layout_changed()
@@ -454,52 +444,22 @@ class MainWindow(FluentWindow):
     def _update_ready(self) -> None:
         if self._restoring or self.tasks_page.running:
             return
-        ctx = self._context()
-        out = self._output_dir()
-        has_dir = bool(out and out.is_dir())
-        self.act_open_dir.setEnabled(has_dir)
-        problems = output_problems(ctx, self.panels)
-        plan = self._batch_plan() if self._is_batch else None
-        shares = plan.shares if plan is not None else {}
+        assessment = self._assess_export()
         self.outputs.sync(self.panels)
-        statuses = []
-        for index, panel in enumerate(self.panels):
-            if index in shares:
-                status = shares[index]
-            elif index in problems:
-                status = (problems[index], True)
-            elif panel.is_active(ctx):
-                status = (panel.summary(ctx) or "", False)
-            else:
-                status = (t("switch.disabled"), False)
-            statuses.append(status)
-            self.headers[index].sync(panel.enabled, *status)
-        self.outputs.set_statuses(statuses)
-        if plan is not None:
+        for panel, header, status in zip(self.panels, self.headers, assessment.statuses, strict=True):
+            header.sync(panel.enabled, *status)
+        self.outputs.set_statuses(assessment.statuses)
+        if (plan := assessment.batch_plan) is not None:
             for index, (text, problem) in enumerate(plan.status):
                 self.batch.set_status(index, text, problem)
-        blocker = self._blocker(ctx, problems, plan)
-        self.action_bar.set_ready(can_open_dir=has_dir, can_start=blocker is None)
-        self.act_start.setEnabled(blocker is None)
-        if blocker:
-            self.action_bar.set_summary(blocker)
-            return
-        if plan is not None:
-            album = t("batch.album_prefix") if self.batch.is_album else t("batch.batch_prefix")
-            self.action_bar.set_summary(
-                t(
-                    "batch.summary_label",
-                    mode=album,
-                    tracks=plan.tracks,
-                    total=len(self.batch.tracks),
-                    steps=len(plan.steps),
-                )
-            )
-            return
-        parts = [s for panel in self._active(ctx) if (s := panel.summary(ctx))]
-        self.action_bar.set_summary(
-            t("inputs.to_generate", items=t("common.list_sep").join(parts))
-        )
+
+        out = self._output_dir()
+        has_dir = out is not None and out.is_dir()
+        can_start = assessment.blocker is None
+        self.act_open_dir.setEnabled(has_dir)
+        self.act_start.setEnabled(can_start)
+        self.action_bar.set_ready(can_open_dir=has_dir, can_start=can_start)
+        self.action_bar.set_summary(assessment.summary)
 
     def _open_output_settings(self, item) -> None:
         index = self.outputs.row(item)
@@ -516,47 +476,46 @@ class MainWindow(FluentWindow):
             return
         inputs_panel = self.batch if self._is_batch else self.source
         inputs_panel.flush_pending_edits()
-        ctx = self._context()
-        plan = self._batch_plan() if self._is_batch else None
-        problems = {} if plan is not None else output_problems(ctx, self.panels)
-        blocker = self._blocker(ctx, problems, plan)
-        if blocker:
-            fluent.tell(self, t("status.cannot_start"), blocker)
+        assessment = self._assess_export()
+        if assessment.blocker:
+            fluent.tell(self, t("status.cannot_start"), assessment.blocker)
             return
-        if plan is not None:
-            steps, inputs, dirs, notes = plan.steps, plan.inputs, plan.output_dirs, plan.skipped
+        if assessment.batch_plan is not None:
+            plan = assessment.batch_plan
             if not self._confirm_batch(plan):
                 return
+            notes = plan.skipped
         else:
-            active = self._active(ctx)
+            ctx = assessment.context
+            active = [self.panels[index] for index in assessment.active]
             if not all(panel.confirm(ctx) for panel in active):
                 return
-            steps = [step for panel in active for step in panel.plan(ctx)]
-            inputs = set(ctx.project.inputs())
-            assert ctx.project.output_dir is not None
-            dirs = [ctx.project.output_dir]
+            plan = plan_single(ctx, active)
             notes = [note for panel in active for note in panel.notes(ctx)]
-        if not steps:
+
+        if not plan.steps:
             fluent.tell(self, t("status.no_valid_tasks_title"), t("status.no_valid_tasks_body"))
             return
-        if clash := find_target_clash(inputs, steps):
+        if clash := find_target_clash(plan.inputs, plan.steps):
             fluent.tell(self, t("status.cannot_start"), clash)
             return
-        if not self._confirm_overwrite([target for step in steps for target in step.targets]):
+        if not self._confirm_overwrite(plan.targets):
             return
         try:
-            for out in dirs:
+            for out in plan.output_dirs:
                 out.mkdir(parents=True, exist_ok=True)
         except OSError as error:
             fluent.tell(self, t("status.cannot_start"), t("error.cannot_create_dir", error=error))
             return
         self._save_settings()
-        logger.info("—— %s", t("status.run_started", count=len(steps), path=self._output_label(dirs)))
+        logger.info("—— %s", t(
+            "status.run_started", count=len(plan.steps), path=self._output_label(plan.output_dirs),
+        ))
         for note in notes:
             logger.info(note)
         self._go(ROUTE_TASKS)
         self._set_running(True)
-        self.tasks_page.start(steps)
+        self.tasks_page.start(plan.steps)
 
     def _confirm_batch(self, plan: BatchPlan) -> bool:
         left = len(self.batch.tracks) - plan.tracks
@@ -570,7 +529,7 @@ class MainWindow(FluentWindow):
         details = [
             t("common.labeled", label=f"{index:02d} {track.audio.name}", text=text)
             for index, (track, (text, problem)) in enumerate(
-                zip(self.batch.tracks, plan.status, strict=False), 1
+                zip(self.batch.tracks, plan.status, strict=True), 1
             )
             if problem
         ]
@@ -627,8 +586,8 @@ class MainWindow(FluentWindow):
         self.action_bar.set_status(message)
         logger.info("—— %s", message)
         QApplication.alert(self)
-        if outcome == Outcome.DONE:
-            self._notify_done(message)
+        if outcome == Outcome.DONE and self.action_bar.isHidden():
+            self._notify_done()
         if failures:
             fluent.tell(
                 self,
@@ -637,9 +596,9 @@ class MainWindow(FluentWindow):
                 "\n".join(failures),
             )
 
-    def _notify_done(self, message: str) -> None:
+    def _notify_done(self) -> None:
         bar = InfoBar.success(
-            t("status.done"), message, duration=8000, position=InfoBarPosition.TOP, parent=self
+            t("status.done"), "", duration=8000, position=InfoBarPosition.TOP, parent=self
         )
         out = self._output_dir()
         if out and out.is_dir():
@@ -675,12 +634,27 @@ class MainWindow(FluentWindow):
         if out and out.is_dir():
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(out)))
 
+    def _retranslate_shell(self) -> None:
+        """Switch the window chrome live; page bodies follow after a restart."""
+        self.setWindowTitle(app_title())
+        for act, key in self._action_keys:
+            act.setText(t(key))
+            if act.shortcut().isEmpty():
+                continue
+            keys = act.shortcut().toString(QKeySequence.SequenceFormat.NativeText)
+            act.setToolTip(t("common.with_note", text=t(key), note=keys))
+        for item, text_key in self._nav_keys:
+            if item is not None:
+                item.setText(t(text_key))
+                item.setToolTip(t(text_key))
+        self.outputs_header.setText(t("nav.outputs_header"))
+
     def _set_language(self, code: str) -> None:
         if code == get_language():
             return
         set_language(code)
         self.settings.setValue("language", code)
-        self.setWindowTitle(app_title())
+        self._retranslate_shell()
         self._sources_changed()
         InfoBar.info(
             t("action.language_changed_title"),
@@ -725,7 +699,8 @@ class MainWindow(FluentWindow):
             self.resize(1180, 860)
         self.tasks_page.restore_layout(self.settings.value("tasks_splitter", b""))
         self.batch.restore()
-        self.mode.setCurrentIndex(self.settings.value("mode", SINGLE, type=int))
+        mode = self.settings.value("mode", SINGLE, type=int)
+        self.mode.setCurrentIndex(BATCH if mode == BATCH else SINGLE)
         for panel in self.panels:
             panel.restore()
         self.outputs.sync(self.panels)

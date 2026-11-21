@@ -9,6 +9,8 @@ from PySide6.QtCore import QEvent, QObject, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QGuiApplication, QIcon, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QAbstractSpinBox,
+    QButtonGroup,
     QFormLayout,
     QGridLayout,
     QHBoxLayout,
@@ -16,6 +18,8 @@ from PySide6.QtWidgets import (
     QLayout,
     QLineEdit,
     QListWidgetItem,
+    QScrollArea,
+    QSizePolicy,
     QStackedLayout,
     QVBoxLayout,
     QWidget,
@@ -29,6 +33,7 @@ from qfluentwidgets import (
     HyperlinkButton,
     LineEdit,
     PushButton,
+    SegmentedWidget,
     SimpleCardWidget,
     StrongBodyLabel,
     SwitchButton,
@@ -54,6 +59,33 @@ ROW_SPACING = 8
 FIELD_SPACING = 12
 INLINE_SPACING = 8
 PAIR_GAP = 24
+
+
+def focus_ring(control: QWidget) -> None:
+    """A visible keyboard focus border on Fluent controls whose paint leaves none.
+
+    Qt draws the focus rect only for some styles, and the custom Fluent paint
+    replaces it; a stylesheet border keeps the indicator visible on every theme.
+    """
+    # QSS matches Qt class names, which the Fluent subclasses inherit from
+    if isinstance(control, PushButton):
+        kind = "QPushButton"
+    elif isinstance(control, LineEdit):
+        kind = "QLineEdit"
+    elif control.inherits("QCheckBox"):
+        kind = "QCheckBox"
+    elif control.inherits("QComboBox"):
+        kind = "QComboBox"
+    elif control.inherits("QAbstractSpinBox"):
+        kind = "QAbstractSpinBox"
+    else:
+        return
+    rule = f"{kind}:focus {{ border: 1px solid %s; }}"
+    setCustomStyleSheet(
+        control,
+        rule % fluent.focus_stroke_hex(False),
+        rule % fluent.focus_stroke_hex(True),
+    )
 
 
 def name_control(control: QWidget, text: str) -> None:
@@ -127,6 +159,34 @@ def name_switch(switch: SwitchButton, text: str) -> None:
     switch.indicator.setAccessibleName(text)
     switch.indicator.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
     _FocusOutline(switch.indicator)
+
+
+class SegmentedChoice(SegmentedWidget):
+    """Expose the selected segment as a checked button and support arrow navigation."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._group = QButtonGroup(self)
+        self.currentItemChanged.connect(lambda key: self.widget(key).setChecked(True))
+
+    def add_choice(
+        self, key: str, text: str, select: Callable[[], None], icon: FluentIcon | QIcon | None = None,
+    ) -> None:
+        button = self.addItem(key, text, lambda _checked: select(), icon)
+        self._group.addButton(button)
+        button.setCheckable(True)
+        keyboard_activate(button, text, button.click)
+        button.installEventFilter(self)
+
+    def eventFilter(self, control: QWidget, event: QEvent) -> bool:
+        if event.type() == QEvent.Type.KeyPress and event.key() in (Qt.Key.Key_Left, Qt.Key.Key_Right):
+            buttons = self._group.buttons()
+            step = -1 if event.key() == Qt.Key.Key_Left else 1
+            button = buttons[(buttons.index(control) + step) % len(buttons)]
+            button.click()
+            button.setFocus(Qt.FocusReason.OtherFocusReason)
+            return True
+        return super().eventFilter(control, event)
 
 
 class CurrentPageStack(QStackedLayout):
@@ -250,6 +310,13 @@ class ColorButton(PushButton):
         dialog.exec()
 
 
+def fixed_width(box: QAbstractSpinBox) -> None:
+    """Keep a spin box at its own size hint: a stretched spin reads as a text field."""
+    policy = box.sizePolicy()
+    policy.setHorizontalPolicy(QSizePolicy.Policy.Fixed)
+    box.setSizePolicy(policy)
+
+
 def spin(low: int, high: int, value: int, suffix: str = "", step: int = 1) -> CompactSpinBox:
     box = CompactSpinBox()
     box.setRange(low, high)
@@ -257,6 +324,7 @@ def spin(low: int, high: int, value: int, suffix: str = "", step: int = 1) -> Co
     box.setSuffix(suffix)
     box.setSingleStep(step)
     box.setAccelerated(True)
+    fixed_width(box)
     return box
 
 
@@ -397,38 +465,142 @@ Cell = QWidget | QLayout
 Row = tuple[str, Cell, str | None, Cell | None]
 
 
-def two_column_grid(rows: Sequence[Row]) -> QGridLayout:
-    """Label/field pairs in two columns kept side by side, the slack after them.
+class SettingsGrid(QWidget):
+    """Place related settings side by side where the available width permits.
 
-    A row with nothing on the right takes the full width; a text field there
-    stretches across it, other fields keep their own size.
+    Every grid under the same scroll page shares one set of column widths once
+    shown, so stacked cards read as one continuous form: labels start at the same
+    x, fields of the left column start at the same x, and the second pair sits at
+    the same x in every card.  The cards also flip to two columns together.
     """
-    grid = QGridLayout()
-    grid.setHorizontalSpacing(FIELD_SPACING)
-    grid.setVerticalSpacing(ROW_SPACING)
-    label_alignment = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
-    for r, (left_label, left, right_label, right) in enumerate(rows):
-        grid.addWidget(field_label(left_label, left), r, 0, label_alignment)
-        if right is None and isinstance(left, (QLayout, QLineEdit)):
-            if isinstance(left, QLayout):
-                grid.addLayout(left, r, 1, 1, 4)
-            else:
-                grid.addWidget(left, r, 1, 1, 4)
-        elif isinstance(left, QLayout):
-            grid.addLayout(left, r, 1)
+
+    def __init__(self, rows: Sequence[Row]) -> None:
+        super().__init__()
+        self._rows = [
+            (self._field(left_label, left), self._field(right_label, right) if right else None)
+            for left_label, left, right_label, right in rows
+        ]
+        self._wide = True
+        # column widths shared across the page's grids: (labels, left fields, right labels)
+        self._shared: tuple[int, int, int] | None = None
+        self._grid = QGridLayout(self)
+        self._grid.setContentsMargins(0, 0, 0, 0)
+        self._grid.setHorizontalSpacing(FIELD_SPACING)
+        self._grid.setVerticalSpacing(ROW_SPACING)
+        self._grid.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
+        self._place_fields()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._sync_group()
+
+    def _field(self, label: str | None, control: Cell) -> tuple[BodyLabel, QWidget]:
+        if isinstance(control, QLayout):
+            field = QWidget(self)
+            field.setLayout(control)
+            # the style would pad a fresh wrapper by ~9 px a side, nudging composite
+            # fields off the column every direct-widget field sits on
+            control.setContentsMargins(0, 0, 0, 0)
         else:
-            grid.addWidget(left, r, 1, Qt.AlignmentFlag.AlignLeft)
-        if right is not None:
-            label = field_label(right_label or "", right)
-            # a gap between the two pairs, which would otherwise touch
-            label.setContentsMargins(PAIR_GAP, 0, 0, 0)
-            grid.addWidget(label, r, 2, label_alignment)
-            if isinstance(right, QLayout):
-                grid.addLayout(right, r, 3)
-            else:
-                grid.addWidget(right, r, 3, Qt.AlignmentFlag.AlignLeft)
-    grid.setColumnStretch(4, 1)
-    return grid
+            field = control
+        return field_label(label or "", control), field
+
+    @staticmethod
+    def _width(field: tuple[QWidget, QWidget]) -> tuple[int, int]:
+        label, control = field
+        return label.sizeHint().width(), max(control.minimumWidth(), control.minimumSizeHint().width())
+
+    def _content_widths(self) -> tuple[int, int, int]:
+        """The three column widths this grid's own content needs."""
+        labels, left, right = 0, 0, 0
+        for first, second in self._rows:
+            left = max(left, self._width(first)[1])
+            labels = max(labels, self._width(first)[0])
+            if second is not None:
+                right_label, _right_field = self._width(second)
+                labels = max(labels, right_label)
+                right = max(right, right_label)
+        return labels, left, right
+
+    def _two_column_width(self) -> int:
+        pairs = [(first, second) for first, second in self._rows if second is not None]
+        if not pairs:
+            return 0
+        labels, left_field, right_labels = self._shared or self._content_widths()
+        right_fields = max(self._width(second)[1] for _, second in pairs)
+        return labels + left_field + right_labels + right_fields + PAIR_GAP + FIELD_SPACING * 3
+
+    def _sync_group(self) -> None:
+        """Share one column layout with every other grid on the same page."""
+        parent = self.parentWidget()
+        while parent is not None and not isinstance(parent, QScrollArea):
+            parent = parent.parentWidget()
+        group = [*parent.findChildren(SettingsGrid)] if parent is not None else [self]
+        if self not in group:
+            group.append(self)
+        shared = (
+            max(g._content_widths()[0] for g in group),
+            max(g._content_widths()[1] for g in group),
+            max(g._content_widths()[2] for g in group),
+        )
+        for grid in group:
+            if grid._shared != shared:
+                grid._shared = shared
+                grid._wide = grid.width() >= grid._two_column_width()
+                grid._place_fields()
+                grid.updateGeometry()
+
+    def minimumSizeHint(self) -> QSize:
+        fields = [self._width(field) for row in self._rows for field in row if field is not None]
+        labels, controls = zip(*fields, strict=True)
+        width = max(labels) + FIELD_SPACING + max(controls)
+        return QSize(max(width, self._grid.minimumSize().width()), self._grid.minimumSize().height())
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        wide = self.width() >= self._two_column_width()
+        if self._wide != wide:
+            self._wide = wide
+            self._place_fields()
+            self.updateGeometry()
+
+    def _place_fields(self) -> None:
+        grid = self._grid
+        while grid.count():
+            grid.takeAt(0)
+        for column in range(6):
+            grid.setColumnMinimumWidth(column, 0)
+            grid.setColumnStretch(column, 0)
+        labels, left_fields, right_labels = self._shared or self._content_widths()
+        grid.setColumnMinimumWidth(0, labels)
+        if self._wide:
+            grid.setColumnMinimumWidth(1, left_fields)
+            grid.setColumnMinimumWidth(2, PAIR_GAP - FIELD_SPACING)
+            grid.setColumnMinimumWidth(3, right_labels)
+            grid.setColumnStretch(5, 1)
+        else:
+            grid.setColumnStretch(1, 1)
+
+        row = 0
+        for first, second in self._rows:
+            self._place_field(first, row, 0, span=5 if self._wide and second is None else 1)
+            if second is not None:
+                if self._wide:
+                    self._place_field(second, row, 3)
+                else:
+                    row += 1
+                    self._place_field(second, row, 0)
+            row += 1
+
+    def _place_field(
+        self, field: tuple[BodyLabel, QWidget], row: int, column: int, span: int = 1,
+    ) -> None:
+        label, control = field
+        self._grid.addWidget(label, row, column, Qt.AlignmentFlag.AlignVCenter)
+        alignment = Qt.AlignmentFlag.AlignLeft
+        if isinstance(control, QLineEdit) or control.layout() is not None:
+            alignment = Qt.AlignmentFlag(0)
+        self._grid.addWidget(control, row, column + 1, 1, span, alignment)
 
 
 # rows a track list grows to before it scrolls
@@ -495,7 +667,9 @@ class TrackList(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.list = DirectListWidget()
-        self.list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        # Single selection keeps a visible keyboard focus indicator, and Space
+        # toggles the current row's check state (Qt's default for checkable items).
+        self.list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.list.setUniformItemSizes(True)
         self.list.itemChanged.connect(lambda _item: self._remember())
         self.count_label = hint_label(wrap=False)

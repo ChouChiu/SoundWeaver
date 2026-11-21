@@ -6,6 +6,7 @@ import json
 import shutil
 import subprocess
 from collections.abc import Callable
+from functools import cache
 from pathlib import Path
 
 from soundweaver.core.cancel import CancellationToken
@@ -35,7 +36,16 @@ def missing_tools() -> list[str]:
     return [tool for tool in ("ffmpeg", "ffprobe") if shutil.which(tool) is None]
 
 
-def probe(path: Path) -> dict:
+def base_command() -> list[str]:
+    """The quiet ffmpeg prefix every hand-built pipeline starts from."""
+    return ["ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "error"]
+
+
+# raw ffprobe JSON per (path, mtime, size): a playback load probes twice, and
+# probing costs a subprocess while callers may mutate the returned dict
+@cache
+def _probe_json(key: tuple[str, int, int]) -> str:
+    path = Path(key[0])
     try:
         result = subprocess.run(
             ["ffprobe", "-v", "error", "-print_format", "json", "-show_format", "-show_streams",
@@ -53,7 +63,12 @@ def probe(path: Path) -> dict:
         raise FFmpegError(t("error.ffprobe_timeout", name=path.name)) from error
     if result.returncode != 0:
         raise FFmpegError(result.stderr.strip() or f"ffprobe exited with {result.returncode}")
-    return json.loads(result.stdout)
+    return result.stdout
+
+
+def probe(path: Path) -> dict:
+    stamp = path.stat()
+    return json.loads(_probe_json((str(path), stamp.st_mtime_ns, stamp.st_size)))
 
 
 def first_audio_stream(data: dict) -> dict:
@@ -97,7 +112,7 @@ def run_ffmpeg(
     on_fraction: Callable[[float], None] | None = None,
 ) -> None:
     """Run ffmpeg, reporting `-progress` as a 0..1 fraction and honouring cancellation."""
-    cmd = ["ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "error", "-y"]
+    cmd = [*base_command(), "-y"]
     track = on_fraction is not None and bool(total_seconds)
     if track:
         cmd += ["-progress", "pipe:1", "-nostats"]

@@ -7,6 +7,10 @@ The stretches of `parallel` are each decoded and rendered by a worker of their
 own.  This process goes through the parse pass's metadata in order, for the
 trace and for the renderer's glides, whose state at each stretch's first frame
 it hands over (as `atmos.decoder` does), then resamples what the workers wrote.
+For playback the ADM is published with the timeline the first stretches' parse
+has produced and rewritten in place as the parse grows it, the way
+`atmos.decoder` publishes its scan; the first two stretches render here, so
+their audio streams out while the workers ramp up.
 """
 
 from __future__ import annotations
@@ -147,7 +151,9 @@ def _tail(frame_len: int) -> int:
     return -(-delay // frame_len)
 
 
-def _render_stretch(job: _Job) -> tuple[list[Measure], int]:
+def _render_stretch(
+    job: _Job, emit_adm: Callable[[np.ndarray], int] | None = None,
+) -> tuple[list[Measure], int]:
     """Decode and render frames [start, stop); their measures, and the ADM samples clipped."""
     n = read_toc(job.frames[0]).frame_length
     channels = len(job.layout.channels)
@@ -159,10 +165,10 @@ def _render_stretch(job: _Job) -> tuple[list[Measure], int]:
     )
     tracks = (
         np.memmap(job.adm_tracks, dtype=np.float32, mode="r+").reshape(len(job.adm_sources), -1)
-        if job.adm_tracks is not None
+        if job.adm_tracks is not None and emit_adm is None
         else None
     )
-    part = job.adm_part.open("wb") if job.adm_part is not None else None
+    part = job.adm_part.open("wb") if job.adm_part is not None and emit_adm is None else None
     measured: list[Measure] = []
     clipped = 0
 
@@ -172,9 +178,11 @@ def _render_stretch(job: _Job) -> tuple[list[Measure], int]:
         at = f.index * n
         if speakers is not None:
             speakers[:, at : at + n] = speaker_feeds(f, lfe_index)
-        if tracks is not None:
+        if emit_adm is not None:
+            clipped += emit_adm(adm_block(f, job.adm_sources))
+        elif tracks is not None:
             tracks[:, at : at + n] = adm_block(f, job.adm_sources)
-        if part is not None:
+        elif part is not None:
             data, count = pcm24(adm_block(f, job.adm_sources))
             part.write(data)
             clipped += count
@@ -303,6 +311,7 @@ class _Render:
         self, token: CancellationToken, on_fraction: Callable[[float], None],
         on_adm_chunk: Callable[[Path, int], None] | None,
     ) -> ObjectTrace:
+        playback = self.out is None and self.adm_path is not None and on_adm_chunk is not None
         stretches = parallel.plan(self.frames)
         if self.out is not None and self.resampled:
             self.speakers = self._coded("speakers.f32", len(self.layout.channels))
@@ -316,13 +325,18 @@ class _Render:
             if readback is not None and self.adm is not None and on_adm_chunk is not None:
                 self.adm.file.flush()
                 if self.adm.frames_written:
+                    # the parse keeps growing the timeline: rewrite it before the
+                    # callback, which may block on the reader's ahead-window
+                    self.adm.refresh()
                     on_adm_chunk(readback, self.adm.frames_written)
 
         try:
             with parallel.worker_pool(len(stretches)) as pool:
                 parse = parallel.Parse(pool, self.frames, stretches, token, here=1)
                 pending: deque = deque()
-                queued = 1
+                # playback renders the first two stretches here, so the workers
+                # start on the third; everything else is handed out from the first
+                queued = min(2, len(stretches)) if playback else 1
 
                 def submit(block: bool) -> None:
                     nonlocal queued
@@ -340,16 +354,53 @@ class _Render:
                 # handed out before it
                 parse.take(1, block=True)
                 self._take(parse, 1)
-                first = self._job(stretches[0], parse)
-                submit(block=False)
-                pending.appendleft((stretches[0], parallel.done(_render_stretch(first))))
                 if self.adm is not None and on_adm_chunk is not None:
-                    # Finish the metadata map while the PCM workers render upcoming stretches.
-                    submit(block=True)
-                    if queued < len(stretches) or not parse.take(len(self.frames), True):
+                    # the playback reader starts on the timeline the first stretch ships,
+                    # so take its metadata before publishing: chunk 0 follows without
+                    # waiting for the whole parse
+                    if not parse.take(stretches[0].stop, True):
                         raise parse.error()
-                    self._take(parse, len(self.frames))
-                    readback = self.adm.prepare_readback(self.tracer.keys)
+                    self._take(parse, stretches[0].stop)
+                first = self._job(stretches[0], parse)
+                # the second playback stretch renders here too: its job is built now,
+                # with the renderer glides it starts from
+                second = self._job(stretches[1], parse) if playback and queued > 1 else None
+                if second is not None:
+                    # and its span joins the published timeline before the workers'
+                    # first decode is handed out past it
+                    if not parse.take(stretches[1].stop, True):
+                        raise parse.error()
+                    self._take(parse, stretches[1].stop)
+                if not playback:
+                    submit(block=False)
+                    pending.appendleft((stretches[0], parallel.done(_render_stretch(first))))
+                if self.adm is not None and on_adm_chunk is not None:
+                    # Publish with the timeline gathered so far and rewrite the axml in
+                    # place as the parse grows it (`AdmFile.refresh`); the reader picks
+                    # the grown blocks up the same way it does for the Atmos decode.
+                    submit(block=False)
+                    readback = self.adm.prepare_readback(self.tracer.keys, self.tracer.size_keys)
+                if playback:
+                    if self.resampled:
+                        adm_tracks = Resampler(self.ratio, self.adm.channels, 12000)
+
+                    def emit_adm(block: np.ndarray) -> int:
+                        token.raise_if_cancelled()
+                        ready = adm_tracks.push(block) if adm_tracks is not None else block
+                        if not ready.size:
+                            return 0
+                        count = self._put_adm(ready, True)
+                        publish()
+                        return count
+
+                    # the first two stretches render here: their audio streams out while
+                    # the pool parses, carrying the reader over the workers' ramp
+                    measured, clipped = _render_stretch(first, emit_adm)
+                    if second is not None:
+                        more, more_clipped = _render_stretch(second, emit_adm)
+                        measured.extend(more)
+                        clipped += more_clipped
+                    on_fraction(stretches[queued - 1].stop / len(self.frames))
                 while pending or (queued < len(stretches) and not parse.broken):
                     submit(block=not pending)
                     if not pending:
@@ -387,11 +438,13 @@ class _Render:
                 if clipped:
                     logger.warning("adm: %d samples clipped at full scale", clipped)
                 if readback is not None:
+                    # the final timeline, regardless of the span gate
+                    self.adm.refresh(force=True)
                     self.adm.file.close()
                 else:
                     if self.tracks is not None:
                         self.adm.append(self.scratch / "adm.pcm")
-                    self.adm.close(self.tracer.keys)
+                    self.adm.close(self.tracer.keys, self.tracer.size_keys)
         except BaseException:
             if self.adm is not None:
                 self.adm.discard()

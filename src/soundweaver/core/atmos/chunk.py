@@ -72,6 +72,7 @@ class ChunkJob:
     speakers: Path | None  # planar float32 (speakers, container samples) buffer to fill
     adm: Path | None  # where this stretch's ADM PCM goes
     adm_sources: tuple[int | None, ...]  # the OAMD object on each ADM track; None is silence
+    raw_rate: int | None = None  # growing playback core has no WAV header
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,5 +215,15 @@ def init_worker(language: str) -> None:
 
 
 def decode_chunk(job: ChunkJob) -> ChunkResult:
-    with sf.SoundFile(job.core) as pcm:
+    raw_format = (
+        {
+            "samplerate": job.raw_rate,
+            "channels": CORE_CHANNELS,
+            "format": "RAW",
+            "subtype": "FLOAT",
+            "endian": "LITTLE",
+        }
+        if job.raw_rate is not None else {}
+    )
+    with sf.SoundFile(job.core, **raw_format) as pcm:
         return _Chunk(job, pcm).run()

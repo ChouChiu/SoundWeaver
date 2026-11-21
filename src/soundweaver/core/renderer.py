@@ -41,14 +41,14 @@ def renderer_problem(name: str) -> str | None:
     """Why the renderer script `name` cannot run here, or None when it can."""
     try:
         renderer_script(name)
-        find_runtime()
+        _find_runtime()
     except RendererError as error:
         return str(error)
     return None
 
 
 @cache
-def find_runtime() -> str:
+def _find_runtime() -> str:
     """node on PATH, else the newest nvm install (a desktop launch skips nvm's PATH), else bun."""
     found = shutil.which("node")
     if found:
@@ -98,7 +98,7 @@ def run_renderer(
     try:
         # SIGTERM lets the renderer close its browsers and remove its segment files
         run_streaming(
-            [find_runtime(), str(script), *args], on_line, token,
+            [_find_runtime(), str(script), *args], on_line, token,
             error=RendererError, exit_message=exit_message or t("error.renderer_exit"), grace=10,
         )  # fmt: skip
     except RendererError as error:

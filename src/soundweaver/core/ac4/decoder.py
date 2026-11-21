@@ -92,7 +92,7 @@ def is_ac4(path: Path) -> bool:
     return _is_ac4(file_stamp(path))
 
 
-def output_channels(channel_mode: int) -> tuple[str, ...]:
+def _output_channels(channel_mode: int) -> tuple[str, ...]:
     labels = _MODE_CHANNELS.get(channel_mode)
     if labels is None:
         raise Ac4Error(t("ac4.unsupported_channels", mode=channel_mode))
@@ -116,7 +116,7 @@ def _rates(toc) -> tuple[Fraction, int]:
     return coded, delivered
 
 
-def is_raw(path: Path) -> bool:
+def _is_raw(path: Path) -> bool:
     """Whether `path` is a bare AC-4 elementary stream (TS 103 190-1 Annex G), not a container."""
     with path.open("rb") as file:
         return int.from_bytes(file.read(2), "big") in (SYNC, SYNC_CRC)
@@ -130,7 +130,7 @@ def stream_bytes(
     ffmpeg copies them out of a container; a bare stream is read as it is,
     since ffmpeg cannot write one back without a sample rate it does not know.
     """
-    if is_raw(path):
+    if _is_raw(path):
         return path.read_bytes()
     limit = ["-frames:a", "1"] if first_only else []
     with tempfile.TemporaryDirectory(dir=work_root()) as scratch:
@@ -149,7 +149,7 @@ def describe(path: Path) -> Ac4Info:
     if first is None:
         raise Ac4Error(t("ac4.no_frames"))
     info = _info(first)
-    if is_raw(path):
+    if _is_raw(path):
         toc = read_toc(first)
         frames = sum(1 for _ in sync_frames(data))
         info = replace(info, duration=float(frames * toc.frame_length / _rates(toc)[0]))
@@ -169,7 +169,7 @@ def _info(frame: bytes) -> Ac4Info:
         return Ac4Info(OBJECTS_RENDER.channels, _rates(toc)[1], objects=True)
     mode = group.substreams[0].channel_mode
     coded = coded_channel_mode(presentation.version, mode)
-    return Ac4Info(output_channels(coded), _rates(toc)[1], coded != mode, mode)
+    return Ac4Info(_output_channels(coded), _rates(toc)[1], coded != mode, mode)
 
 
 def decoded_path(
@@ -216,7 +216,7 @@ def _decode(
         target, "w", samplerate=info.sample_rate, channels=len(info.channels),
         format="FLAC", subtype="PCM_24",
     ) as out:
-        for block in channel_blocks(frames, info, token, on_fraction):
+        for block in _channel_blocks(frames, info, token, on_fraction):
             out.write(block)
     on_fraction(1.0)
     logger.info(
@@ -232,20 +232,49 @@ def playback_blocks(source: Path, token: CancellationToken) -> tuple[Ac4Info, It
     info = _info(frames[0])
     if info.objects:
         raise Ac4Error(t("ac4.layout_changed", frame=0))
-    return info, channel_blocks(frames, info, token, lambda _f: None)
+    return info, _channel_blocks(frames, info, token, lambda _f: None, playback=True)
 
 
-def channel_blocks(
+def playback_from_cache(
+    source: Path, token: CancellationToken
+) -> tuple[Ac4Info, sf.SoundFile] | None:
+    """A cached-FLAC reader for plain AC-4 playback, or None when the stream must decode live.
+
+    The export cache holds the same resampled PCM the playback path yields, so a
+    track played before starts from disk instead of a full soft decode.  Object
+    streams never use it: the player needs their raw frames for object metering.
+    """
+    target = cache_dir("ac4") / f"{content_key(source)}.v{_CACHE_VERSION}{_CACHE_SUFFIX}"
+    if not target.is_file():
+        return None
+    info = describe(source)
+    if info.objects:
+        return None
+    try:
+        wav = sf.SoundFile(target)
+    except sf.LibsndfileError:
+        logger.warning("ac4: discarding unreadable playback cache %s", target, exc_info=True)
+        target.unlink(missing_ok=True)
+        return None
+    token.raise_if_cancelled()
+    return info, wav
+
+
+def _channel_blocks(
     frames: list[bytes],
     info: Ac4Info,
     token: CancellationToken,
     on_fraction: Callable[[float], None],
+    *,
+    playback: bool = False,
 ) -> Iterator[np.ndarray]:
     """Yield interleaved PCM with the same delay compensation as the FLAC cache."""
     coded_rate, rate = _rates(read_toc(frames[0]))
-    resampler = Resampler(Fraction(rate) / coded_rate, len(info.channels))
+    resampler = Resampler(
+        Fraction(rate) / coded_rate, len(info.channels), 12000 if playback else 48000
+    )
     trimmed = 0
-    for k, decoded in enumerate(checked_frames(frames, token)):
+    for k, decoded in enumerate(_checked_frames(frames, token, playback=playback)):
         if k % 64 == 0:
             token.raise_if_cancelled()
             on_fraction(k / len(frames))
@@ -265,10 +294,12 @@ def channel_blocks(
         yield np.clip(tail, -1.0, 1.0).T
 
 
-def checked_frames(frames: list[bytes], token: CancellationToken) -> Iterator[Decoded]:
+def _checked_frames(
+    frames: list[bytes], token: CancellationToken, *, playback: bool = False,
+) -> Iterator[Decoded]:
     """`parallel.decode_frames`, a frame that will not decode reported as an Ac4Error."""
     try:
-        yield from decode_frames(frames, token)
+        yield from decode_frames(frames, token, playback=playback)
     except FrameError as error:
         raise Ac4Error(t("ac4.bad_frame", frame=error.index, error=error.error)) from error
 
@@ -281,10 +312,10 @@ class Resampler:
     margin, so the cuts leave no trace.  A ratio of 1 passes blocks through.
     """
 
-    def __init__(self, ratio: Fraction, channels: int) -> None:
+    def __init__(self, ratio: Fraction, channels: int, block_size: int = 48000) -> None:
         self.up, self.down = ratio.numerator, ratio.denominator
         self.margin = self.down * max(1, 64 // self.down)
-        self.stretch = self.down * max(1, 48000 // self.down)
+        self.stretch = self.down * max(1, block_size // self.down)
         self.buffer = np.zeros((channels, 0), dtype=np.float32)
         self.start = 0  # input sample buffer[:, 0] is
         self.done = 0  # input samples resampled so far, a multiple of `down`

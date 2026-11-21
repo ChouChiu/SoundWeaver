@@ -43,6 +43,15 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen
 
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Test
+        env:
+          # Offscreen Qt for the UI suite; no native build in CI, native tests self-skip
+          QT_QPA_PLATFORM: offscreen
+        run: uv run pytest
+
       - name: Build with PyInstaller
         run: |
           uv run --with pyinstaller pyinstaller \

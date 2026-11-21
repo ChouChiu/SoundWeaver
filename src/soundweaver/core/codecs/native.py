@@ -110,25 +110,25 @@ def run_native(
     return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
 
 
-class NativePcmStream:
-    """Streaming decoder reader for native tools emitting `(LE int32 rate, LE int32 ch)` + F32 PCM.
-
-    Shared by `vivid stream` (AV3A) and `ia_mpeghd_testbench -stream:1` (MPEG-H / 360RA).
-    """
+class NativeProcess:
+    """Cancellable binary subprocess with stderr diagnostics."""
 
     def __init__(
         self,
         cmd: Sequence[str],
-        remap: Sequence[int] | None = None,
         on_stderr: Callable[[str], None] | None = None,
         *,
-        pcm_format: tuple[int, int] | None = None,
         token: CancellationToken | None = None,
+        writable: bool = False,
     ) -> None:
-        self._remap = list(remap) if remap is not None else None
         self._name = Path(cmd[0]).name
+        self._token = token
+        if token is not None:
+            token.raise_if_cancelled()
+        self._closed = threading.Event()
         self._proc = subprocess.Popen(
             list(cmd),
+            stdin=subprocess.PIPE if writable else None,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             creationflags=NO_WINDOW,
@@ -140,23 +140,8 @@ class NativePcmStream:
         )
         self._stderr_thread.start()
 
-        self._closed = threading.Event()
         if token is not None:
             threading.Thread(target=self._cancel_on_token, args=(token,), daemon=True).start()
-        if pcm_format is None:
-            hdr = self._read_exact(8)
-            if len(hdr) < 8:
-                detail = self.stderr_text()
-                self.close()
-                if token is not None:
-                    token.raise_if_cancelled()
-                raise RuntimeError(detail or f"{self._name} closed stream before PCM header")
-            pcm_format = struct.unpack("<ii", hdr)
-        self.sample_rate, self.channels = pcm_format
-        if self.sample_rate <= 0 or self.channels <= 0:
-            self.close()
-            raise RuntimeError(f"Invalid stream header: rate={self.sample_rate}, ch={self.channels}")
-        self._eof = False
 
     def _cancel_on_token(self, token: CancellationToken) -> None:
         # Interrupt even a blocked pipe read. The decoding thread closes the pipes.
@@ -183,7 +168,7 @@ class NativePcmStream:
             if not self._closed.is_set():
                 raise
 
-    def _read_exact(self, nbytes: int) -> bytes:
+    def read_exact(self, nbytes: int) -> bytes:
         assert self._proc.stdout is not None
         chunks: list[bytes] = []
         remaining = nbytes
@@ -195,30 +180,47 @@ class NativePcmStream:
             remaining -= len(chunk)
         return b"".join(chunks)
 
-    def read_frames(self, frames: int) -> np.ndarray:
-        """Read up to `frames` interleaved float32 frames of shape `(n, channels)`."""
-        if self._eof or frames <= 0:
-            return np.zeros((0, self.channels), dtype=np.float32)
-        stride = self.channels * 4
-        raw = self._read_exact(frames * stride)
-        usable = (len(raw) // stride) * stride
-        if len(raw) < frames * stride:
-            self._eof = True
-            code = self._proc.wait()
-            self._stderr_thread.join()
-            if code:
-                raise RuntimeError(self.stderr_text() or f"{self._name} exited with status {code}")
-            if usable != len(raw):
-                raise RuntimeError(f"{self._name} wrote an incomplete PCM frame")
-        arr = np.frombuffer(raw[:usable], dtype="<f4").reshape(-1, self.channels).copy()
-        if self._remap is not None and len(self._remap) == self.channels:
-            arr = arr[:, self._remap]
-        return arr
+    def reply(self, nbytes: int) -> bytes:
+        raw = self.read_exact(nbytes)
+        if len(raw) != nbytes:
+            if self._token is not None:
+                self._token.raise_if_cancelled()
+            self._stderr_thread.join(timeout=0.2)
+            raise RuntimeError(self.stderr_text() or f"{self._name} closed its response pipe")
+        return raw
+
+    def check_exit(self) -> None:
+        code = self._proc.wait()
+        self._stderr_thread.join()
+        if self._token is not None:
+            self._token.raise_if_cancelled()
+        if code:
+            raise RuntimeError(self.stderr_text() or f"{self._name} exited with status {code}")
 
     def stderr_text(self) -> str:
         return "\n".join(self._stderr_lines)
 
+    def send(self, data: bytes) -> None:
+        assert self._proc.stdin is not None
+        try:
+            self._proc.stdin.write(data)
+            self._proc.stdin.flush()
+        except BrokenPipeError:
+            if self._token is not None:
+                self._token.raise_if_cancelled()
+            self._stderr_thread.join(timeout=0.2)
+            raise RuntimeError(self.stderr_text() or f"{self._name} closed its PCM input") from None
+
+    def finish_input(self) -> None:
+        if self._proc.stdin is not None:
+            try:
+                self._proc.stdin.close()
+            except BrokenPipeError:
+                pass
+
     def close(self) -> None:
+        if self._closed.is_set():
+            return
         self._closed.set()
         if self._proc.poll() is None:
             self._proc.terminate()
@@ -229,7 +231,51 @@ class NativePcmStream:
                 self._proc.wait()
         if self._proc.stdout is not None:
             self._proc.stdout.close()
+        self.finish_input()
         if self._stderr_thread.is_alive() and self._stderr_thread is not threading.current_thread():
             self._stderr_thread.join(timeout=1.0)
         if self._proc.stderr is not None:
             self._proc.stderr.close()
+
+
+class NativePcmStream(NativeProcess):
+    """Native stream emitting (LE int32 rate, LE int32 channels), then float32 PCM."""
+
+    def __init__(
+        self,
+        cmd: Sequence[str],
+        remap: Sequence[int] | None = None,
+        on_stderr: Callable[[str], None] | None = None,
+        *,
+        pcm_format: tuple[int, int] | None = None,
+        token: CancellationToken | None = None,
+    ) -> None:
+        self._remap = list(remap) if remap is not None else None
+        super().__init__(cmd, on_stderr, token=token)
+        try:
+            self.sample_rate, self.channels = pcm_format or struct.unpack("<ii", self.reply(8))
+            if self.sample_rate <= 0 or self.channels <= 0:
+                raise RuntimeError(
+                    f"Invalid stream header: rate={self.sample_rate}, ch={self.channels}"
+                )
+        except BaseException:
+            self.close()
+            raise
+        self._eof = False
+
+    def read_frames(self, frames: int) -> np.ndarray:
+        """Read up to `frames` interleaved float32 frames of shape `(n, channels)`."""
+        if self._eof or frames <= 0:
+            return np.zeros((0, self.channels), dtype=np.float32)
+        stride = self.channels * 4
+        raw = self.read_exact(frames * stride)
+        usable = (len(raw) // stride) * stride
+        if len(raw) < frames * stride:
+            self._eof = True
+            self.check_exit()
+            if usable != len(raw):
+                raise RuntimeError(f"{self._name} wrote an incomplete PCM frame")
+        arr = np.frombuffer(raw[:usable], dtype="<f4").reshape(-1, self.channels).copy()
+        if self._remap is not None and len(self._remap) == self.channels:
+            arr = arr[:, self._remap]
+        return arr

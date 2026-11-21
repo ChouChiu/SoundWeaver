@@ -5,10 +5,10 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
-from pathlib import Path
 
 from soundweaver.core.i18n import t
 from soundweaver.core.planning import (
+    ExportPlan,
     OutputPlanner,
     build_context,
     dir_problem,
@@ -33,14 +33,11 @@ __all__ = [
 
 
 @dataclass(slots=True)
-class BatchPlan:
+class BatchPlan(ExportPlan):
     """Every track of a batch planned with the current settings."""
 
-    steps: list[Step] = field(default_factory=list)
     status: list[tuple[str, bool]] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
-    output_dirs: list[Path] = field(default_factory=list)
-    inputs: set[Path] = field(default_factory=set)
     tracks: int = 0
     shares: dict[int, tuple[str, bool]] = field(default_factory=dict)
 
@@ -100,7 +97,8 @@ def build_batch_plan(
             plan.inputs |= set(album_project.inputs()) - {album_project.audio}
 
     for number, project in enumerate(projects, 1):
-        assert project.audio is not None
+        if project.audio is None:
+            continue
         plan.inputs |= set(project.inputs())
         name = f"{number:02d} {without_number(project.audio.stem)}"
         if project.probing:
@@ -136,8 +134,8 @@ def build_batch_plan(
             continue
         plan.steps += [replace(s, title=f"{name} · {s.title}") for s in steps]
         plan.tracks += 1
-        assert project.output_dir is not None
-        plan.output_dirs.append(project.output_dir)
+        if project.output_dir is not None:
+            plan.output_dirs.append(project.output_dir)
         text = t("batch.tasks_count", count=len(steps))
         if left_out:
             text += t("batch.not_generating_suffix", notes=t("common.list_sep").join(left_out))
@@ -148,7 +146,6 @@ def build_batch_plan(
             closing = panel.album_plan(album_ctx, tracks)
             plan.steps += [replace(s, title=f"{album_prefix} · {s.title}") for s in closing]
             if closing and album_project.output_dir not in plan.output_dirs:
-                assert album_project.output_dir is not None
                 plan.output_dirs.append(album_project.output_dir)
     plan.output_dirs = list(dict.fromkeys(plan.output_dirs))
     plan.shares = _summarize_availability(panels, assessed, is_album)

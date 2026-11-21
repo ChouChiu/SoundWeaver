@@ -12,7 +12,8 @@ import type { LineSegments2 } from "three/examples/jsm/lines/LineSegments2.js";
 import type { ColorMode, SoundfieldOptions } from "../shared/api";
 import { FLOOR_DB, TOP_DB } from "../shared/spatial";
 import { lineMaterial, segments } from "./lines";
-import { objectMesh, ROOM_HALF, TINT, toScene } from "./scene";
+import { SPATIAL_TINT } from "../shared/spatial";
+import { objectMesh, ROOM_HALF, toScene } from "./scene";
 import * as timeline from "./timeline";
 
 // samples along a trail
@@ -42,7 +43,7 @@ function halo(): THREE.Texture {
 	return haloTexture;
 }
 
-const tint = new THREE.Color(TINT);
+const tint = new THREE.Color(SPATIAL_TINT);
 const scratch = new THREE.Color();
 
 /** The object's colour at room height `z` (0 floor .. 1 ceiling). */
@@ -83,7 +84,7 @@ export class ObjectView {
 	private readonly ring: THREE.Mesh | null = null;
 	private readonly labelSprite: THREE.Sprite | null = null;
 	lastRoom: [number, number, number] = [0.5, 0.5, 0];
-	lastColor = new THREE.Color(TINT);
+	lastColor = new THREE.Color(SPATIAL_TINT);
 	lastShown = false;
 
 	constructor(

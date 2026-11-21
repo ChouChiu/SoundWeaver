@@ -7,7 +7,7 @@ import tempfile
 from collections.abc import Callable
 from contextlib import ExitStack
 from pathlib import Path
-from threading import Event, Lock, Thread
+from threading import Condition, Event, Lock, Thread
 from typing import BinaryIO
 
 import numpy as np
@@ -23,7 +23,11 @@ AHEAD_SECONDS = 6
 
 
 class PlaybackBuffer:
-    """One producer publishes complete PCM blocks. The player never waits on a decoder read."""
+    """One producer publishes complete PCM blocks. The player never waits on a decoder read.
+
+    Producer and consumer use separate file handles, so a slow disk write on the
+    producer side never holds up the audio callback, which reads its own handle.
+    """
 
     def __init__(
         self,
@@ -41,12 +45,18 @@ class PlaybackBuffer:
         self._reader = reader
         self._token = token
         self._decoder = decoder
+        # guards only the counters; file I/O happens on one dedicated handle per side
         self._lock = Lock()
-        self._cache: BinaryIO = tempfile.TemporaryFile(dir=work_root())  # noqa: SIM115
+        self._scratch = tempfile.TemporaryDirectory(dir=work_root())
+        self._path = Path(self._scratch.name) / "buffer.pcm"
+        # unbuffered: the consumer counts on `self._frames` matching what is on disk
+        self._cache: BinaryIO = self._path.open("wb", buffering=0)
+        self._view: BinaryIO = self._path.open("rb")
         self._frames = 0
         self._wanted = 0
         self._eof = False
         self._error: str | None = None
+        self.decoder_closed = Event()
 
     def start(self, start_at: float) -> None:
         self._wanted = int(max(0, start_at) * self.sample_rate)
@@ -58,8 +68,11 @@ class PlaybackBuffer:
                 raise ValueError("The audio decoder produced no PCM.")
             Thread(target=self._produce, daemon=True).start()
         except BaseException:
-            self._decoder.close()
-            self.close()
+            try:
+                self._decoder.close()
+            finally:
+                self.decoder_closed.set()
+                self.close()
             raise
 
     def _fill(self) -> bool:
@@ -69,11 +82,13 @@ class PlaybackBuffer:
         with self._lock:
             if self._cache.closed:
                 return False
-            if len(block) == 0:
+        if len(block) == 0:
+            with self._lock:
                 self._eof = True
-                return False
-            self._cache.seek(0, 2)
-            self._cache.write(np.asarray(block, dtype="<f4").tobytes())
+            return False
+        # the producer thread is the only writer, so the append needs no lock
+        self._cache.write(np.asarray(block, dtype="<f4").tobytes())
+        with self._lock:
             self._frames += len(block)
             return True
 
@@ -97,7 +112,10 @@ class PlaybackBuffer:
             with self._lock:
                 self._error = str(error) or type(error).__name__
         finally:
-            self._decoder.close()
+            try:
+                self._decoder.close()
+            finally:
+                self.decoder_closed.set()
 
     def state(self) -> tuple[int, bool, str | None]:
         with self._lock:
@@ -109,25 +127,35 @@ class PlaybackBuffer:
 
     def read(self, start: int, count: int) -> np.ndarray:
         with self._lock:
+            if self._view.closed:
+                return np.zeros((0, self._width), dtype=np.float32)
             count = max(0, min(count, self._frames - start))
-            self._cache.seek(start * self._width * 4)
-            data = self._cache.read(count * self._width * 4)
             self._wanted = start + count
-        return np.frombuffer(data, dtype="<f4").reshape(count, self._width)
+        data = b""
+        if count:
+            self._view.seek(start * self._width * 4)
+            data = self._view.read(count * self._width * 4)
+        return np.frombuffer(data, dtype="<f4").reshape(len(data) // 4 // self._width, self._width)
 
     def close(self) -> None:
         self._token.cancel()
         with self._lock:
+            self._view.close()
+        try:
             self._cache.close()
+        finally:
+            self._scratch.cleanup()
 
 
 class AdmReadAhead:
     """Marks the readable prefix of a growing, private ADM playback file."""
 
-    def __init__(self, token: CancellationToken, min_frames: int = 0) -> None:
+    def __init__(self, token: CancellationToken, sample_rate: int, start_at: float = 0.0) -> None:
         self._token = token
-        self._min_frames = max(0, min_frames)
-        self._lock = Lock()
+        self._wanted = int(max(0, start_at) * sample_rate)
+        self._min_frames = self._wanted + round(sample_rate * START_SECONDS)
+        self._ahead = round(sample_rate * AHEAD_SECONDS)
+        self._changed = Condition()
         self._scratch = tempfile.TemporaryDirectory(dir=work_root())
         self._frames = 0
         self._eof = False
@@ -148,13 +176,14 @@ class AdmReadAhead:
             except Exception as error:
                 if not self._token.cancelled:
                     logger.exception("ADM playback decoder failed")
-                    with self._lock:
+                    with self._changed:
                         self._error = str(error) or type(error).__name__
             finally:
-                with self._lock:
+                with self._changed:
                     self._eof = True
                     if self._closed:
                         self._scratch.cleanup()
+                    self._changed.notify_all()
                 self._ready.set()
 
         Thread(target=worker, daemon=True).start()
@@ -162,7 +191,7 @@ class AdmReadAhead:
             while not self._ready.wait(0.05):
                 self._token.raise_if_cancelled()
             self._token.raise_if_cancelled()
-            with self._lock:
+            with self._changed:
                 if self._error is not None:
                     raise RuntimeError(self._error)
                 if self._path is None:
@@ -173,20 +202,40 @@ class AdmReadAhead:
             raise
 
     def _publish(self, path: Path, frames: int) -> None:
-        self._token.raise_if_cancelled()
-        with self._lock:
+        with self._changed:
             self._path, self._frames = path, frames
-            ready = frames >= self._min_frames
-        if ready:
-            self._ready.set()
+            self._changed.notify_all()
+            if frames >= self._min_frames:
+                self._ready.set()
+            while frames >= self._wanted + self._ahead:
+                self._token.raise_if_cancelled()
+                self._changed.wait(0.05)
+            self._token.raise_if_cancelled()
+
+    def request(self, frame: int) -> None:
+        with self._changed:
+            self._wanted = frame
+            self._changed.notify_all()
+
+    def wait_for(self, end: int) -> int:
+        """Wait on the decoder thread only, never from the audio sink."""
+        with self._changed:
+            while self._frames < end and not self._eof:
+                self._token.raise_if_cancelled()
+                self._changed.wait(0.05)
+            self._token.raise_if_cancelled()
+            if self._error is not None:
+                raise RuntimeError(self._error)
+            return self._frames
 
     def state(self) -> tuple[int, bool, str | None]:
-        with self._lock:
+        with self._changed:
             return self._frames, self._eof, self._error
 
     def close(self) -> None:
         self._token.cancel()
-        with self._lock:
+        with self._changed:
             self._closed = True
+            self._changed.notify_all()
             if self._eof:
                 self._scratch.cleanup()

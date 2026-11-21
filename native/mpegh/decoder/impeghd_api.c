@@ -279,7 +279,8 @@ static IA_ERRORCODE impeghd_set_config_params(ia_mpegh_dec_api_struct *p_obj_mpe
   }
 
   if ((ptr_input_config->ui_pcm_wd_sz != 16) && (ptr_input_config->ui_pcm_wd_sz != 24) &&
-      (ptr_input_config->ui_pcm_wd_sz != 32))
+      (ptr_input_config->ui_pcm_wd_sz != 32) &&
+      (ptr_input_config->ui_pcm_wd_sz != IMPEGHD_PCM_FLOAT32))
   {
     p_obj_mpegh_dec->mpeghd_config.ui_pcm_wdsz = 16;
     return (IA_MPEGH_DEC_CONFIG_NONFATAL_INVALID_PCM_WDSZ);

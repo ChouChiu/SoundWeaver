@@ -121,12 +121,10 @@ def _surround(
     frames, rate, depth = source.frames, source.sample_rate, source.bit_depth
     ch = speakers.index
     # every surround layout opens L R C LFE, which the matrices index directly
-    assert (ch["L"], ch["R"], ch["C"], ch["LFE"]) == (
-        FRONT_LEFT,
-        FRONT_RIGHT,
-        FRONT_CENTER,
-        LOW_FREQUENCY,
-    ), speakers
+    if (ch["L"], ch["R"], ch["C"], ch["LFE"]) != (
+        FRONT_LEFT, FRONT_RIGHT, FRONT_CENTER, LOW_FREQUENCY,
+    ):
+        raise ValueError(f"unexpected channel order for {speakers}")
 
     def pair(left: str) -> tuple[int, int]:
         return ch[left], ch["R" + left[1:] if left[0] == "L" else left[:-1] + "r"]

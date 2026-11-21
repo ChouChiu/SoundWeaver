@@ -50,7 +50,7 @@ class LogPanelHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         try:
             self.lines.line.emit(self.format(record))
-        except Exception:  # noqa: BLE001 - a Handler reports its own failures
+        except Exception:
             self.handleError(record)
 
 

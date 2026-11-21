@@ -44,7 +44,7 @@ extern FILE *fori = NULL;
 #endif
 
 
-int avs3_encoder(int argc, char* argv[])
+static int encode(int argc, char* argv[], int payload_only)
 {
     static long frame = 1;
 #ifdef SUPPORT_24BIT_INPUT
@@ -88,6 +88,10 @@ int avs3_encoder(int argc, char* argv[])
 
     // encoder init
     Avs3EncoderInit(stAvs3, &fModel);
+    if (payload_only && fwrite("SWVP", 1, 4, fileBitstream) != 4) {
+        fprintf(stderr, "Error writing Audio Vivid payload header.\n");
+        exit(-1);
+    }
    
     samplesLookahead = stAvs3->lookaheadSamples;
     numChansInput = stAvs3->numChansInput;
@@ -120,7 +124,7 @@ int avs3_encoder(int argc, char* argv[])
 #endif
 
         /* Write indices to file */
-        Avs3FlushBitstream(stAvs3, fileBitstream);
+        Avs3FlushBitstream(stAvs3, fileBitstream, payload_only);
 
         samplesLookahead = 0;
 
@@ -160,4 +164,14 @@ int avs3_encoder(int argc, char* argv[])
     Avs3EncoderDestroy(stAvs3);
 
     return 0;
+}
+
+int avs3_encoder(int argc, char *argv[])
+{
+    return encode(argc, argv, 0);
+}
+
+int avs3_encoder_payload(int argc, char *argv[])
+{
+    return encode(argc, argv, 1);
 }

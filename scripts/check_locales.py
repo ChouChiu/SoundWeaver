@@ -7,6 +7,7 @@ exists.  Run from the repository root: `uv run python scripts/check_locales.py`.
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 import string
@@ -17,6 +18,8 @@ ROOT = Path(__file__).resolve().parent.parent / "src" / "soundweaver"
 LANGUAGES = ("zh_cn", "zh_tw", "en")
 # t("key") and t("key", ...) with a literal key; dynamic keys are built from known prefixes
 _CALL = re.compile(r"""\bt\(\s*["']([a-z0-9_.]+)["']""")
+# dynamic t(f"prefix{...}") calls: every key under the prefix is presumed live
+_DYNAMIC = re.compile(r"""\bt\(\s*f["']([a-z0-9_.]+)""")
 
 
 def fields(text: str) -> set[str]:
@@ -38,11 +41,23 @@ def main() -> int:
         for key in reference.keys() & bundle.keys():
             if fields(bundle[key]) != fields(reference[key]):
                 problems.append(f"{lang}: {key} takes {fields(bundle[key])}, zh_cn {fields(reference[key])}")
+    referenced: set[str] = set()
+    prefixes: set[str] = set()
     for path in ROOT.rglob("*.py"):
-        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        text = path.read_text(encoding="utf-8")
+        for number, line in enumerate(text.splitlines(), 1):
             for key in _CALL.findall(line):
                 if key not in reference:
                     problems.append(f"{path.relative_to(ROOT)}:{number}: no string {key}")
+            prefixes.update(_DYNAMIC.findall(line))
+        # keys reached indirectly (a title_key attribute, a helper argument) count
+        # as used when any string literal in the module names them
+        for node in ast.walk(ast.parse(text, filename=str(path))):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                referenced.add(node.value)
+    for key in sorted(reference.keys() - referenced):
+        if not any(key.startswith(pre) for pre in prefixes):
+            problems.append(f"unused string {key}")
     for problem in problems:
         print(problem)
     print(f"{len(reference)} keys, {len(problems)} problems")

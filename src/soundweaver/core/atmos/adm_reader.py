@@ -11,6 +11,7 @@ import bisect
 import logging
 import math
 import struct
+import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,7 +24,7 @@ from soundweaver.core.pcm import AudioData, create_pcm_audio
 from soundweaver.core.speakers import BED_POSITIONS, DEFAULT_ATMOS, SIDE_POSITIONS, SpeakerLayout
 
 from .oamd import Program
-from .render import _place
+from .render import place
 from .trace import SILENCE_DB, Key, ObjectPath, ObjectTrace
 
 logger = logging.getLogger(__name__)
@@ -74,6 +75,15 @@ class ADMBlock:
     z: float  # Room Z: 0 (floor) .. 1 (ceiling)
     gain: float
     active: bool
+    size: float = 0.0
+    size_from: float = 0.0
+    size_ramp: float = 0.0
+
+    def size_at(self, time_s: float) -> float:
+        if not self.size_ramp:
+            return self.size
+        fraction = min(1.0, max(0.0, (time_s - self.start) / self.size_ramp))
+        return self.size_from + (self.size - self.size_from) * fraction
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,7 +128,7 @@ def _parse_timecode(tc: str | None) -> float:
         return 0.0
 
 
-def _adm_to_room(x: float, y: float, z: float, *, polar: bool = False) -> tuple[float, float, float]:
+def adm_to_room(x: float, y: float, z: float, *, polar: bool = False) -> tuple[float, float, float]:
     """Convert ADM cartesian (-1..+1) or polar (az, el, dist) to room (0..1)."""
     if polar:
         az = math.radians(x)
@@ -275,6 +285,8 @@ def _parse_axml(xml_bytes: bytes) -> tuple[dict[str, tuple[str, str, list[ADMBlo
                 x, y, z = 0.0, 1.0, 0.0
                 polar = False
                 gain = 1.0
+                extents: dict[str, float] = {}
+                size_ramp = dur
                 for sub in child:
                     stag = _local(sub.tag)
                     val_text = (sub.text or "").strip()
@@ -305,10 +317,31 @@ def _parse_axml(xml_bytes: bytes) -> tuple[dict[str, tuple[str, str, list[ADMBlo
                                 gain = g
                         except ValueError:
                             pass
+                    elif type_label == "0003" and stag in ("width", "height", "depth") and val_text:
+                        try:
+                            extent = float(val_text)
+                        except ValueError:
+                            continue
+                        if math.isfinite(extent):
+                            extents[stag] = extent
+                    elif type_label == "0003" and stag == "jumpPosition" and val_text in ("1", "true"):
+                        try:
+                            interpolation = float(sub.attrib.get("interpolationLength", "0"))
+                        except ValueError:
+                            interpolation = 0.0
+                        size_ramp = min(dur, max(0.0, interpolation))
                     elif stag == "speakerLabel" and val_text and speaker_label is None:
                         speaker_label = _SPEAKER_LABEL_MAP.get(val_text, val_text)
-                rx, ry, rz = _adm_to_room(x, y, z, polar=polar)
-                blocks.append(ADMBlock(start, dur, rx, ry, rz, gain, gain > 0.0))
+                rx, ry, rz = adm_to_room(x, y, z, polar=polar)
+                angle_scale = 360.0 if polar else 1.0
+                width = extents.get("width", 0.0) / angle_scale
+                height = extents.get("height", 0.0) / angle_scale
+                size = min(1.0, max(0.0, width, height, extents.get("depth", 0.0)))
+                size_from = blocks[-1].size_at(start) if blocks else size
+                blocks.append(ADMBlock(
+                    start, dur, rx, ry, rz, gain, gain > 0.0, size,
+                    size_from=size_from, size_ramp=size_ramp if size_from != size else 0.0,
+                ))
             channel_formats[cid] = (type_label, cname, blocks, speaker_label)
 
     return channel_formats, track_to_channel, uid_to_channel
@@ -316,6 +349,11 @@ def _parse_axml(xml_bytes: bytes) -> tuple[dict[str, tuple[str, str, list[ADMBlo
 
 class PreparedADM:
     """Random-access ADM BWF reader with speaker rendering and object tracing."""
+
+    # The mixer probes for a rewritten axml per block; cap the file reads.
+    _REFRESH_INTERVAL = 0.1
+    # A mid-rewrite read retries this often before keeping the parsed tracks.
+    _REWRITE_RETRIES = 3
 
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -341,12 +379,29 @@ class PreparedADM:
         self._data_chunk = chunks["data"]
         self.frame_count = self._data_chunk.size // self._stride
         self.duration = self.frame_count / self.sample_rate if self.sample_rate else 0.0
+        # a playback decode rewrites the axml footer in place as the scan grows;
+        # its fixed position follows the declared (full-length) data chunk
+        self._chna_entries = chna_entries
+        self._axml_chunk = chunks["axml"]
+        self._axml_offset = chunks["axml"].offset
+        self._last_probe = 0.0
+        self._fh = None
+        # unbuffered: a buffered handle would serve a rewritten axml from its cache
+        self._probe: BinaryIO | None = None
+        self._apply_tracks(channel_formats, track_to_channel, uid_to_channel)
 
+    def _apply_tracks(
+        self,
+        channel_formats: dict[str, tuple[str, str, list[ADMBlock], str | None]],
+        track_to_channel: dict[str, str],
+        uid_to_channel: dict[str, str],
+    ) -> None:
+        """Rebuild the track table from parsed axml; the chna layout never changes."""
         tracks: list[ADMTrack] = []
         bed_labels: list[str] = []
         seen_channels: set[int] = set()
-        for ch_idx, uid, track_ref, _ in chna_entries:
-            if ch_idx < 0 or ch_idx >= channels or ch_idx in seen_channels:
+        for ch_idx, uid, track_ref, _ in self._chna_entries:
+            if ch_idx < 0 or ch_idx >= self.channels or ch_idx in seen_channels:
                 continue
             seen_channels.add(ch_idx)
             cf_id = uid_to_channel.get(uid) or track_to_channel.get(track_ref)
@@ -363,7 +418,6 @@ class PreparedADM:
                 bed_labels.append(spk)
             tracks.append(ADMTrack(ch_idx, cname, is_obj, is_lfe, spk, tuple(blocks)))
 
-        self._fh = None
         tracks.sort(key=lambda t: t.channel_index)
         self.tracks = tuple(tracks)
         self._block_starts: dict[int, tuple[float, ...]] = {
@@ -381,14 +435,64 @@ class PreparedADM:
         )
 
     def close(self) -> None:
-        """Close the cached read handle if open."""
+        """Close the cached read handles if open."""
         fh = getattr(self, "_fh", None)
         if fh is not None:
             self._fh = None
             fh.close()
+        probe = getattr(self, "_probe", None)
+        if probe is not None:
+            self._probe = None
+            probe.close()
 
     def __del__(self) -> None:
         self.close()
+
+    def refresh(self) -> bool:
+        """Re-read the axml when the decoder rewrote it; True when the tracks changed.
+
+        The playback decode publishes the file with a partial metadata timeline
+        and rewrites the axml in place as its scan grows, so a read may catch the
+        rewrite half-done: a parse failure retries briefly and then keeps the
+        tracks it already has.  Rate-limited to one length probe per interval.
+        """
+        now = time.monotonic()
+        if now - self._last_probe < self._REFRESH_INTERVAL:
+            return False
+        self._last_probe = now
+        try:
+            if self._axml_size() == self._axml_chunk.size:
+                return False
+        except OSError:
+            return False
+        for _ in range(self._REWRITE_RETRIES):
+            try:
+                size = self._axml_size()
+                raw = self._read_axml(size)
+                formats, track_to_channel, uid_to_channel = _parse_axml(raw)
+            except (OSError, ADMReadError):
+                time.sleep(0.005)
+                continue
+            self._axml_chunk = ChunkInfo(self._axml_offset, size)
+            self._apply_tracks(formats, track_to_channel, uid_to_channel)
+            return True
+        return False
+
+    def _axml_size(self) -> int:
+        """The axml chunk's length field as it is on disk right now."""
+        if self._probe is None or self._probe.closed:
+            self._probe = self.path.open("rb", buffering=0)
+        self._probe.seek(self._axml_offset - 4)
+        return struct.unpack("<I", self._probe.read(4))[0]
+
+    def _read_axml(self, size: int) -> bytes:
+        if self._probe is None or self._probe.closed:
+            self._probe = self.path.open("rb", buffering=0)
+        self._probe.seek(self._axml_offset)
+        raw = self._probe.read(size)
+        if len(raw) != size:
+            raise ADMReadError("Truncated axml chunk")
+        return raw
 
     def read_frames(self, start_frame: int, count: int) -> np.ndarray:
         """Read `count` frames starting at `start_frame` as float32 shape `(frames, channels)`."""
@@ -425,7 +529,11 @@ class PreparedADM:
         return arr.reshape(actual, self.channels)
 
     def block_at(self, track: ADMTrack, time_s: float) -> ADMBlock | None:
-        """Find the active `ADMBlock` at `time_s` in O(log B) via binary search."""
+        """Find the active `ADMBlock` at `time_s` in O(log B) via binary search.
+
+        `track` may predate a refresh that rebuilt `_block_starts`, so the index
+        is clamped to the track's own block list.
+        """
         blocks = track.blocks
         if not blocks:
             return None
@@ -434,9 +542,9 @@ class PreparedADM:
             starts = tuple(b.start for b in blocks)
             self._block_starts[track.channel_index] = starts
         idx = bisect.bisect_right(starts, time_s) - 1
-        return blocks[max(0, idx)]
+        return blocks[max(0, min(idx, len(blocks) - 1))]
 
-    def _track_gains_at(self, track: ADMTrack, time_s: float, layout: SpeakerLayout) -> np.ndarray:
+    def track_gains_at(self, track: ADMTrack, time_s: float, layout: SpeakerLayout) -> np.ndarray:
         """Speaker gain vector for `track` at `time_s`."""
         if track.is_lfe:
             g = np.zeros(len(layout.channels), dtype=np.float32)
@@ -454,11 +562,11 @@ class PreparedADM:
                 else BED_POSITIONS.get(track.speaker_label)
             )
             if pos is not None:
-                return _place(layout, *pos).astype(np.float32)
+                return place(layout, *pos).astype(np.float32)
         blk = self.block_at(track, time_s)
         if blk is None or not blk.active or blk.gain <= 0.0:
             return np.zeros(len(layout.channels), dtype=np.float32)
-        return (_place(layout, blk.x, blk.y, blk.z) * blk.gain).astype(np.float32)
+        return (place(layout, blk.x, blk.y, blk.z) * blk.gain).astype(np.float32)
 
     def render_to_layout(
         self,
@@ -480,7 +588,7 @@ class PreparedADM:
                 mid_t = (pos + n * 0.5) / self.sample_rate
                 out = np.zeros((n, len(layout.channels)), dtype=np.float32)
                 for tr in self.tracks:
-                    g = self._track_gains_at(tr, mid_t, layout)
+                    g = self.track_gains_at(tr, mid_t, layout)
                     if np.any(g):
                         out += pcm[:, tr.channel_index : tr.channel_index + 1] * g[np.newaxis, :]
                 audio.samples[:, pos : pos + n] = out.T
@@ -521,7 +629,7 @@ class PreparedADM:
                 if pcm.shape[0] > 0:
                     peak = float(np.max(np.abs(pcm[:, tr.channel_index])))
                     levels[oi, step_idx] = 20.0 * math.log10(peak) if peak > 1e-6 else SILENCE_DB
-                g = self._track_gains_at(tr, t_mid, layout)
+                g = self.track_gains_at(tr, t_mid, layout)
                 energy = g[spk_indices] ** 2
                 tot = float(np.sum(energy))
                 if tot > 0.0:

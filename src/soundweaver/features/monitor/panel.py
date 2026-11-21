@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtCore import QSettings, QSize, Qt, Signal
 from PySide6.QtGui import QDragEnterEvent, QDropEvent, QGuiApplication
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -21,24 +21,24 @@ from qfluentwidgets import (
     CheckBox,
     PillPushButton,
     PushButton,
-    SegmentedWidget,
     SimpleCardWidget,
     TitleLabel,
     ToolButton,
 )
 
 from soundweaver.core.audio import AudioInfo
-from soundweaver.core.codecs import av3a, mpegh
+from soundweaver.core.codecs import mpegh
 from soundweaver.core.i18n import t
-from soundweaver.core.playback import SILENCE_DB, ObjectSnapshot, PlaybackEngine
-from soundweaver.core.renderer import RENDERER_DIR
+from soundweaver.core.playback import PlaybackEngine
+from soundweaver.core.playback_mix import SILENCE_DB, ObjectSnapshot
 from soundweaver.core.sources import AUDIO_SUFFIXES, is_audio
 from soundweaver.core.speakers import LAYOUTS, atmos_layout
 from soundweaver.core.ttml import parse_ttml_lines
 from soundweaver.features.monitor.meters import MeterRow, object_color
 from soundweaver.features.monitor.playlist import PlaylistView
 from soundweaver.features.monitor.room_canvas import Room3DCanvas
-from soundweaver.features.monitor.webgl_view import WebGLMonitorWidget
+from soundweaver.features.monitor.speakers import room_speakers, spherical_speakers
+from soundweaver.features.monitor.webgl_view import MONITOR_PAGE, WebGLMonitorWidget
 from soundweaver.ui import fluent, widgets
 from soundweaver.ui.scrolling import DirectListWidget, DirectScrollArea
 
@@ -51,6 +51,7 @@ class MonitorPage(QWidget):
     def __init__(self, engine: PlaybackEngine, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.engine = engine
+        self._settings = QSettings()
         self.setAcceptDrops(True)
         self._lyrics: list[tuple[float, float, str]] = []
         self._meter_mode = "channels"
@@ -63,19 +64,13 @@ class MonitorPage(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(widgets.SECTION_SPACING)
 
-        # Header + Layout / CICP + Binaural + Full-window
+        # Header, layout and full-window controls
         view_controls = QWidget()
         hdr = QHBoxLayout(view_controls)
         hdr.setContentsMargins(0, 0, 0, 0)
         hdr.setSpacing(widgets.INLINE_SPACING)
         root.addWidget(TitleLabel(t("monitor.title"), self))
 
-        self.binaural_btn = PillPushButton(fluent.icon("headphones"), t("monitor.binaural"), self)
-        self.binaural_btn.setCheckable(True)
-        self.binaural_btn.setEnabled(av3a.find_binaural_renderer() is not None)
-        self.binaural_btn.setToolTip(t("monitor.binaural_tip"))
-        self.binaural_btn.toggled.connect(self.engine.set_binaural)
-        hdr.addWidget(self.binaural_btn)
 
         self.mode_box = fluent.ComboBox(self)
         widgets.name_control(self.mode_box, t("monitor.view_mode"))
@@ -125,14 +120,14 @@ class MonitorPage(QWidget):
         left.setMinimumWidth(224)
         left_lay = QVBoxLayout(left)
         left_lay.setContentsMargins(12, 12, 12, 12)
-        left_lay.setSpacing(8)
-        left_tabs = SegmentedWidget(left)
+        left_lay.setSpacing(widgets.ROW_SPACING)
+        left_tabs = widgets.SegmentedChoice(left)
         left_stack = QStackedWidget(left)
 
         pl_page = QWidget(left_stack)
         pl_lay = QVBoxLayout(pl_page)
         pl_lay.setContentsMargins(0, 2, 0, 0)
-        pl_lay.setSpacing(8)
+        pl_lay.setSpacing(widgets.ROW_SPACING)
         pl_btns = QHBoxLayout()
         pl_btns.setSpacing(6)
         btn_add = PushButton(fluent.icon("list-add"), t("monitor.add_tracks"), pl_page)
@@ -159,8 +154,8 @@ class MonitorPage(QWidget):
         self.lyrics_list.setAccessibleName(t("monitor.lyrics"))
         left_stack.addWidget(pl_page)
         left_stack.addWidget(self.lyrics_list)
-        left_tabs.addItem("playlist", t("monitor.playlist"), lambda: left_stack.setCurrentIndex(0))
-        left_tabs.addItem("lyrics", t("monitor.lyrics"), lambda: left_stack.setCurrentIndex(1))
+        left_tabs.add_choice("playlist", t("monitor.playlist"), lambda: left_stack.setCurrentIndex(0))
+        left_tabs.add_choice("lyrics", t("monitor.lyrics"), lambda: left_stack.setCurrentIndex(1))
         left_tabs.setCurrentItem("playlist")
         left_lay.addWidget(left_tabs)
         left_lay.addWidget(left_stack, 1)
@@ -170,10 +165,10 @@ class MonitorPage(QWidget):
         center.setMinimumWidth(360)
         c_lay = QVBoxLayout(center)
         c_lay.setContentsMargins(12, 12, 12, 12)
-        c_lay.setSpacing(8)
+        c_lay.setSpacing(widgets.ROW_SPACING)
         vp_row = QHBoxLayout()
-        vp_row.setSpacing(8)
-        view_box = fluent.ComboBox(center)
+        vp_row.setSpacing(widgets.ROW_SPACING)
+        self.view_box = view_box = fluent.ComboBox(center)
         widgets.name_control(view_box, t("monitor.viewpoint"))
         for preset in ("iso", "top", "front", "back", "left", "right"):
             view_box.addItem(t(f"option.view.{preset}"), preset)
@@ -187,7 +182,7 @@ class MonitorPage(QWidget):
         vp_row.addWidget(self.style_box)
 
         opt_row = QHBoxLayout()
-        opt_row.setSpacing(12)
+        opt_row.setSpacing(widgets.FIELD_SPACING)
         self.chk_labels = CheckBox(t("soundfield.labels"), center)
         self.chk_labels.setChecked(True)
         self.chk_labels.toggled.connect(lambda on: self.canvas_3d.set_show_labels(on))
@@ -213,28 +208,29 @@ class MonitorPage(QWidget):
         self._center_lay = c_lay
         if (
             QGuiApplication.platformName() != "offscreen"
-            and (RENDERER_DIR / "dist" / "monitor.html").is_file()
+            and MONITOR_PAGE.is_file()
         ):
-            web = WebGLMonitorWidget(self.engine, center)
+            web = WebGLMonitorWidget(center)
             web.render_failed.connect(self._fallback_to_software_canvas)
             self.canvas_3d: WebGLMonitorWidget | Room3DCanvas = web
         else:
-            self.canvas_3d = Room3DCanvas(self.engine, center)
+            self.canvas_3d = Room3DCanvas(center)
         c_lay.addLayout(vp_row)
         c_lay.addLayout(opt_row)
         c_lay.addWidget(self.canvas_3d, 1)
+        self._sync_speakers()
 
         # Right: Live Meters + M/S
         right = SimpleCardWidget(splitter)
         right.setMinimumWidth(280)
         r_lay = QVBoxLayout(right)
         r_lay.setContentsMargins(12, 12, 12, 12)
-        r_lay.setSpacing(8)
+        r_lay.setSpacing(widgets.ROW_SPACING)
         r_hdr = QHBoxLayout()
         r_hdr.setSpacing(6)
-        m_tabs = SegmentedWidget(right)
-        m_tabs.addItem("channels", t("monitor.channels"), lambda: self._set_meter_mode("channels"))
-        m_tabs.addItem("objects", t("monitor.objects"), lambda: self._set_meter_mode("objects"))
+        m_tabs = widgets.SegmentedChoice(right)
+        m_tabs.add_choice("channels", t("monitor.channels"), lambda: self._set_meter_mode("channels"))
+        m_tabs.add_choice("objects", t("monitor.objects"), lambda: self._set_meter_mode("objects"))
         m_tabs.setCurrentItem(self._meter_mode)
         btn_clear_ms = ToolButton(fluent.icon("edit-clear"), right)
         widgets.name_control(btn_clear_ms, t("monitor.clear_ms"))
@@ -294,16 +290,19 @@ class MonitorPage(QWidget):
         if isinstance(self.canvas_3d, Room3DCanvas):
             return
         old = self.canvas_3d
-        sw = Room3DCanvas(self.engine, old.parentWidget())
+        sw = Room3DCanvas(old.parentWidget())
+        sw.set_view(self.view_box.currentData())
         sw.set_show_labels(self.chk_labels.isChecked())
         sw.set_show_speakers(self.chk_speakers.isChecked())
         sw.set_show_drop(self.chk_drop.isChecked())
         sw.set_style(self.style_box.currentData())
-        sw.set_mode(str(self.mode_box.currentData() or "room"))
+        sw.set_mode(self.mode_box.currentData())
         sw.set_layers(self.btn_upper.isChecked(), self.btn_middle.isChecked(), self.btn_lower.isChecked())
         self._center_lay.replaceWidget(old, sw)
+        old.hide()
         old.deleteLater()
         self.canvas_3d = sw
+        self._sync_speakers()
         sw.set_selected_object(self._selected_object)
         sw.update_telemetry(*self._telemetry)
 
@@ -323,13 +322,15 @@ class MonitorPage(QWidget):
         )
 
     def _on_mode_changed(self) -> None:
-        mode = str(self.mode_box.currentData() or "room")
+        mode = self.mode_box.currentData()
         is_sph = mode == "spherical"
         self.canvas_3d.set_mode(mode)
+        self._sync_speakers()
         self.layout_lbl.setVisible(not is_sph)
         self.layout_box.setVisible(not is_sph)
         self.cicp_box.setVisible(is_sph)
         self.style_box.setEnabled(not is_sph)
+        self._sync_label_visibility()
         self.chk_speakers.setVisible(not is_sph)
         self.chk_drop.setVisible(not is_sph)
         for b in (self.btn_upper, self.btn_middle, self.btn_lower):
@@ -337,15 +338,28 @@ class MonitorPage(QWidget):
 
     def _on_style_changed(self) -> None:
         self.canvas_3d.set_style(self.style_box.currentData())
+        self._sync_label_visibility()
+
+    def _sync_label_visibility(self) -> None:
+        self.chk_labels.setVisible(
+            self.mode_box.currentData() == "spherical" or self.style_box.currentData() != "logic"
+        )
+
+    def _sync_speakers(self) -> None:
+        if self.mode_box.currentData() == "spherical":
+            speakers = spherical_speakers(mpegh.cicp_layout(self.engine.cicp))
+        else:
+            speakers = room_speakers(self.engine.layout)
+        self.canvas_3d.set_speakers(speakers)
 
     def _on_layout_changed(self) -> None:
-        self.engine.set_layout(atmos_layout(str(self.layout_box.currentData() or "")))
-        self.canvas_3d.sync_speakers()
+        self.engine.set_layout(atmos_layout(self.layout_box.currentData()))
+        self._sync_speakers()
         self._rebuild_meters()
 
     def _on_cicp_changed(self) -> None:
-        self.engine.set_cicp(int(self.cicp_box.currentData() or 13))
-        self.canvas_3d.sync_speakers()
+        self.engine.set_cicp(self.cicp_box.currentData())
+        self._sync_speakers()
         self._rebuild_meters()
 
     def _set_meter_mode(self, mode: str) -> None:
@@ -521,10 +535,11 @@ class MonitorPage(QWidget):
         files, _ = QFileDialog.getOpenFileNames(
             self,
             t("monitor.add_tracks"),
-            str(Path.home()),
-            f"Audio ({exts});;All (*.*)",
+            self._settings.value("last_dir", str(Path.home())),
+            t("monitor.audio_filter", exts=exts),
         )
         if files:
+            self._settings.setValue("last_dir", str(Path(files[0]).parent))
             self.add_paths([Path(f) for f in files])
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:

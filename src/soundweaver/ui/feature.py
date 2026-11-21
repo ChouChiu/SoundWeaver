@@ -87,6 +87,7 @@ class FeaturePanel(QWidget):
         tip: str = "",
     ) -> QSpinBox:  # fmt: skip
         box = widgets.spin(low, high, value, suffix, step)
+        widgets.focus_ring(box)
         box.setToolTip(tip)
         self.remember(key, box)
         return box
@@ -102,6 +103,8 @@ class FeaturePanel(QWidget):
         box.setSingleStep(step)
         box.setValue(value)
         box.setSuffix(t("unit.seconds_suffix"))
+        widgets.fixed_width(box)
+        widgets.focus_ring(box)
         box.setToolTip(tip)
         self.remember(key, box, replan)
         return box
@@ -114,6 +117,7 @@ class FeaturePanel(QWidget):
     def check(self, key: str, text: str, value: bool, tip: str = "") -> CheckBox:
         box = CheckBox(text)
         box.setChecked(value)
+        widgets.focus_ring(box)
         box.setToolTip(tip)
         box.toggled.connect(self.changed)
         self._checks[key] = box
@@ -126,6 +130,7 @@ class FeaturePanel(QWidget):
             box.addItem(label, name)
         box.setCurrentIndex(max(0, box.findData(value)))
         box.setToolTip(tip)
+        widgets.focus_ring(box)
         box.currentIndexChanged.connect(self.changed)
         self._combos[key] = box
         return box
@@ -135,6 +140,7 @@ class FeaturePanel(QWidget):
         line.setPlaceholderText(placeholder)
         line.setClearButtonEnabled(True)
         line.setText(value)
+        widgets.focus_ring(line)
         self.persist_edit(key, line)
         return line
 
@@ -241,7 +247,7 @@ class PageHeader(QWidget):
     def __init__(self, panel: FeaturePanel, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         icon = IconWidget(fluent.icon(panel.icon))
-        icon.setFixedSize(26, 26)
+        icon.setFixedSize(24, 24)
         self.check = SwitchButton()
         widgets.name_switch(self.check, t("switch.enable_disable", name=panel.title))
         self.check.setOnText(t("switch.enabled"))
@@ -252,8 +258,9 @@ class PageHeader(QWidget):
         title = QHBoxLayout()
         title.setSpacing(widgets.FIELD_SPACING)
         title.addWidget(icon)
-        title.addWidget(TitleLabel(panel.title))
-        title.addStretch(1)
+        label = TitleLabel(panel.title)
+        label.setWordWrap(True)
+        title.addWidget(label, 1)
         title.addWidget(self.check)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)

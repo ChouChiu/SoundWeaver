@@ -187,7 +187,7 @@ void BweApplyEnc(
 );
 #endif
 
-void Avs3FlushBitstream(AVS3EncoderHandle stAvs3, FILE *fBitstream);
+void Avs3FlushBitstream(AVS3EncoderHandle stAvs3, FILE *fBitstream, int payload_only);
 
 void ResetIndicesEnc(AVS3_BSTREAM_ENC_HANDLE bsHandle, int16_t maxNumIndices);
 

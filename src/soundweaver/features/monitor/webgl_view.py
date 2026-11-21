@@ -1,4 +1,4 @@
-"""Three.js WebGL monitor bridge embedding `renderer/dist/monitor.html`."""
+"""Three.js WebGL monitor bridge embedding the local renderer bundle."""
 
 from __future__ import annotations
 
@@ -10,126 +10,160 @@ from PySide6.QtWebEngineCore import QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import QWidget
 
-from soundweaver.core.codecs import mpegh
-from soundweaver.core.playback import ObjectSnapshot, PlaybackEngine
+from soundweaver.core.playback_mix import ObjectSnapshot
 from soundweaver.core.renderer import RENDERER_DIR
+from soundweaver.features.monitor.speakers import MonitorSpeaker
+
+MONITOR_PAGE = RENDERER_DIR / "dist" / "monitor.html"
 
 
 class WebGLMonitorWidget(QWebEngineView):
-    """True Three.js WebGL 3D monitor supporting Dolby/AV3A room and 360RA WalkMix dome modes."""
+    """Send monitor state to the browser once its Three.js scene is ready."""
 
     render_failed = Signal()
 
-    def __init__(self, engine: PlaybackEngine, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.engine = engine
         self._ready = False
-        self._show_labels = True
-        self._show_speakers = False
-        self._show_drop = False
+        self._options = {"showLabels": True, "showSpeakers": False, "showDrop": False}
+        self._view = "iso"
         self._style = "person"
         self._selected_object: int | None = None
         self._telemetry: tuple[list[float], list[ObjectSnapshot]] = ([], [])
+        # at most one telemetry script in flight; a newer one replaces the pending copy
+        self._telemetry_busy = False
+        self._pending_telemetry: tuple[str, str] | None = None
+        self._speakers: list[MonitorSpeaker] = []
         self._mode = "room"
         self._layers = (True, True, True)
         self.setMinimumSize(360, 300)
         self.settings().setAttribute(QWebEngineSettings.WebAttribute.WebGLEnabled, True)
-        self.settings().setAttribute(QWebEngineSettings.WebAttribute.Accelerated2dCanvasEnabled, True)
+        self.settings().setAttribute(
+            QWebEngineSettings.WebAttribute.Accelerated2dCanvasEnabled, True
+        )
         self.page().setBackgroundColor(QColor(26, 25, 29))
-        self.page().renderProcessTerminated.connect(lambda _s, _c: self.render_failed.emit())
+        self.page().renderProcessTerminated.connect(self._on_process_terminated)
         self.loadFinished.connect(self._on_loaded)
-        self.load(QUrl.fromLocalFile(str(RENDERER_DIR / "dist" / "monitor.html")))
+        self.load(QUrl.fromLocalFile(str(MONITOR_PAGE)))
+
+    def _on_process_terminated(self, _status, _code: int) -> None:
+        self._ready = False
+        self.render_failed.emit()
 
     def _on_loaded(self, ok: bool) -> None:
-        self._ready = ok
-        if not ok:
+        if ok:
+            self.page().runJavaScript("typeof window.liveMonitor === 'object'", self._initialize)
+        else:
+            self.render_failed.emit()
+
+    def _initialize(self, ready: bool | None) -> None:
+        # Qt may invoke an outstanding script callback with no result during page teardown.
+        if ready is None:
             return
+        if not ready:
+            self.render_failed.emit()
+            return
+        self._ready = True
         self.set_mode(self._mode)
-        self.sync_speakers()
-        self.set_show_labels(self._show_labels)
-        self.set_show_speakers(self._show_speakers)
-        self.set_show_drop(self._show_drop)
         self.set_style(self._style)
+        self.set_view(self._view)
+        self.set_speakers(self._speakers)
+        self._send("setOptions", self._options)
         self.set_layers(*self._layers)
         self.set_selected_object(self._selected_object)
         self.update_telemetry(*self._telemetry)
 
-    def sync_speakers(self) -> None:
-        if not self._ready:
-            return
-        if self._mode == "spherical":
-            lay = mpegh.cicp_layout(self.engine.cicp)
-            spks = [
-                {
-                    "name": sp.name,
-                    "pos": [0.5, 0.5, 0.5],
-                    "spherical": [round(v, 4) for v in sp.cartesian()],
-                    "layer": sp.layer,
-                    "isLfe": sp.is_lfe,
-                }
-                for sp in lay.speakers
-            ]
-        else:
-            spks = [
-                {"name": n, "pos": [round(p[0], 4), round(p[1], 4), round(max(0.0, p[2]), 4)]}
-                for n, p in self.engine.layout.positions.items()
-            ]
-        self.page().runJavaScript(f"window.liveMonitor?.setSpeakers({json.dumps(spks)});")
+    def _send(self, method: str, *args: object) -> None:
+        if self._ready:
+            payload = ", ".join(json.dumps(arg, separators=(",", ":")) for arg in args)
+            self.page().runJavaScript(f"window.liveMonitor.{method}({payload});")
+
+    def set_speakers(self, speakers: list[MonitorSpeaker]) -> None:
+        self._speakers = speakers
+        if self._ready:
+            self._send(
+                "setSpeakers",
+                [
+                    {
+                        "name": sp.name,
+                        "channel": sp.channel,
+                        "layer": sp.layer,
+                        "position": [round(value, 4) for value in sp.position],
+                    }
+                    for sp in speakers
+                ],
+            )
 
     def set_view(self, preset: str) -> None:
-        if self._ready:
-            self.page().runJavaScript(f"window.liveMonitor?.setView({json.dumps(preset)});")
+        self._view = preset
+        self._send("setView", preset)
+
+    def _set_option(self, key: str, on: bool) -> None:
+        self._options[key] = on
+        self._send("setOptions", {key: on})
 
     def set_show_labels(self, on: bool) -> None:
-        self._show_labels = on
-        if self._ready:
-            self.page().runJavaScript(f"window.liveMonitor?.setOptions({{showLabels:{'true' if on else 'false'}}});")
+        self._set_option("showLabels", on)
 
     def set_show_speakers(self, on: bool) -> None:
-        self._show_speakers = on
-        if self._ready:
-            self.page().runJavaScript(f"window.liveMonitor?.setOptions({{showSpeakers:{'true' if on else 'false'}}});")
+        self._set_option("showSpeakers", on)
 
     def set_show_drop(self, on: bool) -> None:
-        self._show_drop = on
-        if self._ready:
-            self.page().runJavaScript(f"window.liveMonitor?.setOptions({{showDrop:{'true' if on else 'false'}}});")
-
-    def set_show_xy(self, _on: bool) -> None:
-        pass
+        self._set_option("showDrop", on)
 
     def set_style(self, style: str) -> None:
         self._style = style
-        if self._ready:
-            self.page().runJavaScript(f"window.liveMonitor?.setStyle({json.dumps(style)});")
+        self._send("setStyle", style)
 
     def set_mode(self, mode: str) -> None:
         self._mode = mode
-        if self._ready:
-            self.page().runJavaScript(f"window.liveMonitor?.setMode({json.dumps(mode)});")
-            self.sync_speakers()
+        self._send("setMode", mode)
 
     def set_layers(self, upper: bool, middle: bool, lower: bool) -> None:
         self._layers = (upper, middle, lower)
-        if self._ready:
-            u = "true" if upper else "false"
-            m = "true" if middle else "false"
-            l = "true" if lower else "false"
-            self.page().runJavaScript(f"window.liveMonitor?.setLayers({u}, {m}, {l});")
+        self._send("setLayers", *self._layers)
 
     def set_selected_object(self, index: int | None) -> None:
         self._selected_object = index
-        if self._ready:
-            self.page().runJavaScript(f"window.liveMonitor?.setSelectedObject({json.dumps(index)});")
+        self._send("setSelectedObject", index)
 
     def update_telemetry(self, ch_dbs: list[float], objs: list[ObjectSnapshot]) -> None:
         self._telemetry = (ch_dbs, objs)
         if not self._ready:
             return
-        payload = [
-            {"id": o.index, "x": round(o.x, 4), "y": round(o.y, 4), "z": round(o.z, 4), "db": round(o.level_db, 1), "active": o.active}
-            for o in objs
-        ]
+        payload = json.dumps(
+            [
+                {
+                    "id": o.index,
+                    "x": round(o.x, 4),
+                    "y": round(o.y, 4),
+                    "z": round(o.z, 4),
+                    "db": round(o.level_db, 1),
+                    "active": o.active,
+                    "size": round(o.size, 4),
+                }
+                for o in objs
+            ],
+            separators=(",", ":"),
+        )
+        levels = json.dumps([round(db, 1) for db in ch_dbs], separators=(",", ":"))
+        # A stalled renderer must drop stale frames instead of queueing them up;
+        # one more update always follows while playback runs.
+        if self._telemetry_busy:
+            self._pending_telemetry = (payload, levels)
+            return
+        self._telemetry_busy = True
         self.page().runJavaScript(
-            f"window.liveMonitor?.updateFrame({json.dumps(payload)}, {json.dumps([round(d, 1) for d in ch_dbs])});"
+            f"window.liveMonitor.updateFrame({payload}, {levels});", self._telemetry_flushed
+        )
+
+    def _telemetry_flushed(self, _result: object) -> None:
+        self._telemetry_busy = False
+        if self._pending_telemetry is None:
+            return
+        payload, levels = self._pending_telemetry
+        self._pending_telemetry = None
+        self._telemetry_busy = True
+        self.page().runJavaScript(
+            f"window.liveMonitor.updateFrame({payload}, {levels});", self._telemetry_flushed
         )

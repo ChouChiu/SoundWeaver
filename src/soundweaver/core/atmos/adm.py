@@ -26,7 +26,6 @@ identifies the LFE as a DirectSpeakers channel.
 from __future__ import annotations
 
 import math
-import shutil
 import struct
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -34,18 +33,26 @@ from pathlib import Path
 
 import numpy as np
 
-from soundweaver.core.paths import output_workspace
+from soundweaver.core.adm_bwf import (
+    BIT_DEPTH,
+    # The Atmos decoder writes its blocks through these; re-exported for it.
+    INTERPOLATION,
+    TICKS_PER_SECOND,
+    AdmBwf,
+    events,
+    number,
+    pcm24,
+    quantize,
+    timecode,
+)
 from soundweaver.core.speakers import BED_POSITIONS
 
 from .oamd import Program
 from .render import joc_objects
 from .sinks import RenderedFrame
-from .trace import Key
+from .trace import Key, SizeKey
 
-BIT_DEPTH = 24
-_FULL_SCALE = 2 ** (BIT_DEPTH - 1)
-_RIFF_LIMIT = 0xFFFFFFFF
-_DS64_SIZE = 28
+__all__ = ["AdmFile", "adm_block", "pcm24"]
 
 # Table 2-21: the channel configurations a bed may take, smallest first, in channel order.
 _BED_SETS = (
@@ -85,13 +92,12 @@ DIRECT_SPEAKERS = ("0001", "DirectSpeakers")
 OBJECTS = ("0003", "Objects")
 # Section 3.5: an Objects audioObject takes an id from 0x100b on, past a full 7.1.2 bed.
 _FIRST_OBJECT_ID = 0x100B
+# The playback decode re-serializes the whole metadata tree on refresh, so it
+# only does so once the scanned timeline grew this far past the written one.
+# The scan runs tens of times faster than playback, so the blocks the reader's
+# playhead reaches are always tens of seconds ahead of it.
+_REFRESH_SPAN = 30.0
 
-# Table 2-15: the interpolationLength of every block but the first, which has 0.
-_INTERPOLATION = "0.005208"
-# Section 2.5.2: a glide is sampled into blocks less than this far apart.
-_SAMPLE_PERIOD = 0.02
-# Events closer than a timecode's last digit are one event: the later one wins.
-_SAME_TIME = 1e-5
 
 
 def _assignment(label: str, seven: bool, backs: bool) -> str | None:
@@ -172,18 +178,6 @@ def _cartesian(x: float, y: float, z: float) -> tuple[float, float, float]:
     return 2 * x - 1, 1 - 2 * y, z
 
 
-def _timecode(seconds: float) -> str:
-    seconds = max(0.0, round(seconds, 5))
-    h, rest = divmod(seconds, 3600)
-    m, s = divmod(rest, 60)
-    return f"{int(h):02d}:{int(m):02d}:{s:08.5f}"
-
-
-def _number(value: float) -> str:
-    """A position as a plain decimal with four places (section 2.1), and no negative zero."""
-    return f"{value + 0.0:.4f}".replace("-0.0000", "0.0000")
-
-
 def adm_block(f: RenderedFrame, sources: tuple[int | None, ...]) -> np.ndarray:
     """One frame's span with track k carrying OAMD object `sources[k]`, its own gain applied."""
     meta = f.metadata
@@ -198,67 +192,35 @@ def adm_block(f: RenderedFrame, sources: tuple[int | None, ...]) -> np.ndarray:
     return block
 
 
-def pcm24(block: np.ndarray) -> tuple[bytes, int]:
-    """(channels, samples) as interleaved little-endian 24-bit PCM, and how many samples clipped."""
-    scaled = np.round(block.T * _FULL_SCALE)
-    over = (scaled > _FULL_SCALE - 1) | (scaled < -_FULL_SCALE)
-    clipped = int(over.sum())
-    if clipped:
-        np.clip(scaled, -_FULL_SCALE, _FULL_SCALE - 1, out=scaled)
-    raw = np.ascontiguousarray(scaled, dtype="<i4").view(np.uint8).reshape(-1, 4)[:, :3]
-    return raw.tobytes(), clipped
+def _object_events(
+    keys: list[Key], sizes: list[SizeKey], duration: float
+) -> list[tuple[float, tuple[float, ...], float]]:
+    positions = events(
+        ((t, ramp, (x, y, z)) for t, ramp, x, y, z, _ in keys), duration, (0.5, 0.5, 0.0)
+    )
+    if not sizes:
+        return [(t, position, 0.0) for t, position in positions]
 
-
-def _events(keys: list[Key], duration: float) -> list[tuple[float, tuple[float, float, float]]]:
-    """The (time, room position) events an object's blocks hold, the first at 0.
-
-    A key glides from where the object is to its position over its ramp, or
-    until the next key takes over; the glide is sampled evenly, under
-    `_SAMPLE_PERIOD` apart.  Events before the container starts collapse onto
-    its first sample, events past it go, and an event that leaves the
-    position where it was is dropped.
-    """
-    timed: list[tuple[float, tuple[float, float, float]]] = []
-    here: tuple[float, float, float] | None = None
-    for n, (t, ramp, x, y, z, _active) in enumerate(keys):
-        end = keys[n + 1][0] if n + 1 < len(keys) else math.inf
-        target = (x, y, z)
-        if here is None or ramp <= 0:
-            timed.append((t, target))
-            here = target
-            continue
-        start = here
-        here = _lerp(start, target, min(1.0, (end - t) / ramp))
-        steps = int(ramp / _SAMPLE_PERIOD) + 1
-        for k in range(1, steps + 1):
-            at = t + ramp * k / steps
-            if at > end + _SAME_TIME:
-                # cut short by the next key: hold where the glide got to
-                timed.append((end, here))
-                break
-            timed.append((at, _lerp(start, target, k / steps)))
-
-    events: list[tuple[float, tuple[float, float, float]]] = []
-    for t, position in timed:
-        t = max(0.0, t)
-        if t >= duration:
+    # Combine the independent timelines at the precision of an ADM timecode.
+    by_position = {round(t * TICKS_PER_SECOND): p for t, p in positions}
+    by_size = {
+        round(t * TICKS_PER_SECOND): s
+        for t, (s,) in events(((t, ramp, (s,)) for t, ramp, s in sizes), duration, (0.0,))
+    }
+    position, size = by_position[0], by_size[0]
+    end_tick = round(duration * TICKS_PER_SECOND)
+    merged = []
+    for tick in sorted(by_position.keys() | by_size.keys()):
+        if tick and tick >= end_tick:
             break
-        if events and t <= events[-1][0] + _SAME_TIME:
-            events.pop()
-        if not events or events[-1][1] != position:
-            events.append((t, position))
-    if not events:
-        return [(0.0, timed[0][1] if timed else (0.5, 0.5, 0.0))]
-    events[0] = (0.0, events[0][1])
-    return events
+        position = by_position.get(tick, position)
+        size = by_size.get(tick, size)
+        merged.append((tick / TICKS_PER_SECOND, position, size))
+    return merged
 
 
-def _lerp(a: tuple[float, ...], b: tuple[float, ...], f: float) -> tuple[float, float, float]:
-    return a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f
-
-
-class AdmFile:
-    """Writes the header up front, takes the PCM in order, and the metadata at `close`."""
+class AdmFile(AdmBwf):
+    """The Dolby layout on top of `AdmBwf`: a DirectSpeakers bed and the Objects tracks."""
 
     def __init__(
         self,
@@ -271,7 +233,6 @@ class AdmFile:
         layout: tuple[str, tuple[_Track, ...], tuple[_Track, ...]] | None = None,
         remove_bed_placeholders: bool = False,
     ) -> None:
-        self.target, self.sample_rate, self.length = target, sample_rate, length
         self.program, self.objects = program, objects
         if layout is not None:
             self.bed_name, self.bed, self.others = layout
@@ -285,93 +246,39 @@ class AdmFile:
         self.sources = tuple(t.source for t in self.tracks)
         self.channels = len(self.tracks)
         self.keys: dict[int, list[Key]] = {}
-        self.data_bytes = 0
-        align = self.channels * BIT_DEPTH // 8
-        fmt = struct.pack("<IHHIIHH", 16, 1, self.channels, sample_rate, sample_rate * align, align, BIT_DEPTH)
-        chna = self._chna()
-        header = (
-            b"RIFF" + bytes(4) + b"WAVE"
-            + b"JUNK" + struct.pack("<I", _DS64_SIZE) + bytes(_DS64_SIZE)
-            + b"fmt " + fmt
-            + b"chna" + struct.pack("<I", len(chna)) + chna
-            + b"data" + bytes(4)
-        )
-        self._workspace = output_workspace(target)
-        self.partial = Path(self._workspace.name) / target.name
-        try:
-            self.file = self.partial.open("w+b")
-            try:
-                self.file.write(header)
-            except OSError:
-                self.file.close()
-                raise
-        except OSError:
-            self._workspace.cleanup()
-            raise
-        self.data_start = len(header)
+        self.size_keys: dict[int, list[SizeKey]] = {}
+        self._written_until = 0.0
+        super().__init__(target, sample_rate, length, self.channels, self._chna())
 
-    def append(self, part: Path) -> None:
-        """Copy a run of PCM written by `pcm24` onto the end of the data chunk."""
-        with part.open("rb") as source:
-            shutil.copyfileobj(source, self.file, 1 << 22)
-            self.data_bytes += source.tell()
-
-    def write_pcm(self, data: bytes) -> None:
-        self.file.write(data)
-        self.data_bytes += len(data)
-
-    @property
-    def frames_written(self) -> int:
-        return self.data_bytes // (self.channels * BIT_DEPTH // 8)
-
-    def prepare_readback(self, keys: dict[int, list[Key]]) -> Path:
+    def prepare_readback(
+        self, keys: dict[int, list[Key]], sizes: dict[int, list[SizeKey]] | None = None
+    ) -> Path:
         """Publish the header at the stable, private path owned by playback."""
-        size = self.length * self.channels * BIT_DEPTH // 8
-        self._write_footer(keys, size)
-        self.file.close()
-        self.partial.replace(self.target)
-        self._workspace.cleanup()
-        self.file = self.target.open("r+b")
-        self.file.seek(self.data_start)
-        return self.target
+        self.keys, self.size_keys = keys, sizes or {}
+        self._written_until = self._timeline_time()
+        return super().prepare_readback(self._axml())
 
-    def close(self, keys: dict[int, list[Key]]) -> None:
-        """Finish the file; `keys` are the dynamic objects' positions from the trace."""
-        try:
-            self._write_footer(keys, self.data_bytes)
-            self.file.close()
-            self.partial.replace(self.target)
-        finally:
-            self.discard()
+    def close(self, keys: dict[int, list[Key]], sizes: dict[int, list[SizeKey]] | None = None) -> None:
+        """Finish the file with the dynamic objects' position and size timelines."""
+        self.keys, self.size_keys = keys, sizes or {}
+        super().close(self._axml())
 
-    def _write_footer(self, keys: dict[int, list[Key]], data: int) -> None:
-        self.keys = keys
-        w = self.file
-        w.seek(self.data_start + data)
-        if data % 2:
-            w.write(b"\0")
-        axml = self._axml()
-        w.write(b"axml" + struct.pack("<I", len(axml)) + axml)
-        if len(axml) % 2:
-            w.write(b"\0")
-        riff = w.tell() - 8
-        if riff > _RIFF_LIMIT or data > _RIFF_LIMIT:
-            w.seek(0)
-            w.write(b"RF64" + struct.pack("<I", _RIFF_LIMIT) + b"WAVE")
-            w.write(b"ds64" + struct.pack("<I", _DS64_SIZE))
-            frames = data // (self.channels * BIT_DEPTH // 8)
-            w.write(struct.pack("<QQQI", riff, data, frames, 0))
-            data = _RIFF_LIMIT
-        else:
-            w.seek(4)
-            w.write(struct.pack("<I", riff))
-        w.seek(self.data_start - 4)
-        w.write(struct.pack("<I", data))
-        w.flush()
+    def refresh(self, *, force: bool = False) -> None:
+        """Rewrite the axml from the object timelines collected so far.
 
-    def discard(self) -> None:
-        self.file.close()
-        self._workspace.cleanup()
+        `prepare_readback` stores the caller's dictionaries by reference, so the
+        decoder's growing tracer is already visible here; the gate only bounds how
+        often the whole metadata tree is re-serialized.
+        """
+        grown = self._timeline_time()
+        if not force and self._written_until and grown - self._written_until < _REFRESH_SPAN:
+            return
+        self._written_until = grown
+        super().refresh(self._axml())
+
+    def _timeline_time(self) -> float:
+        """How far the collected object timelines reach, in seconds."""
+        return max((keys[-1][0] for keys in self.keys.values() if keys), default=0.0)
 
     # ---- metadata ----------------------------------------------------------------------
     #
@@ -435,7 +342,7 @@ class AdmFile:
             adm.set("version", "ITU-R_BS.2076-1")
         programme = ET.SubElement(adm, "audioProgramme", {
             "audioProgrammeID": "APR_1001", "audioProgrammeName": "Atmos_Master",
-            "start": _timecode(0), "end": _timecode(duration),
+            "start": timecode(0), "end": timecode(duration),
         })  # fmt: skip
         ET.SubElement(programme, "audioContentIDRef").text = "ACO_1001"
         content = ET.SubElement(adm, "audioContent", {
@@ -449,7 +356,7 @@ class AdmFile:
         for object_id, pack, (_, kind), tracks in elements:
             obj = ET.SubElement(adm, "audioObject", {
                 "audioObjectID": object_id, "audioObjectName": self._object_name(kind, tracks),
-                "start": _timecode(0), "duration": _timecode(duration),
+                "start": timecode(0), "duration": timecode(duration),
             })  # fmt: skip
             ET.SubElement(obj, "audioPackFormatIDRef").text = pack
             for index in tracks:
@@ -477,9 +384,11 @@ class AdmFile:
             else:
                 if track.pinned is not None:
                     keys = [(0.0, 0.0, *track.pinned, True)]
+                    sizes = []
                 else:
                     keys = self.keys.get(track.source, [(0.0, 0.0, 0.5, 0.5, 0.0, True)])
-                self._object_blocks(channel, ids, _events(keys, duration), duration)
+                    sizes = self.size_keys.get(track.source, [])
+                self._object_blocks(channel, ids, _object_events(keys, sizes, duration), duration)
 
         for index, track in enumerate(self.tracks):
             ids = self._track_ids(index)
@@ -540,38 +449,36 @@ class AdmFile:
         if not self.general_adm:
             ET.SubElement(block, "cartesian").text = "1"
         for axis, value in zip(axes, position, strict=True):
-            ET.SubElement(block, "position", {"coordinate": axis}).text = _number(value)
+            ET.SubElement(block, "position", {"coordinate": axis}).text = number(value)
 
     def _object_blocks(
         self,
         channel: ET.Element,
         ids: dict[str, str],
-        events: list[tuple[float, tuple[float, float, float]]],
+        events: list[tuple[float, tuple[float, ...], float]],
         duration: float,
     ) -> None:
         if self.general_adm:
             # Quantize boundaries once so consecutive durations match their rtimes.
             # Keep the last position when events serialize to the same boundary.
-            ticks_per_second = 100_000
-            end_tick = round(duration * ticks_per_second)
-            by_tick = {
-                tick: position
-                for t, position in events
-                if (tick := round(t * ticks_per_second)) < end_tick
-            }
-            events = [(tick / ticks_per_second, position) for tick, position in by_tick.items()]
-            duration = end_tick / ticks_per_second
-        ends = [t for t, _ in events[1:]] + [duration]
-        for n, ((t, position), end) in enumerate(zip(events, ends, strict=True), 1):
+            quantized, duration = quantize(
+                [(t, (position, size)) for t, position, size in events], duration
+            )
+            events = [(t, position, size) for t, (position, size) in quantized]
+        ends = [t for t, _, _ in events[1:]] + [duration]
+        for n, ((t, position, size), end) in enumerate(zip(events, ends, strict=True), 1):
             block = ET.SubElement(channel, "audioBlockFormat", {
                 "audioBlockFormatID": f"AB_{ids['channel'][3:]}_{n:08X}",
-                "rtime": _timecode(t), "duration": _timecode(end - t),
+                "rtime": timecode(t), "duration": timecode(end - t),
             })  # fmt: skip
             ET.SubElement(block, "cartesian").text = "1"
             for axis, value in zip("XYZ", _cartesian(*position), strict=True):
-                ET.SubElement(block, "position", {"coordinate": axis}).text = _number(value)
-            interpolation = "0" if n == 1 else _INTERPOLATION
+                ET.SubElement(block, "position", {"coordinate": axis}).text = number(value)
+            if size > 0:
+                for axis in ("width", "height", "depth"):
+                    ET.SubElement(block, axis).text = number(size)
+            interpolation = "0" if n == 1 else INTERPOLATION
             if self.general_adm and n > 1:
-                interpolation = f"{min(float(_INTERPOLATION), end - t):.6f}"
+                interpolation = f"{min(float(INTERPOLATION), end - t):.6f}"
             jump = ET.SubElement(block, "jumpPosition", interpolationLength=interpolation)
             jump.text = "1"

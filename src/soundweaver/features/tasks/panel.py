@@ -50,7 +50,8 @@ class TasksPage(QWidget):
         return self._worker is not None
 
     def start(self, steps: list[Step]) -> None:
-        assert not self.running
+        if self.running:
+            return
         self._tasks.set_steps(steps)
         worker = self._worker = Worker(steps, self)
         worker.step_started.connect(self._tasks.started)
@@ -96,7 +97,8 @@ class TasksPage(QWidget):
         if (worker := self._worker) is not None:
             self._worker = None
             worker.cancel()
-            worker.wait()
+            if not worker.wait(10_000):
+                logging.getLogger(__name__).warning("task worker still running at exit")
             worker.deleteLater()
         logging.getLogger().removeHandler(self._log_handler)
         self._log_handler.close()

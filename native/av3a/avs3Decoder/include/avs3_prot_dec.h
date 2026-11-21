@@ -70,6 +70,7 @@ void Avs3PostSynthesis(
 
 void Avs3MetadataDec(AVS3DecoderHandle hAvs3Dec);
 
+void Avs3DecodeFloat(AVS3DecoderHandle hAvs3Dec, float synth[MAX_CHANNELS][FRAME_LEN]);
 void Avs3Decode(AVS3DecoderHandle hAvs3Dec, short data[MAX_CHANNELS * FRAME_LEN]);
 
 void Avs3InverseMdctDecoder(AVS3_DEC_CORE_HANDLE hEncCore, float output[BLOCK_LEN_LONG]);

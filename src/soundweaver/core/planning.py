@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from collections import Counter
 from collections.abc import Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
@@ -35,6 +36,19 @@ class OutputPlanner(Protocol):
     def album_plan(
         self, ctx: PlanContext, tracks: Sequence[tuple[Project, list[Step]]]
     ) -> list[Step]: ...
+
+
+@dataclass(slots=True)
+class ExportPlan:
+    """Runnable steps and the files they read or write."""
+
+    steps: list[Step] = field(default_factory=list)
+    inputs: set[Path] = field(default_factory=set)
+    output_dirs: list[Path] = field(default_factory=list)
+
+    @property
+    def targets(self) -> list[Path]:
+        return [target for step in self.steps for target in step.targets]
 
 
 def build_context(

@@ -180,11 +180,8 @@ void Avs3InverseMdctDecoder(AVS3_DEC_CORE_HANDLE hDecCore, float output[BLOCK_LE
     return;
 }
 
-void Avs3Decode(AVS3DecoderHandle hAvs3Dec, short data[MAX_CHANNELS * FRAME_LEN])
+void Avs3DecodeFloat(AVS3DecoderHandle hAvs3Dec, float synth[MAX_CHANNELS][FRAME_LEN])
 {
-    float synth[MAX_CHANNELS][FRAME_LEN];
-    const short frameLength = hAvs3Dec->frameLength;
-    const short nChans = hAvs3Dec->numChansOutput;
 
     // Metadata decoder
     Avs3MetadataDec(hAvs3Dec);
@@ -217,9 +214,12 @@ void Avs3Decode(AVS3DecoderHandle hAvs3Dec, short data[MAX_CHANNELS * FRAME_LEN]
         Avs3MixDec(hAvs3Dec, synth);
     }
 
-    Avs3SynthOutput(synth, frameLength, nChans, data);
-
     hAvs3Dec->initFrame = 0;
+}
 
-    return;
+void Avs3Decode(AVS3DecoderHandle hAvs3Dec, short data[MAX_CHANNELS * FRAME_LEN])
+{
+    float synth[MAX_CHANNELS][FRAME_LEN];
+    Avs3DecodeFloat(hAvs3Dec, synth);
+    Avs3SynthOutput(synth, hAvs3Dec->frameLength, hAvs3Dec->numChansOutput, data);
 }

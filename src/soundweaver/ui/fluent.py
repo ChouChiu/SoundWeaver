@@ -140,7 +140,7 @@ def secondary(label: Any, problem: bool = False) -> None:
 
 def dim() -> QColor:
     """Secondary text colour."""
-    return QColor(255, 255, 255, 140) if isDarkTheme() else QColor(0, 0, 0, 120)
+    return _SECONDARY_DARK if isDarkTheme() else _SECONDARY_LIGHT
 
 
 def focus_stroke_hex(dark: bool | None = None) -> str:
@@ -253,7 +253,7 @@ def set_theme_mode(mode: str) -> None:
 
 def apply_theme(app: QApplication) -> None:
     """Follow the desktop's dark/light scheme, accent colour and UI font, now and on change."""
-    setFontFamilies([app.font().family(), "Noto Sans CJK SC", "Microsoft YaHei UI"])
+    setFontFamilies([app.font().family(), "Segoe UI", "Microsoft YaHei UI", "Noto Sans CJK SC"])
     _sync_theme(app)
     app.styleHints().colorSchemeChanged.connect(lambda _s: _resync_desktop(app))
 

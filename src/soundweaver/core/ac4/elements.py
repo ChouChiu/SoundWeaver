@@ -363,7 +363,7 @@ def five_x_element(r: Reader, lfe: bool) -> Element:
     if mode in (SIMPLE, ASPX):
         if mode == ASPX:
             element.companding = r.companding(("L", "R", "C", "Ls", "Rs"))
-        names = dict(zip("ABCDE", ("L", "R", "C", "Ls", "Rs")))
+        names = dict(zip("ABCDE", ("L", "R", "C", "Ls", "Rs"), strict=False))
         config = _core_five(r, element, names)
         if config in (0, 2):
             element.channels["C"] = mono_data(r, False)

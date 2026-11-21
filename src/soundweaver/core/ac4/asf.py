@@ -316,7 +316,7 @@ def _read_lines(b: BitReader, cb: int, out: np.ndarray, start: int, stop: int) -
         lines = symbols[decode(b)]
         for i, q in enumerate(lines):
             if q and read(1):
-                lines = lines[:i] + (-q,) + lines[i + 1 :]
+                lines = (*lines[:i], -q, *lines[i + 1:])
         lines = tuple(
             (_ext_decode(b) if q > 0 else -_ext_decode(b)) if abs(q) == 16 else q for q in lines
         )
@@ -432,13 +432,13 @@ def _noise_fill(
     snf: dict[int, int], noise: Noise,
 ) -> None:  # fmt: skip
     """Pseudocodes 22 and 23: fill silent bands with noise relative to the band below."""
-    energy = [float(np.dot(scaled[s : s + w], scaled[s : s + w])) for s, w in zip(starts, widths)]
+    energy = [float(np.dot(scaled[s : s + w], scaled[s : s + w])) for s, w in zip(starts, widths, strict=False)]
     previous = -1000.0
-    for e, w in zip(energy, widths):
+    for e, w in zip(energy, widths, strict=False):
         if e > 0:
             previous = 1.44269504 * np.log(e / w)
             break
-    for i, (s, w) in enumerate(zip(starts, widths)):
+    for i, (s, w) in enumerate(zip(starts, widths, strict=False)):
         if energy[i] > 0:
             previous = 1.44269504 * np.log(energy[i] / w)
         elif i in snf and snf[i] != 0:

@@ -72,7 +72,7 @@ class PreviewJob(QThread):
         except ProcessingCancelled:
             self.done.emit(None, "")
             return
-        except Exception as error:  # noqa: BLE001 - shown to the user, the app stays up
+        except Exception as error:
             self.done.emit(None, str(error) or type(error).__name__)
             return
         self.done.emit(self.target, "")
@@ -276,7 +276,7 @@ class PlayerPanel(FeaturePanel):
         layout.addWidget(
             widgets.section(
                 t("section.frame_encoding"),
-                widgets.two_column_grid([
+                widgets.SettingsGrid([
                     (t("label.size"), widgets.size_row(self.width_spin, self.height_spin), t("label.fps"), self.fps),
                     (t("label.encoder"), self.codec, t("label.quality"), self.quality),
                     (t("label.audio"), widgets.hbox(self.audio_mode, self.audio_track), t("label.ui_scale"), self.ui_scale),
@@ -288,7 +288,7 @@ class PlayerPanel(FeaturePanel):
         layout.addWidget(
             widgets.section(
                 t("section.background"),
-                widgets.two_column_grid([
+                widgets.SettingsGrid([
                     (t("label.renderer"), self.background, t("label.color"), self.bg_color),
                     (t("label.flow_speed"), self.flow, t("label.render_scale"), self.render_scale),
                     (t("label.random_seed"), self.seed, None, widgets.hbox(self.beat, self.light_wave)),
@@ -298,7 +298,7 @@ class PlayerPanel(FeaturePanel):
         layout.addWidget(
             widgets.section(
                 t("section.lyrics"),
-                widgets.two_column_grid([
+                widgets.SettingsGrid([
                     (t("label.font_size"), self.lyric_size, t("label.font_weight"), self.font_weight),
                     (t("label.letter_spacing"), self.letter_spacing, t("label.word_fade"), self.word_fade),
                     (t("label.right_padding"), self.lyric_padding, None, widgets.hbox(self.balance)),
@@ -313,7 +313,7 @@ class PlayerPanel(FeaturePanel):
         layout.addWidget(
             widgets.section(
                 t("section.track_info_controls"),
-                widgets.two_column_grid([
+                widgets.SettingsGrid([
                     (t("label.track_title"), self.title_edit, None, None),
                     (t("label.artist"), self.artist_edit, None, None),
                     (t("label.album"), self.album_edit, None, None),
@@ -476,7 +476,8 @@ class PlayerPanel(FeaturePanel):
         if problem:
             self.preview_status.setText(problem)
             return
-        assert project is not None
+        if project is None:
+            return
         spec = preview_spec(self.spec(project))
         ttml = project.ttml
         cover = project.cover if project.cover and project.cover.is_file() else None
@@ -543,7 +544,7 @@ class PlayerPanel(FeaturePanel):
         """
         if self._job is not None:
             self._job.token.cancel()
-            if not self._job.wait(20_000):
+            if not self._job.wait(10_000):
                 logger.warning("player preview still running at exit")
 
     def problem(self, ctx: PlanContext) -> str | None:
@@ -596,7 +597,8 @@ class PlayerPanel(FeaturePanel):
             return []
         queue = []
         for project, _steps in tracks:
-            assert project.audio is not None
+            if project.audio is None:
+                continue
             tags = self.spec(project, True)
             queue.append(
                 QueueTrack(

@@ -556,19 +556,19 @@ def _dequantize(
         (_, fa, sa, na), (_, _, sb_, nb_) = frames
         a = 2 if fa.qmode == 0 else 1
         sig_a, sig_b, noise_a, noise_b = [], [], [], []
-        for qa, qb in zip(sa, sb_):
+        for qa, qb in zip(sa, sb_, strict=False):
             nom = 2.0 ** (qa / a + 1) * SUBBANDS
             sig_a.append(nom / (1 + 2.0 ** (12 - qb / a)))
             sig_b.append(nom / (1 + 2.0 ** (qb / a - 12)))
-        for qa, qb in zip(na, nb_):
+        for qa, qb in zip(na, nb_, strict=False):
             nom = 2.0 ** (6 - qa + 1)
             noise_a.append(nom / (1 + 2.0 ** (12 - qb)))
             noise_b.append(nom / (1 + 2.0 ** (qb - 12)))
         return [(sig_a, noise_a), (sig_b, noise_b)]
-    for ch, f, sig, noise in frames:
+    for _ch, f, sig, noise in frames:
         a = 2 if f.qmode == 0 else 1
         s_out = []
-        for env, q in enumerate(sig):
+        for _env, q in enumerate(sig):
             s = SUBBANDS * 2.0 ** (q / a)
             s_out.append(s)
         out.append((s_out, [2.0 ** (6 - q) for q in noise]))
@@ -586,7 +586,7 @@ def compand(
 ) -> None:  # fmt: skip
     """Clause 5.7.5 in place on QMF matrices at full scale 1; spans are (sb0, sb1, ts0, ts1)."""
     levels = []
-    for q, (sb0, sb1, ts0, ts1) in zip(qs, spans):
+    for q, (sb0, sb1, ts0, ts1) in zip(qs, spans, strict=False):
         part = q[sb0:sb1, ts0:ts1]
         re, im = np.abs(part.real), np.abs(part.imag)
         e = np.maximum(re, im) + 0.5 * np.minimum(re, im)
@@ -610,7 +610,7 @@ def compand(
                 per.append(np.full_like(lv, max(lv.mean(), 1e-12) ** exponent))
             else:
                 per.append(None)
-    for q, g, (sb0, sb1, ts0, ts1) in zip(qs, per, spans):
+    for q, g, (sb0, sb1, ts0, ts1) in zip(qs, per, spans, strict=False):
         if g is not None:
             q[sb0:sb1, ts0:ts1] *= (g * boost)[None, :]
 
@@ -655,7 +655,7 @@ def _patch_map(nb: Bands) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Per subband the HF generator fills: where it copies from, itself, and its chirp group."""
     source, target = [], []
     sb_high = nb.sbx
-    for count, start in zip(nb.patch_count, nb.patch_start):
+    for count, start in zip(nb.patch_count, nb.patch_start, strict=False):
         for i in range(count):
             if sb_high + i >= SUBBANDS:
                 break

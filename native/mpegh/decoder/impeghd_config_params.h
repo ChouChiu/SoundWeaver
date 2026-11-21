@@ -38,6 +38,8 @@
 /* Input Config Params default values */
 #define IMPEGHD_CONFIG_PARAM_PCM_WD_SZ_DFLT_VAL (16)
 #define IMPEGHD_CONFIG_PARAM_MAX_CHANS_DFLT_VAL (24)
+/* Internal float output uses a four-byte word and a distinct format selector. */
+#define IMPEGHD_PCM_FLOAT32 (33)
 #define IMPEGHD_CONFIG_PARAM_MHAS_FLAG_DFLT_VAL (1)
 #define IMPEGHD_CONFIG_PARAM_EFFECT_TYPE_DFLT_VAL (0)
 #define IMPEGHD_CONFIG_PARAM_CICP_IDX_DFLT_VAL (0)

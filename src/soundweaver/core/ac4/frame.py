@@ -334,7 +334,7 @@ class FrameDecoder:
                 spans.append((sb0, sb1, ts0, min(ts1, q[name].shape[1])))
                 mats.append(q[name] / 32768.0)
             aspx.compand(mats, spans, comp.on, comp.avg, comp.sync)
-            for name, m in zip(comp.channels, mats):
+            for name, m in zip(comp.channels, mats, strict=False):
                 q[name] = m * 32768.0
         # A-SPX, jointly for the two channels of a balanced pair; the rest only delayed
         done = set()
@@ -347,7 +347,7 @@ class FrameDecoder:
             if i + 1 < len(names) and element.aspx[names[i + 1]].second:
                 group.append(names[i + 1])
             pairs = [(tools.channel(n), element.aspx[n]) for n in group]
-            for n, y in zip(group, aspx.decode_channels(pairs, [q[n] for n in group])):
+            for n, y in zip(group, aspx.decode_channels(pairs, [q[n] for n in group]), strict=False):
                 q[n] = y
             done.update(group)
         for name, m in list(q.items()):

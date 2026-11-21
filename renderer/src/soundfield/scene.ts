@@ -11,6 +11,7 @@
 
 import * as THREE from "three";
 import type { ViewPreset } from "../shared/api";
+import { SPATIAL_TINT } from "../shared/spatial";
 import { edgePoints, lineMaterial, segments } from "./lines";
 import type { Vec3 } from "./timeline";
 
@@ -19,7 +20,6 @@ export const ROOM_HALF = { x: 2.9, y: 1.55, z: 2.9 };
 // room coordinates +-1 fill this much of the room; the walls are drawn slightly larger
 const POS_FILL = 0.975;
 const ROOM_VISUAL_SCALE = 1.04;
-export const TINT = 0x5c7a99;
 const OBJECT_RADIUS = 0.075;
 
 export function toScene([x, y, z]: Vec3): Vec3 {
@@ -119,62 +119,22 @@ function lights(scene: THREE.Scene): void {
 	}
 }
 
-/**
- * Stand `head` on the floor at the centre, scaled by `scaleFor` its largest
- * dimension.  Its own orientation is kept: turn it to face -Z first.
- */
-export function placeHead(head: THREE.Object3D, scaleFor: (size: number) => number): THREE.Group {
-	head.updateMatrixWorld(true);
-	const box = new THREE.Box3().setFromObject(head);
-	const size = box.getSize(new THREE.Vector3());
-	const centre = box.getCenter(new THREE.Vector3());
-	head.position.sub(new THREE.Vector3(centre.x, box.min.y, centre.z));
-	const pivot = new THREE.Group();
-	pivot.add(head);
-	pivot.scale.setScalar(scaleFor(Math.max(size.x, size.y, size.z) || 1));
-	pivot.position.set(0, -ROOM_HALF.y, 0.05);
-	return pivot;
-}
-
 export function tint(root: THREE.Object3D): void {
 	root.traverse((o) => {
 		const mesh = o as THREE.Mesh;
 		if (!mesh.isMesh) return;
 		for (const m of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) {
 			const std = m as THREE.MeshStandardMaterial;
-			if (std.color) std.color.setHex(TINT);
+			if (std.color) std.color.setHex(SPATIAL_TINT);
 			m.needsUpdate = true;
 		}
 	});
 }
 
-/** Placeholder listener: head, nose towards the front, neck and shoulders. */
-export function silhouette(): THREE.Group {
-	const group = new THREE.Group();
-	const mat = new THREE.MeshStandardMaterial({ color: TINT, roughness: 0.55, metalness: 0.05 });
-	const head = new THREE.Mesh(new THREE.SphereGeometry(0.19, 24, 24), mat);
-	head.position.y = 0.46;
-	group.add(head);
-	const noseMat = mat.clone();
-	noseMat.emissive = new THREE.Color(0x2a4058);
-	noseMat.emissiveIntensity = 0.25;
-	const nose = new THREE.Mesh(new THREE.ConeGeometry(0.045, 0.1, 12), noseMat);
-	nose.rotation.x = -Math.PI / 2;
-	nose.position.set(0, 0.44, -0.185);
-	group.add(nose);
-	const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.085, 0.12, 16), mat);
-	neck.position.y = 0.28;
-	group.add(neck);
-	const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.42, 0.4, 24), mat);
-	torso.position.y = 0.02;
-	group.add(torso);
-	return group;
-}
-
 export function objectMesh(): THREE.Mesh {
 	const mesh = new THREE.Mesh(
 		new THREE.SphereGeometry(OBJECT_RADIUS, 28, 28),
-		new THREE.MeshStandardMaterial({ color: TINT, roughness: 0.4, metalness: 0.1, transparent: true }),
+		new THREE.MeshStandardMaterial({ color: SPATIAL_TINT, roughness: 0.4, metalness: 0.1, transparent: true }),
 	);
 	mesh.renderOrder = 5;
 	return mesh;

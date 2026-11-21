@@ -204,7 +204,9 @@ class Parse:
         return FrameError(len(self.metadata), BitstreamError("the frame would not parse"))
 
 
-def decode_frames(frames: list[bytes], token: CancellationToken) -> Iterator[Decoded]:
+def decode_frames(
+    frames: list[bytes], token: CancellationToken, *, playback: bool = False,
+) -> Iterator[Decoded]:
     """Every frame of `frames` decoded, in order, as one FrameDecoder would decode them."""
     stretches = plan(frames)
     if len(stretches) == 1:
@@ -218,7 +220,8 @@ def decode_frames(frames: list[bytes], token: CancellationToken) -> Iterator[Dec
         def submit(block: bool) -> None:
             """Hand the next stretches to the pool, as far as the parsing has got unless `block`."""
             nonlocal queued
-            while queued < len(stretches) and len(pending) < _AHEAD * _WORKERS:
+            limit = 2 if playback else _AHEAD * _WORKERS
+            while queued < len(stretches) and len(pending) < limit:
                 s = stretches[queued]
                 if not parse.take(s.warm, block):
                     return

@@ -1,7 +1,9 @@
-"""Transparent sound field videos of a Dolby Atmos track, one per chosen track.
+"""Transparent sound field videos of an Atmos or 360RA track, one per chosen track.
 
-The object positions and levels come from the Atmos decoder's trace
-(`core.atmos.trace_atmos`); the room, the listener and the objects are drawn
+The object positions and levels come from the decoder's trace: the Atmos OAMD
+for a Dolby Atmos track (`core.atmos.trace_atmos`), the decoder's own object
+metadata for 360RA (`core.codecs.mpegh_trace`), or the ADM file's objects when
+the source is an ADM BWF.  The room, the listener and the objects are drawn
 by three.js in the headless-browser renderer (`renderer/src/soundfield/`),
 frame by frame on the container's timeline, so the video lines up with the
 audio, the stems and the other videos.
@@ -22,6 +24,8 @@ from pathlib import Path
 
 from soundweaver.core.atmos import PreparedADM, is_adm_bwf, trace_atmos
 from soundweaver.core.cancel import CancellationToken
+from soundweaver.core.codecs.mpegh import is_mpegh_file
+from soundweaver.core.codecs.mpegh_trace import trace_mpegh
 from soundweaver.core.i18n import t
 from soundweaver.core.paths import atomic_output, work_root
 from soundweaver.core.renderer import renderer_script, run_renderer
@@ -117,6 +121,8 @@ def render_soundfield_videos(
             trace = PreparedADM(audio).build_trace(
                 layout, token=token, on_progress=lambda f: on_fraction(f * TRACE_SHARE)
             )
+        elif is_mpegh_file(audio):
+            trace = trace_mpegh(audio, token, lambda f: on_fraction(f * TRACE_SHARE), layout)
         else:
             trace = trace_atmos(audio, token, lambda f: on_fraction(f * TRACE_SHARE), layout)
         share = (1 - TRACE_SHARE) / max(1, len(videos))

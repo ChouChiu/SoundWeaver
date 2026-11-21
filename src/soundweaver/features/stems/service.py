@@ -37,10 +37,6 @@ def mono_channel_target(output_dir: Path, source: Path, channel_name: str) -> Pa
     return output_dir / f"{source.stem}_ch_{channel_name}.wav"
 
 
-def binaural_target(output_dir: Path, source: Path) -> Path:
-    return output_dir / f"{source.stem}_binaural.wav"
-
-
 def av3a_target(output_dir: Path, source: Path) -> Path:
     return output_dir / f"{source.stem}.av3a"
 
@@ -58,25 +54,20 @@ def split_stems(
     multichannel: str = "none",
     mono_channels: tuple[str, ...] = (),
     cicp: int = 13,
-    binaural: bool = False,
     av3a_encode: bool = False,
     hoa_order: int = 0,
+    length: int | None = None,
     token: CancellationToken,
     report: Report,
 ) -> list[str]:
-    """Write stems, ADM BWF, multichannel, mono, stereo binaural HRTF, and/or `.av3a` encode."""
+    """Write stems, ADM BWF, multichannel, mono, and/or `.av3a` encode."""
     need_pcm = (
         bool(kinds)
         or multichannel != "none"
         or bool(mono_channels)
-        or binaural
         or av3a_encode
     )
     if atmos and is_adm_bwf(source):
-        if binaural and not bool(kinds) and multichannel == "none" and not mono_channels and not av3a_encode:
-            report(10, t("stems.writing", label="Binaural"))
-            av3a.render_binaural_file(source, binaural_target(output_dir, source), token=token)
-            return []
         if not need_pcm:
             return []
         prepared = PreparedADM(source)
@@ -98,10 +89,13 @@ def split_stems(
         )  # fmt: skip
         audio, start = decoded.speakers, _ATMOS_DECODE
     elif mpegh.is_mpegh_file(source):
-        if not need_pcm:
+        if not need_pcm and adm is None:
             return []
-        report(0, t("step.decode_audio"))
-        audio, start = mpegh.decode_mpegh(source, token, cicp=cicp), _DECODE
+        report(0, t("step.decode_mpegh_adm") if adm is not None else t("step.decode_audio"))
+        audio = mpegh.decode_mpegh(
+            source, token, cicp=cicp, adm=adm, pcm=need_pcm, length=length
+        )
+        start = _DECODE
     else:
         if adm is not None and not atmos:
             raise ValueError(t("error.adm_needs_atmos"))
@@ -132,33 +126,6 @@ def split_stems(
                     audio.bit_depth,
                 )
                 write_wav(mono_channel_target(output_dir, source, ch_name), mono, token)
-        if binaural:
-            report(max(start, 95), t("stems.writing", label="Binaural"))
-            if adm is not None and adm.is_file():
-                av3a.render_binaural_file(adm, binaural_target(output_dir, source), token=token)
-            elif is_adm_bwf(source):
-                av3a.render_binaural_file(source, binaural_target(output_dir, source), token=token)
-            else:
-                bin_hoa = hoa_order
-                spk_names: list[str] | None = None
-                if mpegh.is_mpegh_file(source):
-                    spk_names = list(mpegh.cicp_layout(cicp).binaural_names[:audio.channels])
-                elif av3a.is_av3a_file(source) and bin_hoa == 0:
-                    av_info = av3a.probe_av3a(source, quick=True)
-                    if av_info.hoa_order > 0:
-                        bin_hoa = av_info.hoa_order
-                    elif av_info.channel_order and av_info.object_count == 0:
-                        spk_names = [c.strip() for c in av_info.channel_order.split(",") if c.strip()]
-                elif speakers is not None:
-                    spk_names = list(speakers.channels)
-                bin_audio = av3a.render_binaural_audio(
-                    audio,
-                    speakers=None if bin_hoa > 0 else spk_names,
-                    hoa_order=bin_hoa,
-                    token=token,
-                )
-                with bin_audio:
-                    write_wav(binaural_target(output_dir, source), bin_audio, token)
         if av3a_encode:
             report(max(start, 95), t("stems.writing", label="Audio Vivid (AV3A)"))
             av3a.encode_av3a(
@@ -183,11 +150,11 @@ def split_step(
     multichannel: str = "none",
     mono_channels: tuple[str, ...] = (),
     cicp: int = 13,
-    binaural: bool = False,
     av3a_encode: bool = False,
     hoa_order: int = 0,
+    length: int | None = None,
 ) -> Step:
-    """Write stems and optional ADM / multichannel / mono / Binaural / AV3A outputs into `output_dir`."""
+    """Write stems and optional ADM / multichannel / mono / AV3A outputs into `output_dir`."""
 
     def run(token: CancellationToken, report: Report) -> str:
         notes = split_stems(
@@ -202,9 +169,9 @@ def split_step(
             multichannel=multichannel,
             mono_channels=mono_channels,
             cicp=cicp,
-            binaural=binaural,
             av3a_encode=av3a_encode,
             hoa_order=hoa_order,
+            length=length,
             token=token,
             report=report,
         )
@@ -215,8 +182,6 @@ def split_step(
             names.append(f"{speakers.name if speakers else 'Multi'} {multichannel.upper()}")
         if mono_channels:
             names.append(t("stems.mono_channels_count", count=len(mono_channels)))
-        if binaural:
-            names.append("Binaural")
         if av3a_encode:
             names.append("AV3A")
         return t("common.clause_sep").join([t("common.list_sep").join(names), *notes])
@@ -228,8 +193,6 @@ def split_step(
         targets.append(multichannel_target(output_dir, source, speakers, multichannel))
     if mono_channels:
         targets.extend(mono_channel_target(output_dir, source, ch) for ch in mono_channels)
-    if binaural:
-        targets.append(binaural_target(output_dir, source))
     if av3a_encode:
         targets.append(av3a_target(output_dir, source))
     return Step(t("step.stems_split"), run, tuple(targets))

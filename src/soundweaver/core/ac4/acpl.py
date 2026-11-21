@@ -229,7 +229,7 @@ class Module:
         diffs, values = data.params[name]
         prev = self.q_prev.get(name, np.zeros(bands))
         out = []
-        for diff, v in zip(diffs, values):
+        for diff, v in zip(diffs, values, strict=False):
             v = np.asarray(v, dtype=float)
             q = np.cumsum(v) if diff == 0 else prev[: len(v)] + v
             out.append(q)
@@ -296,7 +296,7 @@ def _alpha_beta(module: Module, data: AcplData, config: AcplConfig, alpha: str, 
         (_ALPHA_COARSE, _IBETA_COARSE, _BETA_COARSE, 16) if coarse else (_ALPHA_FINE, _IBETA_FINE, _BETA_FINE, 32)
     )  # fmt: skip
     alphas, betas = [], []
-    for a, b in zip(qa, qb):
+    for a, b in zip(qa, qb, strict=False):
         ai = np.clip(a, 0, top).astype(int)
         bi = np.clip(b, 0, b_tab.shape[0] - 1).astype(int)
         da, db = np.asarray(a_tab)[ai], b_tab[bi, np.asarray(i_tab)[ai]]

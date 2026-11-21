@@ -11,12 +11,16 @@ order by `Tracer`; the levels need the rebuilt audio, so each decode worker
 
 from __future__ import annotations
 
+import logging
 import math
+import pickle
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 
+from soundweaver.core.paths import atomic_output
 from soundweaver.core.speakers import SpeakerLayout
 
 from .oamd import Frame, Program
@@ -27,8 +31,15 @@ from .sinks import RenderedFrame
 SILENCE_DB = -120.0
 
 Key = tuple[float, float, float, float, float, bool]
+SizeKey = tuple[float, float, float]  # start, ramp, normalized size
 # per dynamic object of one frame: (OAMD index, peak dBFS, share of energy per speaker)
 Measure = list[tuple[int, float, np.ndarray | None]]
+
+logger = logging.getLogger(__name__)
+
+# File names of every trace cache end with this; pruning walks the whole family.
+TRACE_SUFFIX = ".trace.pickle"
+KEEP_TRACES = 16
 
 
 @dataclass(slots=True)
@@ -48,10 +59,11 @@ class ObjectTrace:
     level_start: float  # container time of the first level
     level_step: float  # seconds per level
     duration: float
-    program: Program
     objects: tuple[ObjectPath, ...]
     # the speakers the shares are of, in column order
     speakers: tuple[str, ...]
+    # the Atmos programme the objects came from; a 360RA restore has none
+    program: Program | None = None
 
     def to_json(self, speakers: Collection[str] | None = None) -> dict:
         """The scene for the renderer.
@@ -89,6 +101,30 @@ def _within(path: ObjectPath, columns: list[int]) -> list[float]:
     with np.errstate(divide="ignore"):
         db = path.levels + 10 * np.log10(share)
     return [round(float(v), 1) for v in np.maximum(SILENCE_DB, np.nan_to_num(db, nan=SILENCE_DB))]
+
+
+def load_cached_trace(path: Path, expected_channels: Collection[str], *, component: str) -> ObjectTrace | None:
+    """Read a pickled trace cache, discarding unreadable or layout-mismatched files."""
+    try:
+        with path.open("rb") as file:
+            trace = pickle.load(file)
+    except FileNotFoundError:
+        return None
+    except Exception:
+        logger.warning("%s: discarding unreadable trace cache %s", component, path, exc_info=True)
+        path.unlink(missing_ok=True)
+        return None
+    fits = isinstance(trace, ObjectTrace) and trace.speakers == expected_channels
+    return trace if fits else None
+
+
+def store_cached_trace(trace: ObjectTrace, path: Path, *, suffix: str) -> None:
+    """Pickle a trace atomically and prune that cache family (by `suffix`) to `KEEP_TRACES`."""
+    with atomic_output(path) as partial, partial.open("wb") as file:
+        pickle.dump(trace, file, protocol=pickle.HIGHEST_PROTOCOL)
+    old = sorted(path.parent.glob("*" + suffix), key=lambda p: p.stat().st_mtime)
+    for stale in old[:-KEEP_TRACES]:
+        stale.unlink(missing_ok=True)
 
 
 def measure(f: RenderedFrame) -> Measure:
@@ -129,6 +165,7 @@ class Tracer:
             samples,
         )
         self.keys: dict[int, list[Key]] = {}
+        self.size_keys: dict[int, list[SizeKey]] = {}
         self.program: Program | None = None
 
     def metadata(self, k: int, meta: Frame) -> None:
@@ -145,7 +182,15 @@ class Tracer:
                     z = 0.0
                 active = u.active and u.gain_db != -math.inf
                 t = (k * self.samples + u.start - self.first) / self.sample_rate
-                key = (t, u.ramp / self.sample_rate, x, y, z, active)
+                ramp = u.ramp / self.sample_rate
+                size = max(u.render.size)
+                if size or index in self.size_keys:
+                    sizes = self.size_keys.setdefault(index, [])
+                    if not sizes and keys:
+                        sizes.append((keys[0][0], 0.0, 0.0))
+                    if not sizes or sizes[-1][2] != size:
+                        sizes.append((t, ramp, size))
+                key = (t, ramp, x, y, z, active)
                 if not keys or keys[-1][2:] != key[2:]:
                     keys.append(key)
 
